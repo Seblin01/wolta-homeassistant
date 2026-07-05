@@ -707,3 +707,35 @@ async def test_backward_compat_plain_string_solar(hass: HomeAssistant, mock_entr
         assert coordinator._entity_map["batt_in"] == ["sensor.batt_in"]
         # Must complete without error
         await coordinator._async_update_data()
+
+
+# ---------------------------------------------------------------------------
+# Dynamic polling: fast while a server-side job is pending, slow when done
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_interval_fast_while_pending_slow_when_done(hass: HomeAssistant, mock_entry):
+    """While /results reports a running job the coordinator polls fast (~60s) so the grade
+    appears quickly; once done it returns to the slow 6h cadence."""
+    from custom_components.wolta.coordinator import _FAST_POLL, _SLOW_POLL
+
+    bookmark = (NOW - timedelta(hours=2)).isoformat()
+    # last_recompute today → _maybe_recompute won't fire (< 7 days)
+    store = {"last_uploaded_ts": bookmark, "last_recompute": NOW.date().isoformat()}
+
+    async def _run(results):
+        client = _mock_client(results=results)
+        with (
+            patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+            patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+            patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+            patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+            patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        ):
+            coordinator = await _make_coordinator(hass, mock_entry, client, store_state=dict(store))
+            await coordinator._async_update_data()
+            return coordinator.update_interval
+
+    assert await _run(RESULTS_PENDING) == _FAST_POLL
+    assert await _run(RESULTS_PAYLOAD) == _SLOW_POLL

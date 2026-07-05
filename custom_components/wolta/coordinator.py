@@ -40,6 +40,11 @@ from .stats import (
 _LOGGER = logging.getLogger(__name__)
 
 # How far back to backfill on first install
+# Polling-takt: lugn i vila, snabb medan en server-side-beräkning pågår (så betyget
+# dyker upp strax efter att workern blivit klar i stället för vid nästa 6h-poll).
+_SLOW_POLL = timedelta(hours=6)
+_FAST_POLL = timedelta(seconds=60)
+
 _BACKFILL_DAYS = 365
 
 # Short-term statistics window — data older than this is only in LTS
@@ -92,7 +97,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER,
             name="wolta",
             config_entry=entry,
-            update_interval=timedelta(hours=6),
+            update_interval=_SLOW_POLL,
         )
         self.token: str = entry.data[CONF_TOKEN]
         self._zone: str = entry.data[CONF_ZONE]
@@ -163,12 +168,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 if last_uploaded_str
                 else None
             )
-            return WoltaData(
+            data = WoltaData(
                 results=results,
                 last_uploaded=last_uploaded,
                 n_days=results["period"]["n_days"],
                 pending=results.get("status") in ("pending", "running"),
             )
+            # Poll fast medan en server-side-beräkning pågår så betyget dyker upp inom ~en
+            # minut i stället för upp till 6 h; tillbaka till den lugna takten när den är klar.
+            self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
+            return data
 
         except WoltaAuthError as err:
             raise ConfigEntryAuthFailed from err

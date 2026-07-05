@@ -37,18 +37,23 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Handle button press — trigger server-side recompute."""
+        """Trigger a server-side recompute if allowed, and ALWAYS refresh the shown
+        results so the latest grade appears (the grade only changes ~weekly, so most
+        presses just need a refresh)."""
         try:
             await self.coordinator.async_trigger_recompute()
-        except WoltaRateLimitError as err:
-            raise HomeAssistantError(
-                "Wolta begränsar just nu förfrågningar – försök igen senare "
-                f"(retry after {err.retry_after}s)."
-            ) from err
+        except WoltaRateLimitError:
+            # Redan omräknat nyligen (cooldown, max 1/dygn) – ingen ny beräkning behövs.
+            # Hämta bara färska resultat så användaren ser senaste betyget, utan felruta.
+            await self.coordinator.async_request_refresh()
+            return
         except WoltaApiError as err:
             raise HomeAssistantError(
                 "Wolta kunde inte räkna om just nu – försök igen senare."
             ) from err
+        # Omräkning köad → hämta färska resultat direkt (koordinatorns snabb-polling tar
+        # vid tills beräkningen är klar).
+        await self.coordinator.async_request_refresh()
 
 
 async def async_setup_entry(

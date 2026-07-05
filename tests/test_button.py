@@ -20,6 +20,7 @@ def _make_coordinator(raise_on_recompute=None) -> WoltaCoordinator:
     coord = MagicMock(spec=WoltaCoordinator)
     coord.data = MagicMock(spec=WoltaData)
     coord.async_trigger_recompute = AsyncMock(side_effect=raise_on_recompute)
+    coord.async_request_refresh = AsyncMock()
     return coord
 
 
@@ -39,25 +40,28 @@ def _make_button(coord: WoltaCoordinator) -> WoltaRecomputeButton:
 
 @pytest.mark.asyncio
 async def test_button_press_calls_recompute():
-    """press() calls coordinator.async_trigger_recompute once."""
+    """press() calls recompute AND refreshes results so the latest grade shows."""
     coord = _make_coordinator()
     btn = _make_button(coord)
     await btn.async_press()
     coord.async_trigger_recompute.assert_awaited_once()
+    coord.async_request_refresh.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
-# rate-limit → HomeAssistantError
+# rate-limit (cooldown) → silent refresh, NO error toast
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_button_press_rate_limit_raises_homeassistant_error():
-    """WoltaRateLimitError from recompute → HomeAssistantError (friendly message)."""
+async def test_button_press_rate_limit_refreshes_without_error():
+    """A recompute cooldown (429) must NOT raise a scary error — the grade is already
+    computed; the button just refreshes the shown results."""
     coord = _make_coordinator(raise_on_recompute=WoltaRateLimitError(retry_after=3600))
     btn = _make_button(coord)
-    with pytest.raises(HomeAssistantError, match="[Rr]ate|[Bb]egränsa|[Ff]örsök"):
-        await btn.async_press()
+    # Must not raise
+    await btn.async_press()
+    coord.async_request_refresh.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
