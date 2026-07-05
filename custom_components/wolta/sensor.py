@@ -99,15 +99,15 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_betyg_available,
         attr_fn=lambda data: (
             {
-                "diagnos": ((data.results.get("betyg") or {}).get("holistic") or {}).get(
-                    "diagnos"
-                ),
-                "peer_percentile": (
-                    (data.results.get("betyg") or {}).get("holistic") or {}
-                ).get("peer_percentile"),
-                "mal": ((data.results.get("betyg") or {}).get("holistic") or {}).get(
-                    "mal"
-                ),
+                "peer_percentil": (
+                    (data.results.get("betyg") or {}).get("peer") or {}
+                ).get("percentile"),
+                "peer_n": (
+                    (data.results.get("betyg") or {}).get("peer") or {}
+                ).get("n"),
+                "gap_sek": (data.results.get("betyg") or {}).get("gap_sek"),
+                "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
+                "komponenter": (data.results.get("betyg") or {}).get("components"),
             }
             if _betyg_available(data.results)
             else {"orsak": "för lite data för betyg"}
@@ -170,8 +170,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "breakeven_date": (data.results.get("history") or {}).get(
                     "breakeven_date"
                 ),
-                "breakeven_years": (data.results.get("history") or {}).get(
-                    "breakeven_years"
+                "breakeven_total_years": (data.results.get("history") or {}).get(
+                    "breakeven_total_years"
                 ),
             }
             if _history_available(data.results)

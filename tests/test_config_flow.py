@@ -387,6 +387,113 @@ def test_default_share_is_false() -> None:
 
 
 # ---------------------------------------------------------------------------
+# C1: battery defaults are non-zero and min_val > 0
+# ---------------------------------------------------------------------------
+
+
+def test_battery_defaults_nonzero() -> None:
+    """DEFAULT_BATTERY_KWH and DEFAULT_BATTERY_KW must be > 0 to avoid 422."""
+    from custom_components.wolta.const import (
+        DEFAULT_BATTERY_KW,
+        DEFAULT_BATTERY_KWH,
+        MIN_BATTERY_KW,
+        MIN_BATTERY_KWH,
+    )
+
+    assert DEFAULT_BATTERY_KWH > 0, "DEFAULT_BATTERY_KWH must be > 0"
+    assert DEFAULT_BATTERY_KW > 0, "DEFAULT_BATTERY_KW must be > 0"
+    assert MIN_BATTERY_KWH > 0, "MIN_BATTERY_KWH must be > 0"
+    assert MIN_BATTERY_KW > 0, "MIN_BATTERY_KW must be > 0"
+
+
+# ---------------------------------------------------------------------------
+# C1: 422 → invalid_input (not cannot_connect)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_422_shows_invalid_input(hass: HomeAssistant) -> None:
+    """HTTP 422 from create_profile (bad battery params) → invalid_input error."""
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = MagicMock()
+    mock_client.create_profile = AsyncMock(
+        side_effect=WoltaApiError("HTTP 422 from .../profile: ...", status=422)
+    )
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "privacy"
+    assert result["errors"].get("base") == "invalid_input"
+
+
+@pytest.mark.asyncio
+async def test_non422_api_error_shows_cannot_connect(hass: HomeAssistant) -> None:
+    """HTTP 500 (or other non-422) from create_profile → cannot_connect error."""
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = MagicMock()
+    mock_client.create_profile = AsyncMock(
+        side_effect=WoltaApiError("HTTP 500 from .../profile: ...", status=500)
+    )
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "privacy"
+    assert result["errors"].get("base") == "cannot_connect"
+
+
+# ---------------------------------------------------------------------------
 # Reauth flow
 # ---------------------------------------------------------------------------
 

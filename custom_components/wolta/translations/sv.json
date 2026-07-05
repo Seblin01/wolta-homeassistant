@@ -43,6 +43,7 @@
     },
     "error": {
       "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
+      "invalid_input": "Ogiltig batterikonfiguration – batterikapacitet och effekt måste båda vara större än noll.",
       "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
       "unknown": "Oväntat fel"
     },

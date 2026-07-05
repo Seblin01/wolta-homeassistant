@@ -43,6 +43,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
+      "invalid_input": "Invalid battery configuration – battery capacity and power must both be greater than zero.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "unknown": "Unexpected error"
     },

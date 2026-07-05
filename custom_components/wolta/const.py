@@ -17,8 +17,10 @@ CONF_SHARE = "share"
 
 # Defaults
 DEFAULT_ZONE = "SE3"
-DEFAULT_BATTERY_KWH = 0.0
-DEFAULT_BATTERY_KW = 0.0
+DEFAULT_BATTERY_KWH = 10.0
+DEFAULT_BATTERY_KW = 5.0
+MIN_BATTERY_KWH = 0.1
+MIN_BATTERY_KW = 0.1
 DEFAULT_EFF = 0.9
 # Privacy opt-in – must default to False (users must explicitly opt in to sharing)
 DEFAULT_SHARE = False

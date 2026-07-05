@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import WoltaRateLimitError
+from .api import WoltaApiError, WoltaRateLimitError
 from .const import DOMAIN
 from .coordinator import WoltaCoordinator
 
@@ -44,6 +44,10 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
             raise HomeAssistantError(
                 "Wolta begränsar just nu förfrågningar – försök igen senare "
                 f"(retry after {err.retry_after}s)."
+            ) from err
+        except WoltaApiError as err:
+            raise HomeAssistantError(
+                "Wolta kunde inte räkna om just nu – försök igen senare."
             ) from err
 
 

@@ -8,7 +8,7 @@ import pytest
 
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.wolta.api import WoltaRateLimitError
+from custom_components.wolta.api import WoltaApiError, WoltaRateLimitError
 from custom_components.wolta.button import WoltaRecomputeButton
 from custom_components.wolta.coordinator import WoltaCoordinator, WoltaData
 
@@ -57,6 +57,22 @@ async def test_button_press_rate_limit_raises_homeassistant_error():
     coord = _make_coordinator(raise_on_recompute=WoltaRateLimitError(retry_after=3600))
     btn = _make_button(coord)
     with pytest.raises(HomeAssistantError, match="[Rr]ate|[Bb]egränsa|[Ff]örsök"):
+        await btn.async_press()
+
+
+# ---------------------------------------------------------------------------
+# M3: WoltaApiError (e.g. 422) → HomeAssistantError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_button_press_api_error_raises_homeassistant_error():
+    """WoltaApiError (e.g. 422 / cooldown) → HomeAssistantError, not raw exception."""
+    coord = _make_coordinator(
+        raise_on_recompute=WoltaApiError("HTTP 422 from .../recompute: cooldown", status=422)
+    )
+    btn = _make_button(coord)
+    with pytest.raises(HomeAssistantError):
         await btn.async_press()
 
 

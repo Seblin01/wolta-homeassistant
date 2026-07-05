@@ -38,10 +38,14 @@ from .const import (
     CONF_SOLAR,
     CONF_TOKEN,
     CONF_ZONE,
+    DEFAULT_BATTERY_KW,
+    DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
     DEFAULT_SHARE,
     DEFAULT_ZONE,
     DOMAIN,
+    MIN_BATTERY_KW,
+    MIN_BATTERY_KWH,
     SUPPORTED_ZONES,
 )
 
@@ -163,11 +167,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required(CONF_ZONE, default=DEFAULT_ZONE): _zone_selector(),
-                vol.Required(CONF_BATTERY_KWH, default=0.0): _number_selector(
-                    min_val=0.0, max_val=500.0, step=0.5, unit="kWh"
+                vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
+                    min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
                 ),
-                vol.Required(CONF_BATTERY_KW, default=0.0): _number_selector(
-                    min_val=0.0, max_val=100.0, step=0.1, unit="kW"
+                vol.Required(CONF_BATTERY_KW, default=DEFAULT_BATTERY_KW): _number_selector(
+                    min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"
                 ),
                 vol.Required(CONF_EFF, default=DEFAULT_EFF): _number_selector(
                     min_val=0.5, max_val=1.0, step=0.01
@@ -257,7 +261,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
-                errors["base"] = "cannot_connect"
+                if getattr(err, "status", None) == 422:
+                    errors["base"] = "invalid_input"
+                else:
+                    errors["base"] = "cannot_connect"
             else:
                 unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
                 await self.async_set_unique_id(unique_id)
@@ -331,7 +338,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Reauth failed – could not create Wolta profile: %s", err)
-                errors["base"] = "cannot_connect"
+                if getattr(err, "status", None) == 422:
+                    errors["base"] = "invalid_input"
+                else:
+                    errors["base"] = "cannot_connect"
             else:
                 return self.async_update_reload_and_abort(
                     reauth_entry,

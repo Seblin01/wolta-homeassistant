@@ -17,6 +17,10 @@ MAX_ROWS_PER_PUT = 40_000
 class WoltaApiError(Exception):
     """Base error for all Wolta API problems."""
 
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class WoltaAuthError(WoltaApiError):
     """404 – profile token purged or unknown; integration should re-authenticate."""
@@ -76,7 +80,7 @@ class WoltaApiClient:
                 raise WoltaRateLimitError(retry_after=retry_after)
             if not (200 <= resp.status < 300):
                 body = await resp.text()
-                raise WoltaApiError(f"HTTP {resp.status} from {url}: {body}")
+                raise WoltaApiError(f"HTTP {resp.status} from {url}: {body}", status=resp.status)
             # Return JSON body for 2xx responses (None for no-content)
             if resp.status == 204:
                 return None

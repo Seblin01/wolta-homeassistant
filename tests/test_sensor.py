@@ -26,18 +26,29 @@ RESULTS_FULL = {
         "n_days": 150,
     },
     "betyg": {
+        "score_pct": 82.0,
         "holistic": {
             "score_on": 0.82,
-            "diagnos": "Bra timing, kan optimeras mer på morgontimmarna.",
-            "peer_percentile": 68,
-            "mal": "score_on >= 0.90",
-        }
+            "score_off": 0.61,
+            "measured_total_sek": 9800.0,
+            "model_total_on_sek": 11200.0,
+            "model_total_off_sek": 7100.0,
+            "wear_ore": 12.5,
+        },
+        "price_skill": 0.74,
+        "gap_sek": 1400.0,
+        "peer": {"n": 312, "percentile": 68},
+        "components": [
+            {"key": "timing", "label": "Laddtidpunkt", "captured": 0.80, "possible": 1.0, "possible_on": 0.95},
+        ],
+        "worst_days": [],
     },
     "decision": {
         "avg_annual_sek": 12500.0,
         "irr": 0.073,
         "payback_years": 8.5,
-        "verdict": "keep",
+        "effective_capex": 85000.0,
+        "years": [],
     },
     "history": {
         "yearly": [
@@ -45,7 +56,9 @@ RESULTS_FULL = {
             {"year": 2025, "total_sek": 12200.0},
         ],
         "breakeven_date": "2030-06-01",
-        "breakeven_years": 5.5,
+        "breakeven_total_years": 5.5,
+        "savings_today_sek": 18000.0,
+        "paid_sek": 12500.0,
     },
 }
 
@@ -58,12 +71,20 @@ RESULTS_EUR = {
         "n_days": 150,
     },
     "betyg": {
+        "score_pct": 75.0,
         "holistic": {
             "score_on": 0.75,
-            "diagnos": "Goed timing.",
-            "peer_percentile": 55,
-            "mal": "score_on >= 0.90",
-        }
+            "score_off": 0.55,
+            "measured_total_sek": 800.0,
+            "model_total_on_sek": 950.0,
+            "model_total_off_sek": 600.0,
+            "wear_ore": 10.0,
+        },
+        "price_skill": 0.68,
+        "gap_sek": 150.0,
+        "peer": {"n": 200, "percentile": 55},
+        "components": [],
+        "worst_days": [],
     },
     "decision": None,
     "history": None,
@@ -83,12 +104,20 @@ RESULTS_NO_DECISION = {
     "currency": "SEK",
     "period": {"start": "2025-01-01", "end": "2025-05-31", "n_days": 150},
     "betyg": {
+        "score_pct": 80.0,
         "holistic": {
             "score_on": 0.80,
-            "diagnos": "OK.",
-            "peer_percentile": 60,
-            "mal": "score_on >= 0.90",
-        }
+            "score_off": 0.58,
+            "measured_total_sek": 8000.0,
+            "model_total_on_sek": 9500.0,
+            "model_total_off_sek": 6000.0,
+            "wear_ore": 11.0,
+        },
+        "price_skill": 0.70,
+        "gap_sek": 1500.0,
+        "peer": {"n": 280, "percentile": 60},
+        "components": [],
+        "worst_days": [],
     },
     "decision": None,
     "history": None,
@@ -99,18 +128,27 @@ RESULTS_NO_HISTORY = {
     "currency": "SEK",
     "period": {"start": "2025-01-01", "end": "2025-05-31", "n_days": 150},
     "betyg": {
+        "score_pct": 80.0,
         "holistic": {
             "score_on": 0.80,
-            "diagnos": "OK.",
-            "peer_percentile": 60,
-            "mal": "score_on >= 0.90",
-        }
+            "score_off": 0.58,
+            "measured_total_sek": 8000.0,
+            "model_total_on_sek": 9500.0,
+            "model_total_off_sek": 6000.0,
+            "wear_ore": 11.0,
+        },
+        "price_skill": 0.70,
+        "gap_sek": 1500.0,
+        "peer": {"n": 280, "percentile": 60},
+        "components": [],
+        "worst_days": [],
     },
     "decision": {
         "avg_annual_sek": 11000.0,
         "irr": 0.065,
         "payback_years": 9.0,
-        "verdict": "keep",
+        "effective_capex": 75000.0,
+        "years": [],
     },
     "history": None,
 }
@@ -170,11 +208,23 @@ def test_optimeringsbetyg_unit():
 
 
 def test_optimeringsbetyg_attributes():
+    """Attributes must use real API keys; stale keys (diagnos/mal) must be absent."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     attrs = s.extra_state_attributes
-    assert "diagnos" in attrs
-    assert "peer_percentile" in attrs
-    assert "mal" in attrs
+    # Real keys present
+    assert "peer_percentil" in attrs
+    assert attrs["peer_percentil"] == 68
+    assert "peer_n" in attrs
+    assert attrs["peer_n"] == 312
+    assert "gap_sek" in attrs
+    assert attrs["gap_sek"] == pytest.approx(1400.0)
+    assert "price_skill" in attrs
+    assert attrs["price_skill"] == pytest.approx(0.74)
+    assert "komponenter" in attrs
+    # Stale keys must NOT be present
+    assert "diagnos" not in attrs
+    assert "mal" not in attrs
+    assert "peer_percentile" not in attrs
 
 
 def test_optimeringsbetyg_unavailable_when_betyg_none():
@@ -286,10 +336,16 @@ def test_facit_i_ar_unit_sek():
 
 
 def test_facit_i_ar_attributes():
+    """Attributes expose breakeven_total_years (not breakeven_years) and breakeven_date."""
     s = _sensor("facit_i_ar", RESULTS_FULL)
     attrs = s.extra_state_attributes
     assert "yearly" in attrs
     assert "breakeven_date" in attrs
+    assert attrs["breakeven_date"] == "2030-06-01"
+    assert "breakeven_total_years" in attrs
+    assert attrs["breakeven_total_years"] == pytest.approx(5.5)
+    # Old stale key must NOT be present
+    assert "breakeven_years" not in attrs
 
 
 def test_facit_i_ar_unavailable_when_history_none():

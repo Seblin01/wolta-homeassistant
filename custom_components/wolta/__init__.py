@@ -21,8 +21,8 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Wolta from a config entry."""
     coordinator = WoltaCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    await coordinator.async_config_entry_first_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

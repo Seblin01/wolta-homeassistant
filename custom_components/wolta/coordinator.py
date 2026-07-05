@@ -73,7 +73,7 @@ class WoltaData:
     pending: bool  # server-side job running
 
 
-type WoltaConfigEntry = ConfigEntry[WoltaData]
+type WoltaConfigEntry = ConfigEntry[WoltaCoordinator]
 
 
 # ---------------------------------------------------------------------------
