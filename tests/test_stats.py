@@ -11,6 +11,7 @@ from custom_components.wolta.stats import (
     aggregate_5min_to_15min,
     merge_streams,
     split_hour_to_quarters,
+    sum_quarter_dicts,
 )
 
 
@@ -307,3 +308,52 @@ class TestMergeStreams:
         t0 = datetime.fromisoformat(rows[0]["ts"])
         t1 = datetime.fromisoformat(rows[1]["ts"])
         assert t0 < t1
+
+
+# ---------------------------------------------------------------------------
+# sum_quarter_dicts
+# ---------------------------------------------------------------------------
+
+
+class TestSumQuarterDicts:
+    """sum_quarter_dicts merges multiple per-15-min-bucket dicts by summing values."""
+
+    def _base(self) -> datetime:
+        return datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+    def test_empty_list_returns_empty_dict(self):
+        result = sum_quarter_dicts([])
+        assert result == {}
+
+    def test_single_dict_returned_as_is(self):
+        b = self._base()
+        d = {b: 1.5, b.replace(minute=15): 2.0}
+        result = sum_quarter_dicts([d])
+        assert result[b] == pytest.approx(1.5)
+        assert result[b.replace(minute=15)] == pytest.approx(2.0)
+
+    def test_two_dicts_overlapping_timestamps_summed(self):
+        b = self._base()
+        d1 = {b: 1.0, b.replace(minute=15): 2.0}
+        d2 = {b: 3.0, b.replace(minute=30): 0.5}
+        result = sum_quarter_dicts([d1, d2])
+        assert result[b] == pytest.approx(4.0)                        # overlapping: 1.0 + 3.0
+        assert result[b.replace(minute=15)] == pytest.approx(2.0)     # only in d1
+        assert result[b.replace(minute=30)] == pytest.approx(0.5)     # only in d2
+
+    def test_disjoint_timestamps_collected(self):
+        b = self._base()
+        d1 = {b: 1.0}
+        d2 = {b.replace(minute=15): 2.0}
+        result = sum_quarter_dicts([d1, d2])
+        assert len(result) == 2
+        assert result[b] == pytest.approx(1.0)
+        assert result[b.replace(minute=15)] == pytest.approx(2.0)
+
+    def test_three_dicts_all_overlapping(self):
+        b = self._base()
+        d1 = {b: 0.5}
+        d2 = {b: 0.5}
+        d3 = {b: 0.5}
+        result = sum_quarter_dicts([d1, d2, d3])
+        assert result[b] == pytest.approx(1.5)

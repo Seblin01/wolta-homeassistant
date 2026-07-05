@@ -88,6 +88,23 @@ def split_hour_to_quarters(
     return result
 
 
+def sum_quarter_dicts(dicts: list[dict[datetime, float]]) -> dict[datetime, float]:
+    """Sum several per-15-min-bucket streams by timestamp (multiple inverters → one stream).
+
+    Args:
+        dicts: List of per-quarter dicts (each maps UTC datetime → float kWh).
+
+    Returns:
+        A single merged dict where values at the same timestamp are summed.
+        Empty list → empty dict.
+    """
+    result: dict[datetime, float] = {}
+    for d in dicts:
+        for ts, val in d.items():
+            result[ts] = result.get(ts, 0.0) + val
+    return result
+
+
 def merge_streams(
     batt_in: dict[datetime, float] | None,
     batt_out: dict[datetime, float] | None,
