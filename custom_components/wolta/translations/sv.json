@@ -1,4 +1,10 @@
 {
+  "issues": {
+    "upload_failure": {
+      "title": "Wolta kan inte ladda upp energidata",
+      "description": "Wolta har misslyckats med att ladda upp energidata i mer än 7 dagar. Senaste fel: {error}. Kontrollera din internetanslutning och att integrationen är korrekt konfigurerad."
+    }
+  },
   "config": {
     "step": {
       "user": {

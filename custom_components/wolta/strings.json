@@ -1,4 +1,10 @@
 {
+  "issues": {
+    "upload_failure": {
+      "title": "Wolta data upload failure",
+      "description": "Wolta has been unable to upload energy data for more than 7 days. Last error: {error}. Check your internet connection and verify the integration is configured correctly."
+    }
+  },
   "config": {
     "step": {
       "user": {
