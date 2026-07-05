@@ -164,7 +164,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             raise ConfigEntryAuthFailed from err
 
         except WoltaRateLimitError as err:
-            raise UpdateFailed(f"Wolta rate limited; retry after {err.retry_after}s") from err
+            # retry_after MÅSTE vara en kwarg (inte bara i meddelandet) – HA 2025.12+ använder
+            # den för att schemalägga nästa uppdatering istället för det fasta 6h-intervallet.
+            raise UpdateFailed(
+                f"Wolta rate limited; retry after {err.retry_after}s",
+                retry_after=err.retry_after,
+            ) from err
 
         except (aiohttp.ClientError, TimeoutError) as err:
             self._track_failure(err)

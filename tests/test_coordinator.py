@@ -415,6 +415,38 @@ async def test_network_error_update_failed_bookmark_unchanged(hass: HomeAssistan
 
 
 # ---------------------------------------------------------------------------
+# Test: rate limit on upload → UpdateFailed carries retry_after kwarg (HA 2025.12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_on_put_sets_retry_after(hass: HomeAssistant, mock_entry):
+    """WoltaRateLimitError from put_data → UpdateFailed(retry_after=<value>) so HA backs off."""
+    client = _mock_client(raise_on_put=WoltaRateLimitError(1234))
+    bookmark_str = (NOW - timedelta(hours=2)).isoformat()
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams",
+              return_value=_make_rows(NOW - timedelta(hours=2))),
+        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str}
+        )
+        with pytest.raises(UpdateFailed) as exc_info:
+            await coordinator._async_update_data()
+
+    # retry_after must be the kwarg (not just in the message) so HA schedules the backoff
+    assert exc_info.value.retry_after == 1234
+    # bookmark must not advance
+    assert coordinator._state.get("last_uploaded_ts") == bookmark_str
+
+
+# ---------------------------------------------------------------------------
 # Test: timeout error → UpdateFailed and bookmark NOT advanced
 # ---------------------------------------------------------------------------
 
