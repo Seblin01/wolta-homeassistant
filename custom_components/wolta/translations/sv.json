@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Konfigurera Wolta",
+        "description": "Anslut Wolta till Home Assistant för att få betyg på batterioptimering och ekonomisensorer.",
+        "data": {
+          "zone": "Elpriszon",
+          "battery_kwh": "Batterikapacitet (kWh)",
+          "battery_kw": "Batterieffekt (kW)",
+          "eff": "Rundtripsverkningsgrad (0,5–1,0)"
+        }
+      },
+      "entities": {
+        "title": "Välj energientiteter",
+        "description": "Välj de energisensorer som mäter batteri, elnät och solproduktion. Batteri- och nätssensorer är obligatoriska; sol är valfri.",
+        "data": {
+          "batt_in": "Batteriets laddningsenergi",
+          "batt_out": "Batteriets urladdningsenergi",
+          "grid_in": "Elförbrukning från nätet",
+          "grid_out": "Elexport till nätet",
+          "solar": "Solproduktionsenergi (valfri)"
+        }
+      },
+      "privacy": {
+        "title": "Data & integritet",
+        "description": "Din 15-minutersdata lagras hos Wolta tills du raderar integrationen. Den delas aldrig utan att du kryssar i bidrag nedan.",
+        "data": {
+          "share": "Bidra med anonymiserad data för att förbättra Wolta"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Autentisera Wolta på nytt",
+        "description": "Din Wolta-profiltoken har upphört eller tagits bort. Bekräfta för att skapa en ny profil och återkoppla integrationen.",
+        "data": {}
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
+      "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
+      "unknown": "Oväntat fel"
+    },
+    "abort": {
+      "already_configured": "Wolta är redan konfigurerat",
+      "reauth_successful": "Återautentiseringen lyckades"
+    }
+  }
+}
