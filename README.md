@@ -77,6 +77,39 @@ Anonymised corpus sharing is opt-in and defaults to off. See [wolta.se/om](https
 - [wolta.se/om](https://wolta.se/om) – about & privacy
 - [GitHub issues](https://github.com/Seblin01/wolta-homeassistant/issues) – bug reports & feature requests
 
+## Exempel-dashboard
+
+A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wolta.yaml`.
+
+### Using the dashboard
+
+1. Open `dashboards/wolta.yaml` and copy the entire contents.
+2. In Home Assistant go to **Settings → Dashboards**.
+3. Create a new dashboard (type: Lovelace) and choose **Edit manually**.
+4. Paste the YAML content and save.
+
+### Verify entity IDs
+
+HA slugifies the device name during installation. Default entity IDs are:
+
+| Sensor | Default entity ID |
+|--------|-------------------|
+| Optimeringsbetyg | `sensor.wolta_optimeringsbetyg` |
+| Batterivärde per år | `sensor.wolta_batterivarde_ar` |
+| Intern avkastning (IRR) | `sensor.wolta_irr` |
+| Återbetalningstid | `sensor.wolta_payback` |
+| Facit i år | `sensor.wolta_facit_i_ar` |
+| Datastatus | `sensor.wolta_datastatus` |
+| Räkna om (button) | `button.wolta_rakna_om` |
+
+If your entities have a different suffix (e.g. `_2` when installed more than once): go to **Settings → Devices & Services → Wolta** to see the exact names.
+
+### Notes
+
+Economy sensors (`batterivarde_ar`, `irr`, `payback`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
+
+All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
+
 ## License
 
 MIT – see [LICENSE](LICENSE).

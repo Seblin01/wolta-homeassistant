@@ -29,11 +29,11 @@ def test_manifest_required_keys():
 
 
 def test_manifest_version():
-    """Version must start at 0.1.0."""
+    """Version must be 0.2.0."""
     manifest_path = REPO_ROOT / "custom_components" / "wolta" / "manifest.json"
     with open(manifest_path) as f:
         data = json.load(f)
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "0.2.0"
 
 
 def test_domain_in_const_py():

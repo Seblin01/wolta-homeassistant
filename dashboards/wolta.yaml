@@ -1,0 +1,66 @@
+# Wolta – Exempeldashboard
+#
+# Kopiera detta som ett nytt "Manual card" (typ: vertical-stack) i Lovelace,
+# ELLER lägg till hela filen som en ny dashboard via Inställningar → Dashboards.
+#
+# VIKTIGT: Entity-IDn slutar på ditt enhetsnamns slug. Verifiera de exakta
+# namnen på din Wolta-enhetssida (Inställningar → Enheter & tjänster → Wolta).
+# HA slugifierar enhetsnamnet, så "Wolta" → "wolta". Om du ändrade titeln
+# under setup kan suffixet skilja sig.
+#
+# Sensorerna visar "unavailable" tills första räkna-om-körningen är klar
+# (kräver minst 30 dagars data).
+
+title: Wolta Batterianalys
+views:
+  - title: Wolta
+    path: wolta
+    cards:
+      - type: vertical-stack
+        cards:
+          # ── Optimeringsbetyg (gauge 0–100) ──────────────────────────────
+          - type: gauge
+            entity: sensor.wolta_optimeringsbetyg
+            name: Optimeringsbetyg
+            min: 0
+            max: 100
+            severity:
+              green: 70
+              yellow: 40
+              red: 0
+            needle: true
+
+          # ── Ekonomisensorer (horisontell rad) ───────────────────────────
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.wolta_batterivarde_ar
+                name: "Batterivärde/år"
+              - type: entity
+                entity: sensor.wolta_facit_i_ar
+                name: "Facit i år"
+
+          # ── IRR och återbetalningstid ────────────────────────────────────
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.wolta_irr
+                name: IRR
+              - type: entity
+                entity: sensor.wolta_payback
+                name: "Återbetalningstid"
+
+          # ── Datastatus (diagnostik) ──────────────────────────────────────
+          - type: entities
+            title: Datastatus
+            entities:
+              - entity: sensor.wolta_datastatus
+                name: Senaste datapunkt
+
+          # ── Räkna om (knapp) ────────────────────────────────────────────
+          - type: button
+            entity: button.wolta_rakna_om
+            name: "Räkna om nu"
+            icon: mdi:calculator
+            tap_action:
+              action: toggle
