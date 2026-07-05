@@ -29,11 +29,14 @@ def test_manifest_required_keys():
 
 
 def test_manifest_version():
-    """Version must be 0.2.0."""
+    """Version must be present and a valid semver (no hardcoded value — bumps must not
+    break this test; hassfest already requires the key)."""
+    import re
+
     manifest_path = REPO_ROOT / "custom_components" / "wolta" / "manifest.json"
     with open(manifest_path) as f:
         data = json.load(f)
-    assert data["version"] == "0.2.0"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", data["version"]), data["version"]
 
 
 def test_domain_in_const_py():
