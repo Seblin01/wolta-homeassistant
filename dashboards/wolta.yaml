@@ -1,15 +1,17 @@
 # Wolta – Exempeldashboard
 #
-# Kopiera detta som ett nytt "Manual card" (typ: vertical-stack) i Lovelace,
-# ELLER lägg till hela filen som en ny dashboard via Inställningar → Dashboards.
+# TVÅ sätt att använda den här filen:
+#   A) HELA filen som en egen dashboard: Inställningar → Dashboards → Lägg till
+#      dashboard → öppna → tre prickar → Redigera i råtextläge → klistra in ALLT.
+#   B) BARA ETT KORT på en befintlig vy: kopiera enbart "vertical-stack"-blocket
+#      nedan (från "type: vertical-stack") in i ett Manuellt kort. Klistrar du in
+#      hela filen (title:/views:) i ett kort får du felet "No card type configured".
 #
-# VIKTIGT: Entity-IDn slutar på ditt enhetsnamns slug. Verifiera de exakta
-# namnen på din Wolta-enhetssida (Inställningar → Enheter & tjänster → Wolta).
-# HA slugifierar enhetsnamnet, så "Wolta" → "wolta". Om du ändrade titeln
-# under setup kan suffixet skilja sig.
+# Entity-IDn nedan är HA:s default-slugar av de svenska sensornamnen. Verifiera
+# mot din Wolta-enhetssida om du döpt om enheten (Inställningar → Enheter → Wolta).
 #
-# Sensorerna visar "unavailable" tills första räkna-om-körningen är klar
-# (kräver minst 30 dagars data).
+# Sensorerna visar "unavailable"/"unknown" tills första omräkningen är klar
+# (kräver ≥30 dagars data; IRR/återbetalning/facit kräver dessutom inköpspris+datum).
 
 title: Wolta Batterianalys
 views:
@@ -34,7 +36,7 @@ views:
           - type: horizontal-stack
             cards:
               - type: entity
-                entity: sensor.wolta_batterivarde_ar
+                entity: sensor.wolta_batterivarde_per_ar
                 name: "Batterivärde/år"
               - type: entity
                 entity: sensor.wolta_facit_i_ar
@@ -44,10 +46,10 @@ views:
           - type: horizontal-stack
             cards:
               - type: entity
-                entity: sensor.wolta_irr
+                entity: sensor.wolta_intern_avkastning_irr
                 name: IRR
               - type: entity
-                entity: sensor.wolta_payback
+                entity: sensor.wolta_aterbetalningstid
                 name: "Återbetalningstid"
 
           # ── Datastatus (diagnostik) ──────────────────────────────────────
