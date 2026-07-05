@@ -36,11 +36,11 @@ ZONE = "SE3"
 ENTRY_DATA = {
     CONF_TOKEN: TOKEN,
     CONF_ZONE: ZONE,
-    CONF_BATT_IN: "sensor.batt_in",
-    CONF_BATT_OUT: "sensor.batt_out",
-    CONF_GRID_IN: "sensor.grid_in",
-    CONF_GRID_OUT: "sensor.grid_out",
-    CONF_SOLAR: "sensor.solar",
+    CONF_BATT_IN: ["sensor.batt_in"],
+    CONF_BATT_OUT: ["sensor.batt_out"],
+    CONF_GRID_IN: ["sensor.grid_in"],
+    CONF_GRID_OUT: ["sensor.grid_out"],
+    CONF_SOLAR: ["sensor.solar"],
 }
 
 NOW = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -601,3 +601,109 @@ async def test_async_trigger_recompute_calls_client(hass: HomeAssistant, mock_en
     assert client.recompute.called
     call_args = client.recompute.call_args
     assert call_args[0][0] == TOKEN or call_args.args[0] == TOKEN
+
+
+# ---------------------------------------------------------------------------
+# Test: two solar sensors → solar_kwh equals sum of both
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_two_solar_sensors_summed(hass: HomeAssistant, mock_entry):
+    """With two solar entity IDs, coordinator sums both per-bucket values."""
+    two_solar_entry_data = {
+        CONF_TOKEN: TOKEN,
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.batt_in"],
+        CONF_BATT_OUT: ["sensor.batt_out"],
+        CONF_GRID_IN: ["sensor.grid_in"],
+        CONF_GRID_OUT: ["sensor.grid_out"],
+        CONF_SOLAR: ["sensor.solar_a", "sensor.solar_b"],
+    }
+    mock_entry.data = two_solar_entry_data
+
+    # async_fetch_change returns two solar entity IDs with different values
+    short_stats = {
+        "sensor.batt_in": [{"start": 1700000000.0, "change": 0.1}],
+        "sensor.batt_out": [{"start": 1700000000.0, "change": 0.0}],
+        "sensor.grid_in": [{"start": 1700000000.0, "change": 0.0}],
+        "sensor.grid_out": [{"start": 1700000000.0, "change": 0.0}],
+        "sensor.solar_a": [{"start": 1700000000.0, "change": 1.0}],
+        "sensor.solar_b": [{"start": 1700000000.0, "change": 2.0}],
+    }
+
+    client = _mock_client()
+
+    captured_rows = []
+
+    async def mock_put(token, rows):
+        captured_rows.extend(rows)
+
+    client.put_data = AsyncMock(side_effect=mock_put)
+
+    bookmark_str = (NOW - timedelta(hours=2)).isoformat()
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch(
+            "custom_components.wolta.coordinator.async_fetch_change",
+            return_value=short_stats,
+        ),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str}
+        )
+        await coordinator._async_update_data()
+
+    # Find the row for bucket at 1700000000 floored to 900s
+    from datetime import timezone as tz
+    bucket = datetime.fromtimestamp(1700000000 - (1700000000 % 900), tz=tz.utc)
+    matching = [r for r in captured_rows if r["ts"] == bucket.isoformat()]
+    assert len(matching) == 1, "Expected one row for the bucket"
+    # solar_kwh must be the sum: 1.0 + 2.0 = 3.0
+    assert matching[0]["solar_kwh"] == pytest.approx(3.0), (
+        f"solar_kwh should be 3.0 (sum of both inverters), got {matching[0]['solar_kwh']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: backward compat — plain string in entry.data normalised to [str]
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backward_compat_plain_string_solar(hass: HomeAssistant, mock_entry):
+    """v0.1.0 entry with plain string solar value still works (normalised to list)."""
+    # v0.1.0 format: plain strings, not lists
+    old_entry_data = {
+        CONF_TOKEN: TOKEN,
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: "sensor.batt_in",   # plain string
+        CONF_BATT_OUT: "sensor.batt_out",
+        CONF_GRID_IN: "sensor.grid_in",
+        CONF_GRID_OUT: "sensor.grid_out",
+        CONF_SOLAR: "sensor.solar",        # plain string
+    }
+    mock_entry.data = old_entry_data
+
+    client = _mock_client()
+    bookmark_str = (NOW - timedelta(hours=2)).isoformat()
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+    ):
+        # Must not raise; coordinator must normalise plain strings to lists
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str}
+        )
+        # Check normalisation happened
+        assert coordinator._entity_map["solar"] == ["sensor.solar"]
+        assert coordinator._entity_map["batt_in"] == ["sensor.batt_in"]
+        # Must complete without error
+        await coordinator._async_update_data()

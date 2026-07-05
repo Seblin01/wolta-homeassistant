@@ -34,6 +34,7 @@ from .stats import (
     async_fetch_change,
     merge_streams,
     split_hour_to_quarters,
+    sum_quarter_dicts,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,12 +96,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         self.token: str = entry.data[CONF_TOKEN]
         self._zone: str = entry.data[CONF_ZONE]
-        self._entity_map: dict[str, str | None] = {
-            "batt_in": entry.data.get(CONF_BATT_IN),
-            "batt_out": entry.data.get(CONF_BATT_OUT),
-            "grid_in": entry.data.get(CONF_GRID_IN),
-            "grid_out": entry.data.get(CONF_GRID_OUT),
-            "solar": entry.data.get(CONF_SOLAR),
+
+        # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
+        def _to_list(val: str | list | None) -> list[str]:
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str) and val:
+                return [val]
+            return []
+
+        self._entity_map: dict[str, list[str]] = {
+            "batt_in": _to_list(entry.data.get(CONF_BATT_IN)),
+            "batt_out": _to_list(entry.data.get(CONF_BATT_OUT)),
+            "grid_in": _to_list(entry.data.get(CONF_GRID_IN)),
+            "grid_out": _to_list(entry.data.get(CONF_GRID_OUT)),
+            "solar": _to_list(entry.data.get(CONF_SOLAR)),
         }
         session = async_get_clientsession(hass)
         self.client = WoltaApiClient(session, base_url=WOLTA_API_BASE)
@@ -179,6 +189,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Row-fetching helpers
     # ------------------------------------------------------------------
 
+    def _sum_stream(
+        self,
+        raw_data: dict,
+        stream: str,
+        agg_fn,
+    ) -> dict:
+        """Aggregate and sum all entity rows for one stream.
+
+        Args:
+            raw_data: mapping of statistic_id → rows (from async_fetch_change)
+            stream:   stream name key in _entity_map (e.g. "solar")
+            agg_fn:   aggregation function — split_hour_to_quarters or aggregate_5min_to_15min
+
+        Returns:
+            Summed per-quarter dict for the stream.
+        """
+        per_entity = [
+            agg_fn(raw_data.get(entity_id) or [])
+            for entity_id in self._entity_map[stream]
+        ]
+        return sum_quarter_dicts(per_entity)
+
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
         start = now - timedelta(days=_BACKFILL_DAYS)
@@ -202,27 +234,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             period="5minute",
         )
 
-        # Aggregate LTS streams (÷4)
-        batt_in_lts = split_hour_to_quarters(lts_data.get(self._entity_map["batt_in"]) or [])
-        batt_out_lts = split_hour_to_quarters(lts_data.get(self._entity_map["batt_out"]) or [])
-        grid_in_lts = split_hour_to_quarters(lts_data.get(self._entity_map["grid_in"]) or [])
-        grid_out_lts = split_hour_to_quarters(lts_data.get(self._entity_map["grid_out"]) or [])
-        solar_lts = split_hour_to_quarters(lts_data.get(self._entity_map.get("solar", "")) or [])
-
-        # Aggregate short-term streams (5-min → 15-min)
-        batt_in_st = aggregate_5min_to_15min(short_data.get(self._entity_map["batt_in"]) or [])
-        batt_out_st = aggregate_5min_to_15min(short_data.get(self._entity_map["batt_out"]) or [])
-        grid_in_st = aggregate_5min_to_15min(short_data.get(self._entity_map["grid_in"]) or [])
-        grid_out_st = aggregate_5min_to_15min(short_data.get(self._entity_map["grid_out"]) or [])
-        solar_st = aggregate_5min_to_15min(short_data.get(self._entity_map.get("solar", "")) or [])
-
-        # Merge both windows (dict union; short-term takes precedence on overlap)
+        # Aggregate and sum per stream (short-term takes precedence on overlap via dict merge)
         return merge_streams(
-            batt_in={**batt_in_lts, **batt_in_st},
-            batt_out={**batt_out_lts, **batt_out_st},
-            grid_in={**grid_in_lts, **grid_in_st},
-            grid_out={**grid_out_lts, **grid_out_st},
-            solar={**solar_lts, **solar_st},
+            batt_in={
+                **self._sum_stream(lts_data, "batt_in", split_hour_to_quarters),
+                **self._sum_stream(short_data, "batt_in", aggregate_5min_to_15min),
+            },
+            batt_out={
+                **self._sum_stream(lts_data, "batt_out", split_hour_to_quarters),
+                **self._sum_stream(short_data, "batt_out", aggregate_5min_to_15min),
+            },
+            grid_in={
+                **self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
+                **self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
+            },
+            grid_out={
+                **self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
+                **self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
+            },
+            solar={
+                **self._sum_stream(lts_data, "solar", split_hour_to_quarters),
+                **self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
+            },
         )
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -235,11 +268,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             period="hour",
         )
         return merge_streams(
-            batt_in=split_hour_to_quarters(lts_data.get(self._entity_map["batt_in"]) or []),
-            batt_out=split_hour_to_quarters(lts_data.get(self._entity_map["batt_out"]) or []),
-            grid_in=split_hour_to_quarters(lts_data.get(self._entity_map["grid_in"]) or []),
-            grid_out=split_hour_to_quarters(lts_data.get(self._entity_map["grid_out"]) or []),
-            solar=split_hour_to_quarters(lts_data.get(self._entity_map.get("solar", "")) or []),
+            batt_in=self._sum_stream(lts_data, "batt_in", split_hour_to_quarters),
+            batt_out=self._sum_stream(lts_data, "batt_out", split_hour_to_quarters),
+            grid_in=self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
+            grid_out=self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
+            solar=self._sum_stream(lts_data, "solar", split_hour_to_quarters),
         )
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -252,11 +285,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             period="5minute",
         )
         return merge_streams(
-            batt_in=aggregate_5min_to_15min(short_data.get(self._entity_map["batt_in"]) or []),
-            batt_out=aggregate_5min_to_15min(short_data.get(self._entity_map["batt_out"]) or []),
-            grid_in=aggregate_5min_to_15min(short_data.get(self._entity_map["grid_in"]) or []),
-            grid_out=aggregate_5min_to_15min(short_data.get(self._entity_map["grid_out"]) or []),
-            solar=aggregate_5min_to_15min(short_data.get(self._entity_map.get("solar", "")) or []),
+            batt_in=self._sum_stream(short_data, "batt_in", aggregate_5min_to_15min),
+            batt_out=self._sum_stream(short_data, "batt_out", aggregate_5min_to_15min),
+            grid_in=self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
+            grid_out=self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
+            solar=self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
         )
 
     # ------------------------------------------------------------------
@@ -346,9 +379,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # ------------------------------------------------------------------
 
     def _statistic_ids(self) -> set[str]:
-        """Return the set of statistic IDs from the entity map."""
-        ids = set()
-        for val in self._entity_map.values():
-            if val:
-                ids.add(val)
+        """Return the flat set of all statistic IDs across all stream lists."""
+        ids: set[str] = set()
+        for entity_list in self._entity_map.values():
+            ids.update(entity_list)
         return ids
