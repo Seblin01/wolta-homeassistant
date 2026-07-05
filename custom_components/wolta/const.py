@@ -22,5 +22,5 @@ DEFAULT_BATTERY_KW = 0.0
 DEFAULT_EFF = 0.9
 DEFAULT_SHARE = 1.0
 
-# API
-WOLTA_API_BASE = "https://api.wolta.se"
+# API – wolta.se serverar API:t under /api/v1 (ingen api.-subdomän finns)
+WOLTA_API_BASE = "https://wolta.se"
