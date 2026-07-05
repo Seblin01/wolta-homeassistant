@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Wolta",
+        "description": "Connect Wolta to Home Assistant to receive battery optimization grades and economy sensors.",
+        "data": {
+          "token": "API Token",
+          "zone": "Electricity price zone"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Wolta API",
+      "invalid_auth": "Invalid API token",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Wolta is already configured"
+    }
+  }
+}
