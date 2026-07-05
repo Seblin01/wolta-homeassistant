@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -50,6 +50,21 @@ def _betyg_score(results: dict) -> float | None:
     if score_on is None:
         return None
     return round(score_on * 100, 2)
+
+
+def _period_end_ts(results: dict) -> datetime | None:
+    """period.end är en date-sträng ('YYYY-MM-DD'); en TIMESTAMP-sensor kräver en
+    aware datetime, annars blir state:t ogiltigt i HA. Parsa + fäst UTC om naiv."""
+    end = (results.get("period") or {}).get("end")
+    if not end:
+        return None
+    try:
+        parsed = datetime.fromisoformat(end)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _betyg_available(results: dict) -> bool:
@@ -168,8 +183,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         name="Datastatus",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda r: (r.get("period") or {}).get("end"),
-        available_fn=lambda r: bool((r.get("period") or {}).get("end")),
+        value_fn=_period_end_ts,
+        available_fn=lambda r: _period_end_ts(r) is not None,
         attr_fn=lambda data: {
             "n_days": data.n_days,
             "pending": data.pending,

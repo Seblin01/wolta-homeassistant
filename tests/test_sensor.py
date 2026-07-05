@@ -303,9 +303,13 @@ def test_facit_i_ar_unavailable_when_history_none():
 
 
 def test_datastatus_value():
-    """Value is period.end as ISO string (timestamp device class)."""
+    """Value is period.end parsed to an aware datetime (TIMESTAMP device class requires
+    a datetime, not a string, or HA marks the state invalid)."""
+    from datetime import datetime, timezone
+
     s = _sensor("datastatus", RESULTS_FULL)
-    assert s.native_value == "2025-05-31"
+    assert s.native_value == datetime(2025, 5, 31, tzinfo=timezone.utc)
+    assert s.native_value.tzinfo is not None
 
 
 def test_datastatus_attributes():
