@@ -103,31 +103,31 @@ def _row(n: int) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_put_data_chunks_over_40000_rows(aioclient_mock: AiohttpClientMocker):
-    """put_data with > MAX_ROWS_PER_PUT rows issues multiple sequential PUTs."""
+async def test_put_data_chunks_over_limit(aioclient_mock: AiohttpClientMocker):
+    """put_data with > MAX_ROWS_PER_PUT rows issues multiple sequential PUTs.
+
+    The chunk size is kept small (well under any reverse-proxy body-size limit) —
+    see the 413 incident 2026-07-05. Verify the client actually splits.
+    """
+    from custom_components.wolta.api import MAX_ROWS_PER_PUT
+
     url = f"{BASE_URL}/api/v1/profile/{TOKEN}/data"
-    # Register two responses (for the two chunks expected for 40_001 rows)
     aioclient_mock.put(
         url,
         status=200,
-        json={"upserted": 40000, "period_start": "2024-01-01T00:00:00Z", "period_end": "2024-12-31T23:00:00Z"},
-    )
-    aioclient_mock.put(
-        url,
-        status=200,
-        json={"upserted": 1, "period_start": "2025-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z"},
+        json={"upserted": MAX_ROWS_PER_PUT, "period_start": "2024-01-01T00:00:00Z",
+              "period_end": "2024-12-31T23:00:00Z"},
     )
 
-    rows = [_row(i) for i in range(40_001)]
+    # One more than the chunk size → exactly 2 chunks.
+    rows = [_row(i) for i in range(MAX_ROWS_PER_PUT + 1)]
     client = _client(aioclient_mock)
     result = await client.put_data(TOKEN, rows)
 
-    # Two PUT calls must have been made (mock_calls stores lowercase method)
     put_calls = [c for c in aioclient_mock.mock_calls if c[0].lower() == "put"]
-    assert len(put_calls) >= 2, f"Expected >=2 PUT calls, got {len(put_calls)}"
-
-    # Result is the last response (both responses are the same mock — the first
-    # registered response is re-used by the HA mocker; we just verify 2 calls went out)
+    assert len(put_calls) == 2, f"Expected 2 PUT calls, got {len(put_calls)}"
+    # Each chunk must be <= MAX_ROWS_PER_PUT so bodies stay under the proxy limit.
+    assert MAX_ROWS_PER_PUT <= 5_000, "chunk must stay small enough for a 1 MB proxy limit"
     assert result is not None
 
 

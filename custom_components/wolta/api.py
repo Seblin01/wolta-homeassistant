@@ -6,7 +6,12 @@ from typing import Any
 
 import aiohttp
 
-MAX_ROWS_PER_PUT = 40_000
+# Chunk size for PUT /data. Kept small so each request body stays well under the
+# reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
+# NPM/nginx defaults can be as low as 1 MB). ~5000 15-min-rader ≈ 0.8 MB → passerar
+# även en 1 MB-gräns. Backenden tillåter upp till 40k/PUT, men proxyn är den bindande
+# gränsen — se 413-incidenten 2026-07-05 (backfill mot Bronäs).
+MAX_ROWS_PER_PUT = 5_000
 
 
 # ---------------------------------------------------------------------------
