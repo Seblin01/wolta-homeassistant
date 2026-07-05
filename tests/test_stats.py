@@ -280,6 +280,28 @@ class TestMergeStreams:
         ts_parsed = datetime.fromisoformat(rows[0]["ts"])
         assert ts_parsed.replace(tzinfo=timezone.utc) == b.replace(minute=0) or ts_parsed == b.replace(minute=0)
 
+    def test_negative_noise_is_floored_to_zero(self):
+        """Recorder `change` can be slightly negative (FP noise / meter reset). The
+        backend rejects negatives (422) → merge_streams must floor all fields to 0."""
+        b = self._base()
+        batt_in = {b: -0.024999999999636202}   # the exact value from the 413/422 incident
+        batt_out = {b: -0.001}
+        grid_in = {b: -5.0}                     # a larger negative is also floored
+        grid_out = {b: 0.3}
+        solar = {b: -0.0}
+        rows = merge_streams(batt_in, batt_out, grid_in, grid_out, solar)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["batt_charged_kwh"] == 0.0
+        assert r["batt_discharged_kwh"] == 0.0
+        assert r["grid_import_kwh"] == 0.0
+        assert r["grid_export_kwh"] == pytest.approx(0.3)   # positive value untouched
+        assert r["solar_kwh"] == 0.0
+        # every field must be >= 0 (the backend's DataRow contract)
+        for k in ("batt_charged_kwh", "batt_discharged_kwh", "solar_kwh",
+                  "grid_import_kwh", "grid_export_kwh"):
+            assert r[k] >= 0.0
+
     def test_row_values_are_correct(self):
         b = self._base()
         batt_in = {b: 1.2}

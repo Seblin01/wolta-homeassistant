@@ -146,16 +146,22 @@ def merge_streams(
     # Only emit rows where at least one battery stream has a value
     valid_quarters = _batt_in.keys() | _batt_out.keys()
 
+    def _nn(v: float) -> float:
+        # Recorderns `change` på en energiräknare kan bli aningen negativ (flyttalsbrus
+        # eller en liten mätarkorrigering/reset), t.ex. -0.025 kWh. Dessa storheter är
+        # fysiskt icke-negativa och backenden avvisar negativa värden (422). Golva till 0.
+        return v if v > 0.0 else 0.0
+
     rows = []
     for qt in sorted(valid_quarters):
         rows.append(
             {
                 "ts": qt.isoformat(),
-                "batt_charged_kwh": _batt_in.get(qt, 0.0),
-                "batt_discharged_kwh": _batt_out.get(qt, 0.0),
-                "solar_kwh": _solar.get(qt, 0.0),
-                "grid_import_kwh": _grid_in.get(qt, 0.0),
-                "grid_export_kwh": _grid_out.get(qt, 0.0),
+                "batt_charged_kwh": _nn(_batt_in.get(qt, 0.0)),
+                "batt_discharged_kwh": _nn(_batt_out.get(qt, 0.0)),
+                "solar_kwh": _nn(_solar.get(qt, 0.0)),
+                "grid_import_kwh": _nn(_grid_in.get(qt, 0.0)),
+                "grid_export_kwh": _nn(_grid_out.get(qt, 0.0)),
             }
         )
     return rows
