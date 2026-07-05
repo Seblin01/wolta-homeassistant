@@ -22,9 +22,11 @@ from custom_components.wolta.const import (
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_COST_SEK,
     CONF_EFF,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
     CONF_TOKEN,
@@ -696,3 +698,262 @@ async def test_energy_prefill_collects_multiple_solar_sources(hass: HomeAssistan
     assert "sensor.solar_a" in solar
     assert "sensor.solar_b" in solar
     assert len(solar) == 2
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: cost_sek + purchase_date in initial config flow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_cost_and_date(hass: HomeAssistant) -> None:
+    """Full flow with cost_sek + purchase_date stores them in entry.data and passes them to create_profile."""
+    mock_client = _mock_client()
+
+    step_user_with_cost = {
+        **STEP_USER_DATA,
+        CONF_COST_SEK: 89900.0,
+        CONF_PURCHASE_DATE: "2022-11-15",
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_cost
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    assert data[CONF_COST_SEK] == 89900.0
+    assert data[CONF_PURCHASE_DATE] == "2022-11-15"
+
+    # create_profile must have received cost_sek and purchase_date
+    mock_client.create_profile.assert_awaited_once()
+    call_kwargs = mock_client.create_profile.call_args
+    assert call_kwargs.kwargs["cost_sek"] == 89900.0
+    assert call_kwargs.kwargs["purchase_date"] == "2022-11-15"
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_cost_and_date(hass: HomeAssistant) -> None:
+    """Full flow without cost/date → entry.data has no cost/date keys, create_profile called without them (or with None)."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA  # no cost/date
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    # cost and date must not be in entry.data (or be None/absent)
+    assert not data.get(CONF_COST_SEK)
+    assert not data.get(CONF_PURCHASE_DATE)
+
+    # create_profile must have been called with cost_sek=None or not at all
+    call_kwargs = mock_client.create_profile.call_args
+    assert call_kwargs.kwargs.get("cost_sek") is None
+    assert call_kwargs.kwargs.get("purchase_date") is None
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: OptionsFlow
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_entry(hass: HomeAssistant, extra_data: dict | None = None) -> Any:
+    """Create and add a mock config entry to hass."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    base_data: dict[str, Any] = {
+        CONF_TOKEN: TOKEN,
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: ["sensor.solar"],
+        CONF_BATTERY_KWH: 22.0,
+        CONF_BATTERY_KW: 5.0,
+        CONF_EFF: 0.9,
+        CONF_SHARE: False,
+    }
+    if extra_data:
+        base_data.update(extra_data)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=f"Wolta ({ZONE})",
+        data=base_data,
+        source=config_entries.SOURCE_USER,
+        unique_id="test-unique-id",
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_options_flow_patches_profile_and_updates_entry(hass: HomeAssistant) -> None:
+    """Options flow submitting cost+date → patch_profile called + entry.data updated."""
+    entry = _make_mock_entry(hass)
+
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"profile_token": TOKEN})
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    # Attach coordinator as runtime_data (as the real integration does)
+    entry.runtime_data = mock_coordinator
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "init"
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_COST_SEK: 95000.0,
+                CONF_PURCHASE_DATE: "2023-03-01",
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    # patch_profile must have been called with the right args
+    mock_client.patch_profile.assert_awaited_once()
+    call_args = mock_client.patch_profile.call_args
+    assert call_args.args[0] == TOKEN  # first positional arg is token
+    assert call_args.kwargs["cost_sek"] == 95000.0
+    assert call_args.kwargs["purchase_date"] == "2023-03-01"
+
+    # entry.data must be updated with the new values
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_COST_SEK] == 95000.0
+    assert updated.data[CONF_PURCHASE_DATE] == "2023-03-01"
+
+    # recompute must have been triggered
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_swallows_recompute_rate_limit(hass: HomeAssistant) -> None:
+    """Options flow succeeds even when recompute returns 429 (cooldown)."""
+    from custom_components.wolta.api import WoltaRateLimitError
+
+    entry = _make_mock_entry(hass)
+
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"profile_token": TOKEN})
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock(
+        side_effect=WoltaRateLimitError(retry_after=3600)
+    )
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={CONF_COST_SEK: 80000.0, CONF_PURCHASE_DATE: "2021-06-01"},
+        )
+
+    # Must complete successfully despite the cooldown
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    # patch_profile still ran
+    mock_client.patch_profile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> None:
+    """Options flow pre-fills form with existing cost/date from entry.data."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_COST_SEK: 75000.0, CONF_PURCHASE_DATE: "2020-05-10"},
+    )
+
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"profile_token": TOKEN})
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    # The schema defaults should reflect the existing entry data
+    schema = result["data_schema"].schema
+    schema_keys = {k.schema if hasattr(k, "schema") else str(k): k for k in schema}
+    # Check cost_sek default is pre-filled
+    for k in schema:
+        key_name = k.schema if hasattr(k, "schema") else str(k)
+        if key_name == CONF_COST_SEK:
+            assert k.default() == 75000.0

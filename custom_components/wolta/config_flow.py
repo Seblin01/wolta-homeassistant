@@ -9,11 +9,13 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components.energy.data import async_get_manager
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
     BooleanSelectorConfig,
+    DateSelector,
+    DateSelectorConfig,
     EntitySelector,
     EntitySelectorConfig,
     NumberSelector,
@@ -23,17 +25,22 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
-from .api import WoltaApiClient, WoltaApiError
+from .api import WoltaApiClient, WoltaApiError, WoltaRateLimitError
 from .const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_COST_SEK,
     CONF_EFF,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
     CONF_TOKEN,
@@ -169,6 +176,10 @@ def _energy_entity_selector() -> EntitySelector:
     )
 
 
+def _date_selector() -> DateSelector:
+    return DateSelector(DateSelectorConfig())
+
+
 # ---------------------------------------------------------------------------
 # Config flow
 # ---------------------------------------------------------------------------
@@ -178,6 +189,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for the Wolta integration."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry) -> "WoltaOptionsFlow":
+        """Return the options flow for this handler."""
+        return WoltaOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialise the flow."""
@@ -210,6 +226,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_EFF, default=DEFAULT_EFF): _number_selector(
                     min_val=0.5, max_val=1.0, step=0.01
                 ),
+                vol.Optional(CONF_COST_SEK): _number_selector(
+                    min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"
+                ),
+                vol.Optional(CONF_PURCHASE_DATE): _date_selector(),
             }
         )
 
@@ -293,6 +313,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             share = user_input.get(CONF_SHARE, DEFAULT_SHARE)
             zone = self._user_data[CONF_ZONE]
             solar = self._entities_data.get(CONF_SOLAR)
+            cost_sek: float | None = self._user_data.get(CONF_COST_SEK) or None
+            purchase_date: str | None = self._user_data.get(CONF_PURCHASE_DATE) or None
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -304,6 +326,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     eff=self._user_data[CONF_EFF],
                     has_solar=bool(solar),
                     share_profile=share,
+                    cost_sek=cost_sek,
+                    purchase_date=purchase_date,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -330,6 +354,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
                 if solar:
                     entry_data[CONF_SOLAR] = solar
+                if cost_sek is not None:
+                    entry_data[CONF_COST_SEK] = cost_sek
+                if purchase_date is not None:
+                    entry_data[CONF_PURCHASE_DATE] = purchase_date
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",
@@ -397,5 +425,98 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema({}),
+            errors=errors,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Options flow (v0.3.0) – edit cost_sek and purchase_date on an existing entry
+# ---------------------------------------------------------------------------
+
+
+class WoltaOptionsFlow(OptionsFlow):
+    """Handle options for an existing Wolta config entry."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialise the options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show and handle the options form."""
+        entry = self._config_entry
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            token: str = entry.data[CONF_TOKEN]
+            cost_sek: float | None = user_input.get(CONF_COST_SEK) or None
+            purchase_date: str | None = user_input.get(CONF_PURCHASE_DATE) or None
+
+            # Build PATCH payload (only send provided fields)
+            patch_fields: dict[str, Any] = {}
+            if cost_sek is not None:
+                patch_fields[CONF_COST_SEK] = cost_sek
+            if purchase_date is not None:
+                patch_fields[CONF_PURCHASE_DATE] = purchase_date
+
+            if patch_fields:
+                try:
+                    session = async_get_clientsession(self.hass)
+                    client = WoltaApiClient(session)
+                    await client.patch_profile(token, **patch_fields)
+                except WoltaApiError as err:
+                    _LOGGER.error("Failed to patch Wolta profile: %s", err)
+                    errors["base"] = "cannot_connect"
+
+            if not errors:
+                # Persist the new values in entry.data
+                new_data = dict(entry.data)
+                if cost_sek is not None:
+                    new_data[CONF_COST_SEK] = cost_sek
+                if purchase_date is not None:
+                    new_data[CONF_PURCHASE_DATE] = purchase_date
+                self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+                # Trigger recompute to warm history/facit – swallow 429 cooldown gracefully
+                coordinator = getattr(entry, "runtime_data", None)
+                if coordinator is not None:
+                    try:
+                        await coordinator.async_trigger_recompute()
+                    except WoltaRateLimitError:
+                        _LOGGER.debug(
+                            "Options flow: recompute rate-limited (cooldown); "
+                            "IRR/payback will update on next results fetch; "
+                            "history/facit will warm on the nightly rewarm."
+                        )
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug("Options flow: recompute failed; will retry.", exc_info=True)
+                    else:
+                        # Refresh coordinator data so sensors update immediately
+                        try:
+                            await coordinator.async_request_refresh()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+
+                return self.async_create_entry(title="", data={})
+
+        # Pre-fill from entry.data
+        current_cost = entry.data.get(CONF_COST_SEK)
+        current_date = entry.data.get(CONF_PURCHASE_DATE)
+
+        schema_dict: dict[vol.Optional, Any] = {
+            vol.Optional(
+                CONF_COST_SEK,
+                default=current_cost if current_cost is not None else vol.UNDEFINED,
+            ): _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"),
+            vol.Optional(
+                CONF_PURCHASE_DATE,
+                default=current_date if current_date is not None else vol.UNDEFINED,
+            ): _date_selector(),
+        }
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(schema_dict),
             errors=errors,
         )

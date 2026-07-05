@@ -14,6 +14,8 @@ CONF_BATTERY_KWH = "battery_kwh"
 CONF_BATTERY_KW = "battery_kw"
 CONF_EFF = "eff"
 CONF_SHARE = "share"
+CONF_COST_SEK = "cost_sek"
+CONF_PURCHASE_DATE = "purchase_date"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

@@ -14,11 +14,15 @@
           "zone": "Elpriszon",
           "battery_kwh": "Användbar batterikapacitet (kWh)",
           "battery_kw": "Batteriets maxeffekt (kW)",
-          "eff": "Rundtripsverkningsgrad (0,5–1,0)"
+          "eff": "Rundtripsverkningsgrad (0,5–1,0)",
+          "cost_sek": "Inköpspris (kr) – valfritt",
+          "purchase_date": "Inköpsdatum – valfritt"
         },
         "data_description": {
           "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
-          "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt."
+          "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt.",
+          "cost_sek": "Totalt inköpspris för batteriet (och ev. solcellsinstallation) i kr. Används för att räkna IRR och återbetalningstid. Valfritt.",
+          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt."
         }
       },
       "entities": {
@@ -55,6 +59,25 @@
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
       "reauth_successful": "Återautentiseringen lyckades"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wolta – ekonomiinställningar",
+        "description": "Uppdatera inköpspris och inköpsdatum för att aktivera IRR-, återbetalnings- och 'facit i år'-sensorerna. Efter sparandet triggar Wolta en omberäkning (kan ta upp till 24 h om servern är på nedkylning).",
+        "data": {
+          "cost_sek": "Inköpspris (kr)",
+          "purchase_date": "Inköpsdatum"
+        },
+        "data_description": {
+          "cost_sek": "Totalt inköpspris för batteriet (och ev. solcellsinstallation) i kr. Används för att räkna IRR och återbetalningstid.",
+          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen."
     }
   }
 }

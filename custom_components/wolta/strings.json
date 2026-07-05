@@ -14,11 +14,15 @@
           "zone": "Electricity price zone",
           "battery_kwh": "Usable battery capacity (kWh)",
           "battery_kw": "Battery max power (kW)",
-          "eff": "Round-trip efficiency (0.5–1.0)"
+          "eff": "Round-trip efficiency (0.5–1.0)",
+          "cost_sek": "Purchase price (kr) – optional",
+          "purchase_date": "Purchase date – optional"
         },
         "data_description": {
           "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity.",
-          "battery_kw": "Maximum battery charge/discharge power."
+          "battery_kw": "Maximum battery charge/discharge power.",
+          "cost_sek": "Total purchase price for the battery (and any solar installation) in SEK. Used to calculate IRR and payback period. Optional.",
+          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate 'facit i år'. Optional."
         }
       },
       "entities": {
@@ -55,6 +59,25 @@
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wolta – economy settings",
+        "description": "Update purchase price and purchase date to enable IRR, payback and 'facit i år' sensors. After saving, Wolta will trigger a recompute (may take up to 24 h if the server is on cooldown).",
+        "data": {
+          "cost_sek": "Purchase price (kr)",
+          "purchase_date": "Purchase date"
+        },
+        "data_description": {
+          "cost_sek": "Total cost for the battery (and any solar installation) in SEK. Used to calculate IRR and payback period.",
+          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate 'facit i år'."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again."
     }
   }
 }

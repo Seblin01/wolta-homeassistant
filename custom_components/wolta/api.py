@@ -108,12 +108,14 @@ class WoltaApiClient:
         eff: float,
         has_solar: bool,
         share_profile: bool,
+        cost_sek: float | None = None,
+        purchase_date: str | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
         POST /api/v1/profile → 201 {"profile_token": "<tok>"}
         """
-        payload = {
+        payload: dict[str, Any] = {
             "zone": zone,
             "battery_kwh": battery_kwh,
             "battery_kw": battery_kw,
@@ -121,8 +123,20 @@ class WoltaApiClient:
             "has_solar": has_solar,
             "share_profile": share_profile,
         }
+        if cost_sek is not None:
+            payload["cost_sek"] = cost_sek
+        if purchase_date is not None:
+            payload["purchase_date"] = purchase_date
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
+
+    async def patch_profile(self, token: str, **fields: Any) -> dict:
+        """Update profile fields (cost_sek, purchase_date, …).
+
+        PATCH /api/v1/profile/{token} with the given JSON fields.
+        Returns the response dict.
+        """
+        return await self._request("PATCH", f"/profile/{token}", json=fields)
 
     async def put_data(self, token: str, rows: list[dict]) -> dict:
         """Upload energy rows for the given profile.
