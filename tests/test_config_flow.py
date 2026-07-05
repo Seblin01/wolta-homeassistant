@@ -50,18 +50,18 @@ STEP_USER_DATA = {
 }
 
 STEP_ENTITIES_DATA = {
-    CONF_BATT_IN: "sensor.battery_charge",
-    CONF_BATT_OUT: "sensor.battery_discharge",
-    CONF_GRID_IN: "sensor.grid_import",
-    CONF_GRID_OUT: "sensor.grid_export",
-    CONF_SOLAR: "sensor.solar_production",
+    CONF_BATT_IN: ["sensor.battery_charge"],
+    CONF_BATT_OUT: ["sensor.battery_discharge"],
+    CONF_GRID_IN: ["sensor.grid_import"],
+    CONF_GRID_OUT: ["sensor.grid_export"],
+    CONF_SOLAR: ["sensor.solar_production"],
 }
 
 STEP_ENTITIES_NO_SOLAR = {
-    CONF_BATT_IN: "sensor.battery_charge",
-    CONF_BATT_OUT: "sensor.battery_discharge",
-    CONF_GRID_IN: "sensor.grid_import",
-    CONF_GRID_OUT: "sensor.grid_export",
+    CONF_BATT_IN: ["sensor.battery_charge"],
+    CONF_BATT_OUT: ["sensor.battery_discharge"],
+    CONF_GRID_IN: ["sensor.grid_import"],
+    CONF_GRID_OUT: ["sensor.grid_export"],
 }
 
 STEP_PRIVACY_DATA = {
@@ -127,11 +127,11 @@ async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
     data = result["data"]
     assert data[CONF_TOKEN] == TOKEN
     assert data[CONF_ZONE] == ZONE
-    assert data[CONF_BATT_IN] == "sensor.battery_charge"
-    assert data[CONF_BATT_OUT] == "sensor.battery_discharge"
-    assert data[CONF_GRID_IN] == "sensor.grid_import"
-    assert data[CONF_GRID_OUT] == "sensor.grid_export"
-    assert data[CONF_SOLAR] == "sensor.solar_production"
+    assert data[CONF_BATT_IN] == ["sensor.battery_charge"]
+    assert data[CONF_BATT_OUT] == ["sensor.battery_discharge"]
+    assert data[CONF_GRID_IN] == ["sensor.grid_import"]
+    assert data[CONF_GRID_OUT] == ["sensor.grid_export"]
+    assert data[CONF_SOLAR] == ["sensor.solar_production"]
     assert data[CONF_BATTERY_KWH] == 22.0
     assert data[CONF_BATTERY_KW] == 5.0
     assert data[CONF_EFF] == 0.9
@@ -210,7 +210,7 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     data = result["data"]
-    assert CONF_SOLAR not in data or data.get(CONF_SOLAR) is None
+    assert CONF_SOLAR not in data or not data.get(CONF_SOLAR)
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +255,11 @@ async def test_energy_prefill_unified_grid_format(hass: HomeAssistant) -> None:
     ):
         defaults = await _energy_dashboard_defaults(hass)
 
-    assert defaults[CONF_BATT_IN] == "sensor.batt_in"
-    assert defaults[CONF_BATT_OUT] == "sensor.batt_out"
-    assert defaults[CONF_GRID_IN] == "sensor.grid_in"
-    assert defaults[CONF_GRID_OUT] == "sensor.grid_out"
-    assert defaults[CONF_SOLAR] == "sensor.solar"
+    assert defaults[CONF_BATT_IN] == ["sensor.batt_in"]
+    assert defaults[CONF_BATT_OUT] == ["sensor.batt_out"]
+    assert defaults[CONF_GRID_IN] == ["sensor.grid_in"]
+    assert defaults[CONF_GRID_OUT] == ["sensor.grid_out"]
+    assert defaults[CONF_SOLAR] == ["sensor.solar"]
 
 
 @pytest.mark.asyncio
@@ -288,8 +288,8 @@ async def test_energy_prefill_legacy_flow_format(hass: HomeAssistant) -> None:
     ):
         defaults = await _energy_dashboard_defaults(hass)
 
-    assert defaults[CONF_GRID_IN] == "sensor.grid_in_legacy"
-    assert defaults[CONF_GRID_OUT] == "sensor.grid_out_legacy"
+    assert defaults[CONF_GRID_IN] == ["sensor.grid_in_legacy"]
+    assert defaults[CONF_GRID_OUT] == ["sensor.grid_out_legacy"]
 
 
 @pytest.mark.asyncio
@@ -328,7 +328,7 @@ async def test_energy_prefill_skips_non_sensor_entities(hass: HomeAssistant) -> 
         defaults = await _energy_dashboard_defaults(hass)
 
     assert CONF_GRID_IN not in defaults
-    assert defaults.get(CONF_GRID_OUT) == "sensor.grid_out"
+    assert defaults.get(CONF_GRID_OUT) == ["sensor.grid_out"]
 
 
 # ---------------------------------------------------------------------------
@@ -506,11 +506,11 @@ async def test_reauth_flow_updates_token(hass: HomeAssistant) -> None:
     initial_data: dict[str, Any] = {
         CONF_TOKEN: "old-token",
         CONF_ZONE: ZONE,
-        CONF_BATT_IN: "sensor.battery_charge",
-        CONF_BATT_OUT: "sensor.battery_discharge",
-        CONF_GRID_IN: "sensor.grid_import",
-        CONF_GRID_OUT: "sensor.grid_export",
-        CONF_SOLAR: "sensor.solar",
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: ["sensor.solar"],
         CONF_BATTERY_KWH: 22.0,
         CONF_BATTERY_KW: 5.0,
         CONF_EFF: 0.9,
@@ -560,3 +560,139 @@ async def test_reauth_flow_updates_token(hass: HomeAssistant) -> None:
     assert updated_entry.data[CONF_TOKEN] == new_token
     # Other data must be intact
     assert updated_entry.data[CONF_ZONE] == ZONE
+
+
+# ---------------------------------------------------------------------------
+# Multi-sensor: two solar sensors → entry.data stores list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_two_solar_sensors(hass: HomeAssistant) -> None:
+    """Flow with two solar entity IDs stores a list in entry.data."""
+    mock_client = _mock_client()
+
+    two_solar_entities = {
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: ["sensor.solar_inverter_a", "sensor.solar_inverter_b"],
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=two_solar_entities
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    assert data[CONF_SOLAR] == ["sensor.solar_inverter_a", "sensor.solar_inverter_b"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-sensor: Required stream with empty list → validation error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_required_stream_empty_list_shows_error(hass: HomeAssistant) -> None:
+    """Required stream (batt_in) with empty list → re-shows form with required_sensor error."""
+    mock_client = _mock_client()
+
+    bad_entities = {
+        CONF_BATT_IN: [],  # empty = invalid for required stream
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=bad_entities
+        )
+
+    # Must re-show the entities form with the required_sensor error
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "entities"
+    assert result["errors"].get(CONF_BATT_IN) == "required_sensor"
+
+
+# ---------------------------------------------------------------------------
+# Multi-sensor: energy prefill collects multiple solar sources
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_energy_prefill_collects_multiple_solar_sources(hass: HomeAssistant) -> None:
+    """Two solar sources in energy dashboard → both collected in solar list."""
+    from custom_components.wolta.config_flow import _energy_dashboard_defaults
+
+    manager = _make_energy_manager(
+        [
+            {
+                "type": "battery",
+                "stat_energy_to": "sensor.batt_in",
+                "stat_energy_from": "sensor.batt_out",
+            },
+            {
+                "type": "solar",
+                "stat_energy_from": "sensor.solar_a",
+            },
+            {
+                "type": "solar",
+                "stat_energy_from": "sensor.solar_b",
+            },
+        ]
+    )
+
+    with patch(
+        "custom_components.wolta.config_flow.async_get_manager",
+        return_value=manager,
+    ):
+        defaults = await _energy_dashboard_defaults(hass)
+
+    solar = defaults.get(CONF_SOLAR)
+    assert isinstance(solar, list), "solar prefill must be a list"
+    assert "sensor.solar_a" in solar
+    assert "sensor.solar_b" in solar
+    assert len(solar) == 2

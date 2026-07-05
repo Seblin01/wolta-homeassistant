@@ -60,10 +60,11 @@ _LOGGER = logging.getLogger(__name__)
 async def _energy_dashboard_defaults(hass: Any) -> dict:
     """Extract entity IDs from the HA energy dashboard configuration.
 
+    Returns lists per stream, since multiple sources of the same type are allowed
+    (e.g. two solar inverters). Each list contains sensor.* entity IDs only.
     Handles both the unified grid format (stat_energy_from/to directly on the
     source dict) and the legacy flow_from/flow_to list format.
 
-    Returns only values that start with 'sensor.' (ignores unconfigured fields).
     Returns an empty dict when the energy component is not configured.
     """
     try:
@@ -72,27 +73,60 @@ async def _energy_dashboard_defaults(hass: Any) -> dict:
     except Exception:
         return {}
 
-    out: dict = {}
+    batt_in: list[str] = []
+    batt_out: list[str] = []
+    grid_in: list[str] = []
+    grid_out: list[str] = []
+    solar: list[str] = []
+
+    def _sensor(val: Any) -> str | None:
+        return val if isinstance(val, str) and val.startswith("sensor.") else None
+
     for src in (prefs or {}).get("energy_sources", []):
         if src["type"] == "battery":
             # stat_energy_to = charge-from-grid meter (batt_in)
             # stat_energy_from = discharge-to-home meter (batt_out)
-            out.setdefault("batt_in", src.get("stat_energy_to"))
-            out.setdefault("batt_out", src.get("stat_energy_from"))
+            v = _sensor(src.get("stat_energy_to"))
+            if v and v not in batt_in:
+                batt_in.append(v)
+            v = _sensor(src.get("stat_energy_from"))
+            if v and v not in batt_out:
+                batt_out.append(v)
         elif src["type"] == "solar":
-            out.setdefault("solar", src.get("stat_energy_from"))
+            v = _sensor(src.get("stat_energy_from"))
+            if v and v not in solar:
+                solar.append(v)
         elif src["type"] == "grid":
             # Unified format: stat_energy_from/to directly on the source
             if src.get("stat_energy_from"):
-                out.setdefault("grid_in", src["stat_energy_from"])
-                out.setdefault("grid_out", src.get("stat_energy_to"))
+                v = _sensor(src["stat_energy_from"])
+                if v and v not in grid_in:
+                    grid_in.append(v)
+                v = _sensor(src.get("stat_energy_to"))
+                if v and v not in grid_out:
+                    grid_out.append(v)
             # Legacy format: flow_from/flow_to lists
             for f in src.get("flow_from", []) or []:
-                out.setdefault("grid_in", f.get("stat_energy_from"))
+                v = _sensor(f.get("stat_energy_from"))
+                if v and v not in grid_in:
+                    grid_in.append(v)
             for f in src.get("flow_to", []) or []:
-                out.setdefault("grid_out", f.get("stat_energy_to"))
+                v = _sensor(f.get("stat_energy_to"))
+                if v and v not in grid_out:
+                    grid_out.append(v)
 
-    return {k: v for k, v in out.items() if isinstance(v, str) and v.startswith("sensor.")}
+    out: dict[str, list[str]] = {}
+    if batt_in:
+        out["batt_in"] = batt_in
+    if batt_out:
+        out["batt_out"] = batt_out
+    if grid_in:
+        out["grid_in"] = grid_in
+    if grid_out:
+        out["grid_out"] = grid_out
+    if solar:
+        out["solar"] = solar
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +165,7 @@ def _number_selector(
 
 def _energy_entity_selector() -> EntitySelector:
     return EntitySelector(
-        EntitySelectorConfig(domain="sensor", device_class="energy")
+        EntitySelectorConfig(domain="sensor", device_class="energy", multiple=True)
     )
 
 
@@ -196,11 +230,23 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._entities_data = user_input
-            return await self.async_step_privacy()
+            # Validate: required streams must have at least one sensor selected
+            required_streams = [CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT]
+            for key in required_streams:
+                val = user_input.get(key)
+                if not val:  # None, missing, or empty list
+                    errors[key] = "required_sensor"
 
-        # Prefill from HA energy dashboard if configured
-        defaults = await _energy_dashboard_defaults(self.hass)
+            if not errors:
+                self._entities_data = user_input
+                return await self.async_step_privacy()
+
+        # Prefill from HA energy dashboard if configured (returns lists)
+        # When re-showing after errors, use submitted values as defaults
+        if errors and user_input is not None:
+            defaults = user_input
+        else:
+            defaults = await _energy_dashboard_defaults(self.hass)
 
         schema = vol.Schema(
             {
