@@ -1,7 +1,7 @@
 {
   "domain": "wolta",
   "name": "Wolta",
-  "after_dependencies": ["energy"],
+  "after_dependencies": ["energy", "recorder"],
   "codeowners": ["@Seblin01"],
   "config_flow": true,
   "dependencies": [],
