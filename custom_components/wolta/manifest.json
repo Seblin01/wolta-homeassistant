@@ -1,10 +1,10 @@
 {
   "domain": "wolta",
   "name": "Wolta",
+  "after_dependencies": ["energy"],
   "codeowners": ["@Seblin01"],
   "config_flow": true,
   "dependencies": ["recorder"],
-  "after_dependencies": ["energy"],
   "documentation": "https://github.com/Seblin01/wolta-homeassistant",
   "integration_type": "service",
   "iot_class": "cloud_polling",
