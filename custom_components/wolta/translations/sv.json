@@ -15,13 +15,13 @@
           "battery_kwh": "Användbar batterikapacitet (kWh)",
           "battery_kw": "Batteriets maxeffekt (kW)",
           "eff": "Rundtripsverkningsgrad (0,5–1,0)",
-          "cost_sek": "Inköpspris (kr) – valfritt",
+          "cost_sek": "Batteriets inköpspris (kr) – endast batteriet, valfritt",
           "purchase_date": "Inköpsdatum – valfritt"
         },
         "data_description": {
           "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
           "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt.",
-          "cost_sek": "Totalt inköpspris för batteriet (och ev. solcellsinstallation) i kr. Används för att räkna IRR och återbetalningstid. Valfritt.",
+          "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller/installation) i kr. Används för att räkna batteriets IRR och återbetalningstid. Valfritt.",
           "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt."
         }
       },
@@ -67,11 +67,11 @@
         "title": "Wolta – ekonomiinställningar",
         "description": "Uppdatera inköpspris och inköpsdatum för att aktivera IRR-, återbetalnings- och 'facit i år'-sensorerna. Efter sparandet triggar Wolta en omberäkning (kan ta upp till 24 h om servern är på nedkylning).",
         "data": {
-          "cost_sek": "Inköpspris (kr)",
+          "cost_sek": "Batteriets inköpspris (kr) – endast batteriet",
           "purchase_date": "Inköpsdatum"
         },
         "data_description": {
-          "cost_sek": "Totalt inköpspris för batteriet (och ev. solcellsinstallation) i kr. Används för att räkna IRR och återbetalningstid.",
+          "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller) i kr. Används för att räkna batteriets IRR och återbetalningstid.",
           "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'."
         }
       }
