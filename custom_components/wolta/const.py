@@ -52,7 +52,7 @@ SUPPORTED_ZONES: list[tuple[str, str]] = [
     ("LT", "LT – Litauen"),
     # Central Europe
     ("NL", "NL – Nederländerna"),
-    ("DE-LU", "DE – Tyskland"),
+    ("DELU", "DE – Tyskland"),
     ("CZ", "CZ – Tjeckien"),
     ("AT", "AT – Österrike"),
     ("BE", "BE – Belgien"),
@@ -63,7 +63,7 @@ SUPPORTED_ZONES: list[tuple[str, str]] = [
     ("ES", "ES – Spanien"),
     ("PT", "PT – Portugal"),
     # South Europe
-    ("IT-NORD", "IT – Italien"),
+    ("IT_NORD", "IT – Italien"),
     ("GR", "GR – Grekland"),
     ("RO", "RO – Rumänien"),
     ("HU", "HU – Ungern"),
