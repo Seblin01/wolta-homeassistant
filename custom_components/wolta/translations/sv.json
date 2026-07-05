@@ -12,9 +12,13 @@
         "description": "Anslut Wolta till Home Assistant för att få betyg på batterioptimering och ekonomisensorer.",
         "data": {
           "zone": "Elpriszon",
-          "battery_kwh": "Batterikapacitet (kWh)",
-          "battery_kw": "Batterieffekt (kW)",
+          "battery_kwh": "Användbar batterikapacitet (kWh)",
+          "battery_kw": "Batteriets maxeffekt (kW)",
           "eff": "Rundtripsverkningsgrad (0,5–1,0)"
+        },
+        "data_description": {
+          "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
+          "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt."
         }
       },
       "entities": {

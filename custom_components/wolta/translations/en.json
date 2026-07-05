@@ -12,9 +12,13 @@
         "description": "Connect Wolta to Home Assistant to receive battery optimization grades and economy sensors.",
         "data": {
           "zone": "Electricity price zone",
-          "battery_kwh": "Battery capacity (kWh)",
-          "battery_kw": "Battery power (kW)",
+          "battery_kwh": "Usable battery capacity (kWh)",
+          "battery_kw": "Battery max power (kW)",
           "eff": "Round-trip efficiency (0.5–1.0)"
+        },
+        "data_description": {
+          "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity.",
+          "battery_kw": "Maximum battery charge/discharge power."
         }
       },
       "entities": {
