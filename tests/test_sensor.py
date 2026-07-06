@@ -442,3 +442,81 @@ def test_profile_url_quotes_token():
     from custom_components.wolta.const import profile_url
 
     assert profile_url("a/b+c") == "https://wolta.se/optimeringsbetyg?profile=a%2Fb%2Bc"
+
+
+# ---------------------------------------------------------------------------
+# v0.4.2: behåll värden under pågående omräkning + statussensor
+# ---------------------------------------------------------------------------
+
+RESULTS_RECOMPUTING = {
+    # recompute har bytt fingerprint → betyg/decision/history saknas medan workern räknar
+    "status": "running",
+    "currency": "SEK",
+    "period": {"start": "2025-01-01", "end": "2025-05-31", "n_days": 150},
+    "betyg": None,
+    "decision": None,
+    "history": None,
+}
+
+
+def _swap_results(sensor: WoltaSensor, results: dict) -> None:
+    """Simulera en ny coordinator-uppdatering med andra results."""
+    sensor.coordinator.data = WoltaData(
+        results=results,
+        last_uploaded=datetime(2025, 5, 31, 0, 0, 0, tzinfo=timezone.utc),
+        n_days=results["period"]["n_days"],
+        pending=results.get("status") in ("pending", "running"),
+    )
+
+
+def test_retains_value_during_recompute():
+    """Pågående omräkning (pending) → sensorn behåller senaste kända värdet
+    i stället för unavailable-blipp."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    assert s.native_value == pytest.approx(82.0, abs=0.01)  # populerar last-value
+
+    _swap_results(s, RESULTS_RECOMPUTING)
+    assert s.available is True, "ska vara available under pågående beräkning"
+    assert s.native_value == pytest.approx(82.0, abs=0.01), "senaste värdet ska behållas"
+
+
+def test_retained_attrs_flag_beraknar():
+    """Behållna attribut flaggas med beraknar: True under omräkningen."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    _ = s.native_value
+    _ = s.extra_state_attributes  # populerar last-attrs
+
+    _swap_results(s, RESULTS_RECOMPUTING)
+    attrs = s.extra_state_attributes
+    assert attrs.get("beraknar") is True
+    assert attrs.get("peer_percentil") == 68, "tidigare attribut ska behållas"
+
+
+def test_unavailable_when_missing_and_not_pending():
+    """Saknat värde UTAN pågående beräkning → unavailable som förr (ingen maskering)."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    _ = s.native_value
+    _swap_results(s, {**RESULTS_RECOMPUTING, "status": "done"})
+    assert s.available is False
+
+
+def test_fresh_sensor_during_recompute_still_unavailable():
+    """Utan tidigare känt värde (t.ex. efter HA-omstart) → unavailable även under pending."""
+    s = _sensor("optimeringsbetyg", RESULTS_RECOMPUTING)
+    assert s.available is False
+
+
+def test_status_sensor_mapping():
+    """Statussensorn mappar serverstatus → Klar/Beräknar/Väntar på data/Fel."""
+    cases = [
+        ({**RESULTS_FULL, "status": "done"}, "Klar"),
+        (RESULTS_RECOMPUTING, "Beräknar"),
+        ({**RESULTS_RECOMPUTING, "status": "pending"}, "Beräknar"),
+        ({**RESULTS_RECOMPUTING, "status": "error"}, "Fel"),
+        ({**RESULTS_RECOMPUTING, "status": "cold"}, "Väntar på data"),
+        ({**RESULTS_RECOMPUTING, "status": "no_data"}, "Väntar på data"),
+    ]
+    for results, expected in cases:
+        s = _sensor("status", results)
+        assert s.available is True
+        assert s.native_value == expected, f"{results['status']} → {expected}"

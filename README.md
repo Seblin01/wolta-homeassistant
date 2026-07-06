@@ -20,6 +20,7 @@ After setup the integration automatically:
 | `sensor.wolta_payback` | år | Estimated payback period. SE zones only. |
 | `sensor.wolta_facit_i_ar` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_datastatus` | timestamp | Last data point uploaded (diagnostic). Always available. |
+| `sensor.wolta_status` | enum | Computation status: Klar / Beräknar / Väntar på data / Fel. Always available. |
 
 A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
 
@@ -124,6 +125,8 @@ The dashboard ends with a markdown card linking to your full results on wolta.se
 Economy sensors (`batterivarde_ar`, `irr`, `payback`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
+
+During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `beraknar: true` flag and `sensor.wolta_status` shows **Beräknar** until the new results land (v0.4.2+).
 
 ## License
 

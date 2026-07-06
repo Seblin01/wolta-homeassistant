@@ -89,7 +89,31 @@ def _currency(results: dict) -> str:
     return results.get("currency") or "SEK"
 
 
+# Serverstatus → användarvänligt enum-state för statussensorn (v0.4.2)
+_STATUS_MAP = {
+    "done": "Klar",
+    "pending": "Beräknar",
+    "running": "Beräknar",
+    "error": "Fel",
+    "cold": "Väntar på data",
+    "no_data": "Väntar på data",
+}
+_STATUS_OPTIONS = ["Klar", "Beräknar", "Väntar på data", "Fel"]
+
+
 SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
+    WoltaSensorEntityDescription(
+        key="status",
+        name="Status",
+        device_class=SensorDeviceClass.ENUM,
+        options=_STATUS_OPTIONS,
+        value_fn=lambda r: _STATUS_MAP.get(r.get("status"), "Väntar på data"),
+        attr_fn=lambda data: {
+            "server_status": data.results.get("status"),
+            "jobb": (data.results.get("job") or {}).get("status"),
+            "steg": (data.results.get("job") or {}).get("step"),
+        },
+    ),
     WoltaSensorEntityDescription(
         key="optimeringsbetyg",
         name="Optimeringsbetyg",
@@ -219,6 +243,12 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._entry = entry
+        # v0.4.2: senaste kända värde/attribut – serveras under en pågående server-
+        # beräkning (recompute byter fingerprint → betyg/decision saknas någon minut)
+        # så sensorerna slipper unavailable-blippen. Bara i minnet: efter HA-omstart
+        # mitt i en beräkning blir sensorn unavailable tills beräkningen är klar (ok).
+        self._last_value: Any = None
+        self._last_attrs: dict[str, Any] | None = None
         self._attr_unique_id = f"{entry.unique_id}_{description.key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -234,16 +264,25 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Sensor is available when coordinator has data and source is not None."""
+        """Sensor is available when coordinator has data and source is not None.
+        Under en pågående server-beräkning (pending) räknas sensorn som available
+        om ett tidigare känt värde finns att behålla."""
         if not self.coordinator.last_update_success or self.coordinator.data is None:
             return False
-        return self.entity_description.available_fn(self.coordinator.data.results)
+        if self.entity_description.available_fn(self.coordinator.data.results):
+            return True
+        return self.coordinator.data.pending and self._last_value is not None
 
     @property
     def native_value(self) -> Any:
         if self.coordinator.data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data.results)
+        val = self.entity_description.value_fn(self.coordinator.data.results)
+        if val is None and self.coordinator.data.pending:
+            return self._last_value
+        if val is not None:
+            self._last_value = val
+        return val
 
     @property
     def native_unit_of_measurement(self) -> str | None:
@@ -258,7 +297,18 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        return self.entity_description.attr_fn(self.coordinator.data)
+        data = self.coordinator.data
+        if (
+            not self.entity_description.available_fn(data.results)
+            and data.pending
+            and self._last_attrs is not None
+        ):
+            # Behållna attribut under omräkning, flaggade så det syns i UI:t
+            return {**self._last_attrs, "beraknar": True}
+        attrs = self.entity_description.attr_fn(data)
+        if self.entity_description.available_fn(data.results):
+            self._last_attrs = attrs
+        return attrs
 
 
 # ---------------------------------------------------------------------------

@@ -52,10 +52,12 @@ views:
                 entity: sensor.wolta_aterbetalningstid
                 name: "Återbetalningstid"
 
-          # ── Datastatus (diagnostik) ──────────────────────────────────────
+          # ── Status + datastatus ──────────────────────────────────────────
           - type: entities
             title: Datastatus
             entities:
+              - entity: sensor.wolta_status
+                name: Status
               - entity: sensor.wolta_datastatus
                 name: Senaste datapunkt
 
