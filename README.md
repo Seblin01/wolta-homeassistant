@@ -15,16 +15,16 @@ After setup the integration automatically:
 | Entity | Unit | Description |
 |--------|------|-------------|
 | `sensor.wolta_optimeringsbetyg` | % | Holistic optimisation score (0–100). Available for all price zones. |
-| `sensor.wolta_batterivarde_ar` | SEK / EUR | Average annual battery value. SE zones only. |
-| `sensor.wolta_irr` | % | Internal rate of return on the battery investment. SE zones only. |
-| `sensor.wolta_payback` | år | Estimated payback period. SE zones only. |
+| `sensor.wolta_batterivarde_per_ar` | SEK / EUR | Average annual battery value. SE zones only. |
+| `sensor.wolta_intern_avkastning_irr` | % | Internal rate of return on the battery investment. SE zones only. |
+| `sensor.wolta_aterbetalningstid` | år | Estimated payback period. SE zones only. |
 | `sensor.wolta_facit_i_ar` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_datastatus` | timestamp | Last data point uploaded (diagnostic). Always available. |
 | `sensor.wolta_status` | enum | Computation status: Klar / Beräknar / Väntar på data / Fel. Always available. |
 
 A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
 
-Economy sensors (`batterivarde_ar`, `irr`, `payback`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). For other zones the `optimeringsbetyg` and `datastatus` sensors still work.
+Economy sensors (`batterivarde_per_ar`, `intern_avkastning_irr`, `aterbetalningstid`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). For other zones the `optimeringsbetyg`, `status` and `datastatus` sensors still work.
 
 ## Requirements
 
@@ -109,10 +109,11 @@ HA slugifies the device name during installation. Default entity IDs are:
 | Sensor | Default entity ID |
 |--------|-------------------|
 | Optimeringsbetyg | `sensor.wolta_optimeringsbetyg` |
-| Batterivärde per år | `sensor.wolta_batterivarde_ar` |
-| Intern avkastning (IRR) | `sensor.wolta_irr` |
-| Återbetalningstid | `sensor.wolta_payback` |
+| Batterivärde per år | `sensor.wolta_batterivarde_per_ar` |
+| Intern avkastning (IRR) | `sensor.wolta_intern_avkastning_irr` |
+| Återbetalningstid | `sensor.wolta_aterbetalningstid` |
 | Facit i år | `sensor.wolta_facit_i_ar` |
+| Status | `sensor.wolta_status` |
 | Datastatus | `sensor.wolta_datastatus` |
 | Räkna om (button) | `button.wolta_rakna_om` |
 
@@ -122,7 +123,7 @@ If your entities have a different suffix (e.g. `_2` when installed more than onc
 
 The dashboard ends with a markdown card linking to your full results on wolta.se. The link is resolved dynamically from the device's `configuration_url` (v0.4.1+), so no manual token pasting is needed.
 
-Economy sensors (`batterivarde_ar`, `irr`, `payback`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
+Economy sensors (`batterivarde_per_ar`, `intern_avkastning_irr`, `aterbetalningstid`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
 
