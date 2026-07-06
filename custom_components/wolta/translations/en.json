@@ -103,6 +103,9 @@
       "batterivarde_ar": {
         "name": "Battery value per year"
       },
+      "anlaggningsbesparing_ar": {
+        "name": "Plant savings per year"
+      },
       "irr": {
         "name": "Internal rate of return (IRR)"
       },

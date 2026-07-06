@@ -77,6 +77,23 @@ def _decision_available(results: dict) -> bool:
     return results.get("decision") is not None
 
 
+def _battery_value(results: dict) -> float | None:
+    """Batteriets värde per år – UPPMÄTT ur betygsberäkningen när det finns
+    (betyg.holistic.measured_total_sek, samma siffra som wolta.se visar),
+    annars decision-motorns modellerade batteridel (avg_battery_sek).
+    ALDRIG decision.avg_annual_sek – den är hela anläggningens besparing
+    inklusive solvärdet (plan 33)."""
+    holistic = (results.get("betyg") or {}).get("holistic") or {}
+    measured = holistic.get("measured_total_sek")
+    if measured is not None:
+        return measured
+    return (results.get("decision") or {}).get("avg_battery_sek")
+
+
+def _battery_value_available(results: dict) -> bool:
+    return _battery_value(results) is not None
+
+
 def _history_available(results: dict) -> bool:
     hist = results.get("history")
     if hist is None:
@@ -143,10 +160,40 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="batterivarde_ar",
         # unit set dynamically in sensor class
         suggested_display_precision=0,
+        value_fn=_battery_value,
+        available_fn=_battery_value_available,
+        attr_fn=lambda data: (
+            {
+                "source": (
+                    "measured"
+                    if ((data.results.get("betyg") or {}).get("holistic") or {})
+                    .get("measured_total_sek") is not None
+                    else "modelled"
+                ),
+                "plant_total_sek": (data.results.get("decision") or {}).get(
+                    "avg_annual_sek"
+                ),
+            }
+            if _battery_value_available(data.results)
+            else {"reason": "not enough data for a grade yet"}
+        ),
+    ),
+    WoltaSensorEntityDescription(
+        key="anlaggningsbesparing_ar",
+        translation_key="anlaggningsbesparing_ar",
+        # unit set dynamically in sensor class
+        suggested_display_precision=0,
         value_fn=lambda r: (r.get("decision") or {}).get("avg_annual_sek"),
         available_fn=_decision_available,
         attr_fn=lambda data: (
-            {}
+            {
+                "battery_sek": (data.results.get("decision") or {}).get(
+                    "avg_battery_sek"
+                ),
+                "solar_sek": (data.results.get("decision") or {}).get(
+                    "avg_solar_sek"
+                ),
+            }
             if _decision_available(data.results)
             else {"reason": "economy calculations are only available for Swedish price zones"}
         ),

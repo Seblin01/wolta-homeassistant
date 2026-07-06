@@ -45,6 +45,8 @@ RESULTS_FULL = {
     },
     "decision": {
         "avg_annual_sek": 12500.0,
+        "avg_battery_sek": 2900.0,
+        "avg_solar_sek": 9600.0,
         "irr": 0.073,
         "payback_years": 8.5,
         "effective_capex": 85000.0,
@@ -249,9 +251,30 @@ def test_optimeringsbetyg_unavailable_when_score_on_missing():
 # ---------------------------------------------------------------------------
 
 
-def test_batterivarde_ar_value():
+def test_batterivarde_ar_value_is_measured_battery_value():
+    """v0.5.0 (plan 33): sensorn visar betygets UPPMÄTTA batterivärde
+    (betyg.holistic.measured_total_sek) – samma siffra som webbens "Du fångade" –
+    inte decision.avg_annual_sek som är HELA anläggningens besparing (sol+batteri)."""
     s = _sensor("batterivarde_ar", RESULTS_FULL)
-    assert s.native_value == pytest.approx(12500.0)
+    assert s.native_value == pytest.approx(9800.0)
+
+
+def test_batterivarde_ar_falls_back_to_modelled_battery_value():
+    """Utan betyg men med decision → decision.avg_battery_sek (batteri-only), ALDRIG
+    anläggningstotalen."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": None,
+    }
+    s = _sensor("batterivarde_ar", results)
+    assert s.native_value == pytest.approx(2900.0)
+
+
+def test_batterivarde_ar_exposes_plant_total_attr():
+    s = _sensor("batterivarde_ar", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    assert attrs.get("source") == "measured"
+    assert attrs.get("plant_total_sek") == pytest.approx(12500.0)
 
 
 def test_batterivarde_ar_unit_sek():
@@ -276,8 +299,18 @@ def test_batterivarde_ar_unit_eur():
     assert s.native_unit_of_measurement == "EUR"
 
 
-def test_batterivarde_ar_unavailable_when_decision_none():
+def test_batterivarde_ar_available_from_grade_without_decision():
+    """v0.5.0: uppmätt batterivärde kommer ur BETYGET → tillgängligt även när
+    decision saknas (t.ex. icke-SE-profiler)."""
     s = _sensor("batterivarde_ar", RESULTS_NO_DECISION)
+    assert s.available is True
+    assert s.native_value == pytest.approx(8000.0)
+    assert s.extra_state_attributes.get("source") == "measured"
+
+
+def test_batterivarde_ar_unavailable_without_grade_and_decision():
+    results = {**RESULTS_NO_DECISION, "betyg": None}
+    s = _sensor("batterivarde_ar", results)
     assert s.available is False
 
 
@@ -397,10 +430,17 @@ def test_sp3_nonse_grade_available():
 
 
 def test_sp3_nonse_economy_sensors_unavailable():
-    """Non-SE profile: all economy sensors unavailable (decision=None)."""
-    for key in ("batterivarde_ar", "irr", "payback"):
+    """Non-SE profile: IRR/payback/plant-besparing kräver decision (SE-only).
+    Batterivärdet är sedan v0.5.0 UPPMÄTT ur betyget → tillgängligt även non-SE."""
+    for key in ("irr", "payback", "anlaggningsbesparing_ar"):
         s = _sensor(key, RESULTS_EUR)
         assert s.available is False, f"{key} should be unavailable for non-SE"
+
+
+def test_sp3_nonse_battery_value_available_from_grade():
+    s = _sensor("batterivarde_ar", RESULTS_EUR)
+    assert s.available is True
+    assert s.native_value == pytest.approx(800.0)
 
 
 def test_sp3_nonse_facit_unavailable():
@@ -530,3 +570,18 @@ def test_sek_sensors_suggest_zero_decimals():
     for key in ("batterivarde_ar", "facit_i_ar"):
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
         assert desc.suggested_display_precision == 0, key
+
+
+# ---------------------------------------------------------------------------
+# anlaggningsbesparing_ar (plan 33)
+# ---------------------------------------------------------------------------
+
+
+def test_plant_savings_value_is_avg_annual():
+    s = _sensor("anlaggningsbesparing_ar", RESULTS_FULL)
+    assert s.native_value == pytest.approx(12500.0)
+
+
+def test_plant_savings_unavailable_without_decision():
+    s = _sensor("anlaggningsbesparing_ar", RESULTS_NO_DECISION)
+    assert s.available is False
