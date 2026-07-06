@@ -16,17 +16,27 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 
 | Entity | Unit | Description |
 |--------|------|-------------|
-| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100). Available for all price zones. |
-| `sensor.wolta_battery_value_per_year` | SEK / EUR | Average annual battery value. SE zones only. |
-| `sensor.wolta_internal_rate_of_return_irr` | % | Internal rate of return on the battery investment. SE zones only. |
-| `sensor.wolta_payback_time` | yr | Estimated payback period. SE zones only. |
+| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100): the share of the battery's theoretically perfect total value your actual operation captured. All price zones. |
+| `sensor.wolta_battery_value_per_year` | SEK / EUR | The battery's **own** annual value — the incremental saving vs. the same plant without a battery. Measured from your actual flows (the same number wolta.se shows as "You captured"); falls back to the modelled battery share when no grade exists yet. Attribute `source` tells you which (`measured`/`modelled`); `plant_total_sek` carries the plant total. All price zones. Solar's value is **not** included — it belongs to the solar investment. |
+| `sensor.wolta_plant_savings_per_year` | SEK / EUR | Total annual saving of the whole plant (solar + battery), i.e. what a combined solar-plus-battery investment earns. Attributes `battery_sek`/`solar_sek` give the split. SE zones only. |
+| `sensor.wolta_internal_rate_of_return_irr` | % | IRR of the **battery investment**: the battery-only savings stream against the battery's purchase price (incremental cash-flow principle). Can be negative — that means the battery alone does not carry its cost. SE zones only. |
+| `sensor.wolta_payback_time` | yr | Payback of the battery investment from the battery-only savings stream. `unknown` when the stream never repays the cost within the projection horizon. SE zones only. |
 | `sensor.wolta_actual_savings_this_year` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_data_status` | timestamp | Last data point uploaded (diagnostic). Always available. |
 | `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
 
 A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
 
-Economy sensors (battery value, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). For other zones the grade, status and data-status sensors still work.
+Economy sensors that require the decision engine (plant savings, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). The grade and the measured battery value work for all supported zones.
+
+### Why battery value ≠ plant savings
+
+Before v0.5.0 the battery-value sensor showed the whole plant's saving (solar + battery),
+which overstated the battery. A battery's value is the *incremental* value versus running
+the same plant without it — standard methodology in battery-retrofit economics (NREL
+solar-plus-storage analyses, Solcellskollen's Swedish calculations) and investment
+appraisal (incremental cash-flow principle). If you want the big number, it is still
+there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
 ## Requirements
 
