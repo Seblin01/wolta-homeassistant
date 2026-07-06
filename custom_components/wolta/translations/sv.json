@@ -85,5 +85,41 @@
     "error": {
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen."
     }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "done": "Klar",
+          "computing": "Beräknar",
+          "waiting_for_data": "Väntar på data",
+          "error": "Fel"
+        }
+      },
+      "optimeringsbetyg": {
+        "name": "Optimeringsbetyg"
+      },
+      "batterivarde_ar": {
+        "name": "Batterivärde per år"
+      },
+      "irr": {
+        "name": "Intern avkastning (IRR)"
+      },
+      "payback": {
+        "name": "Återbetalningstid"
+      },
+      "facit_i_ar": {
+        "name": "Facit i år"
+      },
+      "datastatus": {
+        "name": "Datastatus"
+      }
+    },
+    "button": {
+      "recompute": {
+        "name": "Räkna om"
+      }
+    }
   }
 }

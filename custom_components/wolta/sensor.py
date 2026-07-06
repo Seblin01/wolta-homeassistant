@@ -89,25 +89,26 @@ def _currency(results: dict) -> str:
     return results.get("currency") or "SEK"
 
 
-# Serverstatus → användarvänligt enum-state för statussensorn (v0.4.2)
+# Serverstatus → stabilt enum-state (slug) för statussensorn. Visningen översätts via
+# translation_key (sv: Klar/Beräknar/Väntar på data/Fel; en: Done/Computing/...) – v0.4.3.
 _STATUS_MAP = {
-    "done": "Klar",
-    "pending": "Beräknar",
-    "running": "Beräknar",
-    "error": "Fel",
-    "cold": "Väntar på data",
-    "no_data": "Väntar på data",
+    "done": "done",
+    "pending": "computing",
+    "running": "computing",
+    "error": "error",
+    "cold": "waiting_for_data",
+    "no_data": "waiting_for_data",
 }
-_STATUS_OPTIONS = ["Klar", "Beräknar", "Väntar på data", "Fel"]
+_STATUS_OPTIONS = ["done", "computing", "waiting_for_data", "error"]
 
 
 SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     WoltaSensorEntityDescription(
         key="status",
-        name="Status",
+        translation_key="status",
         device_class=SensorDeviceClass.ENUM,
         options=_STATUS_OPTIONS,
-        value_fn=lambda r: _STATUS_MAP.get(r.get("status"), "Väntar på data"),
+        value_fn=lambda r: _STATUS_MAP.get(r.get("status"), "waiting_for_data"),
         attr_fn=lambda data: {
             "server_status": data.results.get("status"),
             "jobb": (data.results.get("job") or {}).get("status"),
@@ -116,7 +117,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="optimeringsbetyg",
-        name="Optimeringsbetyg",
+        translation_key="optimeringsbetyg",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=_betyg_score,
@@ -139,7 +140,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="batterivarde_ar",
-        name="Batterivärde per år",
+        translation_key="batterivarde_ar",
         # unit set dynamically in sensor class
         value_fn=lambda r: (r.get("decision") or {}).get("avg_annual_sek"),
         available_fn=_decision_available,
@@ -151,7 +152,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="irr",
-        name="Intern avkastning (IRR)",
+        translation_key="irr",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda r: (
@@ -168,7 +169,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="payback",
-        name="Återbetalningstid",
+        translation_key="payback",
         native_unit_of_measurement="år",
         value_fn=lambda r: (r.get("decision") or {}).get("payback_years"),
         available_fn=_decision_available,
@@ -180,7 +181,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="facit_i_ar",
-        name="Facit i år",
+        translation_key="facit_i_ar",
         # unit set dynamically in sensor class
         value_fn=lambda r: (
             (r.get("history") or {}).get("yearly", [{}])[-1].get("total_sek")
@@ -204,7 +205,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
     WoltaSensorEntityDescription(
         key="datastatus",
-        name="Datastatus",
+        translation_key="datastatus",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_period_end_ts,

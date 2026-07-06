@@ -20,7 +20,7 @@ After setup the integration automatically:
 | `sensor.wolta_aterbetalningstid` | år | Estimated payback period. SE zones only. |
 | `sensor.wolta_facit_i_ar` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_datastatus` | timestamp | Last data point uploaded (diagnostic). Always available. |
-| `sensor.wolta_status` | enum | Computation status: Klar / Beräknar / Väntar på data / Fel. Always available. |
+| `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
 
 A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
 
@@ -104,7 +104,7 @@ A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wol
 
 ### Verify entity IDs
 
-HA slugifies the device name during installation. Default entity IDs are:
+Entity names follow your Home Assistant language (English and Swedish translations are bundled; other languages fall back to English). HA generates entity IDs from the translated names at install time, so on a **Swedish** HA instance the defaults are:
 
 | Sensor | Default entity ID |
 |--------|-------------------|
@@ -117,7 +117,7 @@ HA slugifies the device name during installation. Default entity IDs are:
 | Datastatus | `sensor.wolta_datastatus` |
 | Räkna om (button) | `button.wolta_rakna_om` |
 
-If your entities have a different suffix (e.g. `_2` when installed more than once): go to **Settings → Devices & Services → Wolta** to see the exact names.
+On an English-language instance the IDs derive from the English names instead (e.g. `sensor.wolta_optimisation_grade`). If your entities differ (other language, or `_2` suffix when installed more than once): go to **Settings → Devices & Services → Wolta** to see the exact IDs, and adjust the dashboard YAML accordingly.
 
 ### Notes
 

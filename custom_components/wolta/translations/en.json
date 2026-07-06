@@ -85,5 +85,41 @@
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again."
     }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "done": "Done",
+          "computing": "Computing",
+          "waiting_for_data": "Waiting for data",
+          "error": "Error"
+        }
+      },
+      "optimeringsbetyg": {
+        "name": "Optimisation grade"
+      },
+      "batterivarde_ar": {
+        "name": "Battery value per year"
+      },
+      "irr": {
+        "name": "Internal rate of return (IRR)"
+      },
+      "payback": {
+        "name": "Payback time"
+      },
+      "facit_i_ar": {
+        "name": "Actual savings this year"
+      },
+      "datastatus": {
+        "name": "Data status"
+      }
+    },
+    "button": {
+      "recompute": {
+        "name": "Recompute"
+      }
+    }
   }
 }

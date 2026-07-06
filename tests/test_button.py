@@ -92,8 +92,9 @@ def test_button_unique_id():
     assert btn.unique_id == f"{ENTRY_ID}_recompute"
 
 
-def test_button_has_name():
+def test_button_has_translation_key():
+    """v0.4.3: namnet kommer från translations (sv: Räkna om / en: Recompute)."""
     coord = _make_coordinator()
     btn = _make_button(coord)
-    assert btn.name is not None
-    assert len(btn.name) > 0
+    assert btn._attr_translation_key == "recompute"
+    assert btn._attr_has_entity_name is True

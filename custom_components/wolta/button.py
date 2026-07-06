@@ -19,7 +19,7 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
     """Button that immediately triggers a server-side Wolta recompute."""
 
     _attr_has_entity_name = True
-    _attr_name = "Räkna om"
+    _attr_translation_key = "recompute"
 
     def __init__(
         self,

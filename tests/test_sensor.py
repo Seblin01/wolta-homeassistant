@@ -507,14 +507,14 @@ def test_fresh_sensor_during_recompute_still_unavailable():
 
 
 def test_status_sensor_mapping():
-    """Statussensorn mappar serverstatus → Klar/Beräknar/Väntar på data/Fel."""
+    """Statussensorn mappar serverstatus → stabila slugs (visningen översätts via translation_key)."""
     cases = [
-        ({**RESULTS_FULL, "status": "done"}, "Klar"),
-        (RESULTS_RECOMPUTING, "Beräknar"),
-        ({**RESULTS_RECOMPUTING, "status": "pending"}, "Beräknar"),
-        ({**RESULTS_RECOMPUTING, "status": "error"}, "Fel"),
-        ({**RESULTS_RECOMPUTING, "status": "cold"}, "Väntar på data"),
-        ({**RESULTS_RECOMPUTING, "status": "no_data"}, "Väntar på data"),
+        ({**RESULTS_FULL, "status": "done"}, "done"),
+        (RESULTS_RECOMPUTING, "computing"),
+        ({**RESULTS_RECOMPUTING, "status": "pending"}, "computing"),
+        ({**RESULTS_RECOMPUTING, "status": "error"}, "error"),
+        ({**RESULTS_RECOMPUTING, "status": "cold"}, "waiting_for_data"),
+        ({**RESULTS_RECOMPUTING, "status": "no_data"}, "waiting_for_data"),
     ]
     for results, expected in cases:
         s = _sensor("status", results)
