@@ -862,6 +862,9 @@ async def test_options_flow_patches_profile_and_updates_entry(hass: HomeAssistan
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
                 CONF_COST_SEK: 95000.0,
                 CONF_PURCHASE_DATE: "2023-03-01",
             },
@@ -869,12 +872,13 @@ async def test_options_flow_patches_profile_and_updates_entry(hass: HomeAssistan
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
 
-    # patch_profile must have been called with the right args
+    # patch_profile must have been called with ONLY the changed fields
     mock_client.patch_profile.assert_awaited_once()
     call_args = mock_client.patch_profile.call_args
     assert call_args.args[0] == TOKEN  # first positional arg is token
-    assert call_args.kwargs["cost_sek"] == 95000.0
-    assert call_args.kwargs["purchase_date"] == "2023-03-01"
+    assert call_args.kwargs == {"cost_sek": 95000.0, "purchase_date": "2023-03-01"}, (
+        "unchanged plant fields must not be PATCHed"
+    )
 
     # entry.data must be updated with the new values
     updated = hass.config_entries.async_get_entry(entry.entry_id)
@@ -913,13 +917,124 @@ async def test_options_flow_swallows_recompute_rate_limit(hass: HomeAssistant) -
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
-            user_input={CONF_COST_SEK: 80000.0, CONF_PURCHASE_DATE: "2021-06-01"},
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_COST_SEK: 80000.0,
+                CONF_PURCHASE_DATE: "2021-06-01",
+            },
         )
 
     # Must complete successfully despite the cooldown
     assert result["type"] == FlowResultType.CREATE_ENTRY
     # patch_profile still ran
     mock_client.patch_profile.assert_awaited_once()
+
+
+def _mock_options_env(entry):
+    """Return (client, coordinator) mocks wired to the entry."""
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"profile_token": TOKEN})
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+    return mock_client, mock_coordinator
+
+
+@pytest.mark.asyncio
+async def test_options_flow_patches_only_changed_plant_fields(hass: HomeAssistant) -> None:
+    """v0.4.0: changing battery_kwh only → PATCH contains only battery_kwh."""
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 30.0,   # ändrad
+                CONF_BATTERY_KW: 5.0,     # oförändrad
+                CONF_EFF: 0.9,            # oförändrad
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"battery_kwh": 30.0}
+
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATTERY_KWH] == 30.0
+    assert updated.data[CONF_BATTERY_KW] == 5.0
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_unchanged_form_no_patch(hass: HomeAssistant) -> None:
+    """v0.4.0: submitting the untouched form → no PATCH, no recompute."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_COST_SEK: 75000.0, CONF_PURCHASE_DATE: "2020-05-10"}
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_COST_SEK: 75000.0,
+                CONF_PURCHASE_DATE: "2020-05-10",
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+    mock_coordinator.async_trigger_recompute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_cost_and_date(hass: HomeAssistant) -> None:
+    """v0.4.0: clearing prefilled cost/date (absent keys) → PATCH null + keys removed
+    from entry.data (v0.3.0 silently swallowed cleared values)."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_COST_SEK: 75000.0, CONF_PURCHASE_DATE: "2020-05-10"}
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # cost_sek/purchase_date utelämnade = rensade fält
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {
+        "cost_sek": None,
+        "purchase_date": None,
+    }
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_COST_SEK not in updated.data
+    assert CONF_PURCHASE_DATE not in updated.data
 
 
 @pytest.mark.asyncio
@@ -952,8 +1067,16 @@ async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> Non
     # The schema defaults should reflect the existing entry data
     schema = result["data_schema"].schema
     schema_keys = {k.schema if hasattr(k, "schema") else str(k): k for k in schema}
-    # Check cost_sek default is pre-filled
+    # Plant defaults pre-filled from entry.data; cost via suggested_value (NOT default –
+    # a default would be re-injected by voluptuous when the user clears the field)
+    seen = {}
     for k in schema:
         key_name = k.schema if hasattr(k, "schema") else str(k)
+        if key_name in (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF):
+            seen[key_name] = k.default()
         if key_name == CONF_COST_SEK:
-            assert k.default() == 75000.0
+            seen[key_name] = (k.description or {}).get("suggested_value")
+    assert seen[CONF_COST_SEK] == 75000.0
+    assert seen[CONF_BATTERY_KWH] == 22.0
+    assert seen[CONF_BATTERY_KW] == 5.0
+    assert seen[CONF_EFF] == 0.9

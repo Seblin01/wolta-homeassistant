@@ -63,6 +63,15 @@ No account or API token is required. The integration provisions a profile automa
 - Opt in to anonymised data sharing (off by default) if you want to contribute to the Wolta benchmark.
 - Confirm to create the profile and complete setup.
 
+## Adjusting values afterwards
+
+Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration:
+
+- Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
+- Battery purchase price and purchase date — used for IRR, payback and "facit i år". Clearing a field removes the value.
+
+Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically and the sensors update within minutes.
+
 ## Privacy
 
 Your 15-minute energy data is stored on Wolta's servers to power the analysis. No personal data (name, address, account) is sent or required.

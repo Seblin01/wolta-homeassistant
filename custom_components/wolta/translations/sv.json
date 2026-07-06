@@ -64,20 +64,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "Wolta – ekonomiinställningar",
-        "description": "Uppdatera inköpspris och inköpsdatum för att aktivera IRR-, återbetalnings- och 'facit i år'-sensorerna. Efter sparandet triggar Wolta en omberäkning (kan ta upp till 24 h om servern är på nedkylning).",
+        "title": "Wolta – justera profil",
+        "description": "Justera batterivärden och ekonomi. Bara ändrade fält skickas till Wolta; rensar du inköpspris eller datum tas värdet bort. Efter sparande räknar Wolta om betyg och ekonomi (sensorerna uppdateras inom minuter).",
         "data": {
-          "cost_sek": "Batteriets inköpspris (kr) – endast batteriet",
+          "battery_kwh": "Batterikapacitet (kWh)",
+          "battery_kw": "Batterieffekt (kW)",
+          "eff": "Verkningsgrad (tur och retur)",
+          "cost_sek": "Inköpspris batteri (kr) – endast batteriet",
           "purchase_date": "Inköpsdatum"
         },
         "data_description": {
-          "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller) i kr. Används för att räkna batteriets IRR och återbetalningstid.",
-          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'."
+          "battery_kwh": "Användbar batterikapacitet i kWh.",
+          "battery_kw": "Maximal ladd-/urladdningseffekt i kW.",
+          "eff": "Verkningsgrad tur och retur (0,5–1,0). Ändrade anläggningsvärden räknar om betyget server-side.",
+          "cost_sek": "Inköpspris för ENDAST batteriet (inte solpaneler) i SEK. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
+          "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Används för 'Facit i år'. Rensa fältet för att ta bort värdet."
         }
       }
     },
     "error": {
-      "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen."
+      "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen."
     }
   }
 }

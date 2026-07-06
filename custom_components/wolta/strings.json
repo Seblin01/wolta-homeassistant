@@ -64,15 +64,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Wolta – economy settings",
-        "description": "Update purchase price and purchase date to enable IRR, payback and 'facit i år' sensors. After saving, Wolta will trigger a recompute (may take up to 24 h if the server is on cooldown).",
+        "title": "Wolta – adjust profile",
+        "description": "Adjust battery specs and economy values. Only changed fields are sent to Wolta; clearing purchase price or date removes the value. After saving, Wolta recomputes grade and economy (sensors update within minutes).",
         "data": {
+          "battery_kwh": "Battery capacity (kWh)",
+          "battery_kw": "Battery power (kW)",
+          "eff": "Round-trip efficiency",
           "cost_sek": "Battery purchase price (kr) – battery only",
           "purchase_date": "Purchase date"
         },
         "data_description": {
-          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate 'facit i år'."
+          "battery_kwh": "Usable battery capacity in kWh.",
+          "battery_kw": "Maximum charge/discharge power in kW.",
+          "eff": "Round-trip efficiency (0.5–1.0). Changing plant values triggers a server-side regrade.",
+          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
+          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate 'facit i år'. Clear the field to remove the value."
         }
       }
     },

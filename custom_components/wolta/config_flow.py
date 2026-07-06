@@ -430,8 +430,17 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 # ---------------------------------------------------------------------------
-# Options flow (v0.3.0) – edit cost_sek and purchase_date on an existing entry
+# Options flow (v0.4.0) – edit battery specs, cost_sek and purchase_date on an
+# existing entry. Only CHANGED fields are PATCHed (a plant change triggers a
+# server-side regrade via the follow-up recompute); a cleared optional field is
+# PATCHed as null so the backend actually clears it (v0.3.0 silently swallowed
+# cleared values).
 # ---------------------------------------------------------------------------
+
+# Required fields (always present in the form, prefilled from entry.data)
+_OPTIONS_PLANT_KEYS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
+# Optional fields (absent key when the user clears the prefilled value = clear)
+_OPTIONS_CLEARABLE_KEYS = (CONF_COST_SEK, CONF_PURCHASE_DATE)
 
 
 class WoltaOptionsFlow(OptionsFlow):
@@ -450,15 +459,28 @@ class WoltaOptionsFlow(OptionsFlow):
 
         if user_input is not None:
             token: str = entry.data[CONF_TOKEN]
-            cost_sek: float | None = user_input.get(CONF_COST_SEK) or None
-            purchase_date: str | None = user_input.get(CONF_PURCHASE_DATE) or None
 
-            # Build PATCH payload (only send provided fields)
+            # Diff against entry.data – only changed fields go in the PATCH payload.
             patch_fields: dict[str, Any] = {}
-            if cost_sek is not None:
-                patch_fields[CONF_COST_SEK] = cost_sek
-            if purchase_date is not None:
-                patch_fields[CONF_PURCHASE_DATE] = purchase_date
+            new_data = dict(entry.data)
+
+            for key in _OPTIONS_PLANT_KEYS:
+                val = user_input[key]
+                if val != entry.data.get(key):
+                    patch_fields[key] = val
+                    new_data[key] = val
+
+            for key in _OPTIONS_CLEARABLE_KEYS:
+                val = user_input.get(key)
+                if val is None or val == "":
+                    # The form prefills current values, so an absent/empty key means
+                    # the user actively cleared the field → PATCH null to clear it.
+                    if entry.data.get(key) is not None:
+                        patch_fields[key] = None
+                        new_data.pop(key, None)
+                elif val != entry.data.get(key):
+                    patch_fields[key] = val
+                    new_data[key] = val
 
             if patch_fields:
                 try:
@@ -470,33 +492,32 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors["base"] = "cannot_connect"
 
             if not errors:
-                # Persist the new values in entry.data
-                new_data = dict(entry.data)
-                if cost_sek is not None:
-                    new_data[CONF_COST_SEK] = cost_sek
-                if purchase_date is not None:
-                    new_data[CONF_PURCHASE_DATE] = purchase_date
-                self.hass.config_entries.async_update_entry(entry, data=new_data)
+                if patch_fields:
+                    self.hass.config_entries.async_update_entry(entry, data=new_data)
 
-                # Trigger recompute to warm history/facit – swallow 429 cooldown gracefully
-                coordinator = getattr(entry, "runtime_data", None)
-                if coordinator is not None:
-                    try:
-                        await coordinator.async_trigger_recompute()
-                    except WoltaRateLimitError:
-                        _LOGGER.debug(
-                            "Options flow: recompute rate-limited (cooldown); "
-                            "IRR/payback will update on next results fetch; "
-                            "history/facit will warm on the nightly rewarm."
-                        )
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug("Options flow: recompute failed; will retry.", exc_info=True)
-                    else:
-                        # Refresh coordinator data so sensors update immediately
+                    # Trigger recompute so grade + economy reflect the new values.
+                    # PATCH cleared the server-side cooldown, so a 202 is expected;
+                    # swallow 429 gracefully anyway.
+                    coordinator = getattr(entry, "runtime_data", None)
+                    if coordinator is not None:
                         try:
-                            await coordinator.async_request_refresh()
+                            await coordinator.async_trigger_recompute()
+                        except WoltaRateLimitError:
+                            _LOGGER.debug(
+                                "Options flow: recompute rate-limited (cooldown); "
+                                "sensors will update on the next results fetch or "
+                                "the nightly rewarm."
+                            )
                         except Exception:  # pylint: disable=broad-except
-                            pass
+                            _LOGGER.debug(
+                                "Options flow: recompute failed; will retry.", exc_info=True
+                            )
+                        else:
+                            # Refresh coordinator data so sensors update immediately
+                            try:
+                                await coordinator.async_request_refresh()
+                            except Exception:  # pylint: disable=broad-except
+                                pass
 
                 return self.async_create_entry(title="", data={})
 
@@ -504,14 +525,29 @@ class WoltaOptionsFlow(OptionsFlow):
         current_cost = entry.data.get(CONF_COST_SEK)
         current_date = entry.data.get(CONF_PURCHASE_DATE)
 
-        schema_dict: dict[vol.Optional, Any] = {
+        schema_dict: dict[Any, Any] = {
+            vol.Required(
+                CONF_BATTERY_KWH,
+                default=entry.data.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH),
+            ): _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"),
+            vol.Required(
+                CONF_BATTERY_KW,
+                default=entry.data.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW),
+            ): _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"),
+            vol.Required(
+                CONF_EFF,
+                default=entry.data.get(CONF_EFF, DEFAULT_EFF),
+            ): _number_selector(min_val=0.5, max_val=1.0, step=0.01),
+            # suggested_value (INTE default): prefyller UI:t men återinjiceras inte av
+            # voluptuous när fältet rensas – annars går ett rensat fält aldrig att skilja
+            # från ett orört (v0.3.0-warten: rensade värden svaldes tyst).
             vol.Optional(
                 CONF_COST_SEK,
-                default=current_cost if current_cost is not None else vol.UNDEFINED,
+                description={"suggested_value": current_cost} if current_cost is not None else None,
             ): _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"),
             vol.Optional(
                 CONF_PURCHASE_DATE,
-                default=current_date if current_date is not None else vol.UNDEFINED,
+                description={"suggested_value": current_date} if current_date is not None else None,
             ): _date_selector(),
         }
 
