@@ -331,6 +331,101 @@ class TestMergeStreams:
         t1 = datetime.fromisoformat(rows[1]["ts"])
         assert t0 < t1
 
+    def test_row_exceeding_backend_cap_is_dropped(self):
+        """A quarter where any field exceeds the backend's 500 kWh cap (DataRow
+        le=500) is dropped entirely – uploading it would 422 the whole batch.
+        Typical causes: Wh-scaled statistics (pre-units-fix) or a meter reset
+        producing a huge `change` spike."""
+        b = self._base()
+        batt_in = {b: 600.0, b.replace(minute=15): 1.0}   # 600 = e.g. 0.6 kWh in Wh
+        batt_out = {b: 0.0, b.replace(minute=15): 0.5}
+        rows = merge_streams(batt_in, batt_out, {}, {}, {})
+        assert len(rows) == 1
+        assert rows[0]["batt_charged_kwh"] == pytest.approx(1.0)
+
+    def test_row_exceeding_cap_in_any_field_is_dropped(self):
+        """The cap applies to every field, not just the battery streams."""
+        b = self._base()
+        batt_in = {b: 1.0}
+        batt_out = {b: 0.0}
+        grid_in = {b: 12345.0}   # meter-reset spike on grid import
+        rows = merge_streams(batt_in, batt_out, grid_in, {}, {})
+        assert rows == []
+
+    def test_row_at_cap_boundary_is_kept(self):
+        """Exactly 500 satisfies the backend's le=500 constraint → keep."""
+        b = self._base()
+        batt_in = {b: 500.0}
+        batt_out = {b: 0.0}
+        rows = merge_streams(batt_in, batt_out, {}, {}, {})
+        assert len(rows) == 1
+        assert rows[0]["batt_charged_kwh"] == pytest.approx(500.0)
+
+    def test_dropped_rows_log_one_warning_with_count(self, caplog):
+        """Dropped rows must be visible in the HA log (one warning, with count)."""
+        import logging
+
+        b = self._base()
+        batt_in = {b: 600.0, b.replace(minute=15): 700.0, b.replace(minute=30): 1.0}
+        batt_out = {b: 0.0, b.replace(minute=15): 0.0, b.replace(minute=30): 0.0}
+        with caplog.at_level(logging.WARNING, logger="custom_components.wolta.stats"):
+            rows = merge_streams(batt_in, batt_out, {}, {}, {})
+        assert len(rows) == 1
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "2" in warnings[0].getMessage()
+
+    def test_no_warning_when_nothing_dropped(self, caplog):
+        import logging
+
+        b = self._base()
+        with caplog.at_level(logging.WARNING, logger="custom_components.wolta.stats"):
+            merge_streams({b: 1.0}, {b: 0.0}, {}, {}, {})
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+# ---------------------------------------------------------------------------
+# async_fetch_change – unit normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestFetchChangeUnits:
+    """async_fetch_change must ask the recorder to convert energy statistics
+    to kWh. Without units={"energy": "kWh"} a sensor whose statistics are
+    stored in Wh uploads values 1000× too large → deterministic 422 from the
+    backend (DataRow le=500) and silently lost data (seen in prod 2026-07-05/06)."""
+
+    @pytest.mark.asyncio
+    async def test_statistics_requested_in_kwh(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["args"] = args
+            return {}
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        hass = MagicMock()
+        start = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        result = await stats_mod.async_fetch_change(
+            hass, {"sensor.batt_in"}, start, None, "5minute"
+        )
+        assert result == {}
+        # statistics_during_period(hass, start, end, ids, period, units, types)
+        args = captured["args"]
+        assert args[5] == {"energy": "kWh"}, (
+            f"units argument must request kWh conversion, got {args[5]!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # sum_quarter_dicts

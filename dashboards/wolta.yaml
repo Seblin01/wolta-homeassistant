@@ -76,10 +76,18 @@ views:
           # ── Full results on wolta.se ─────────────────────────────────────
           # The link is resolved dynamically from the device's configuration_url
           # (v0.4.1+), so the card works without pasting your token manually.
+          # Null-safe: device_id() returns None if the entity doesn't exist
+          # (e.g. wrong language variant of this dashboard) – guard so the card
+          # shows a hint instead of spamming the HA log with template errors.
           - type: markdown
             content: >-
-              [**Full results on wolta.se →**]({{
-              device_attr(device_id('sensor.wolta_optimisation_grade'),
+              {% set d = device_id('sensor.wolta_optimisation_grade') %}
+
+              {% if d %}[**Full results on wolta.se →**]({{ device_attr(d,
               'configuration_url') }})
 
               Grade breakdown, economy drill-downs and history for your profile.
+
+              {% else %}Entity `sensor.wolta_optimisation_grade` not found – if
+              your HA instance runs in Swedish, use `dashboards/wolta.sv.yaml`
+              instead.{% endif %}

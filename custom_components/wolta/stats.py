@@ -12,8 +12,16 @@ StatisticsRow shape (subset used here):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
+
+_LOGGER = logging.getLogger(__name__)
+
+# The backend's DataRow validation caps every energy field at 500 kWh per
+# quarter (Field(le=500)). One offending row 422:s the whole PUT batch, so
+# rows that would violate the cap are dropped client-side instead.
+_BACKEND_MAX_KWH = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -153,16 +161,29 @@ def merge_streams(
         return v if v > 0.0 else 0.0
 
     rows = []
+    dropped = 0
     for qt in sorted(valid_quarters):
-        rows.append(
-            {
-                "ts": qt.isoformat(),
-                "batt_charged_kwh": _nn(_batt_in.get(qt, 0.0)),
-                "batt_discharged_kwh": _nn(_batt_out.get(qt, 0.0)),
-                "solar_kwh": _nn(_solar.get(qt, 0.0)),
-                "grid_import_kwh": _nn(_grid_in.get(qt, 0.0)),
-                "grid_export_kwh": _nn(_grid_out.get(qt, 0.0)),
-            }
+        row = {
+            "ts": qt.isoformat(),
+            "batt_charged_kwh": _nn(_batt_in.get(qt, 0.0)),
+            "batt_discharged_kwh": _nn(_batt_out.get(qt, 0.0)),
+            "solar_kwh": _nn(_solar.get(qt, 0.0)),
+            "grid_import_kwh": _nn(_grid_in.get(qt, 0.0)),
+            "grid_export_kwh": _nn(_grid_out.get(qt, 0.0)),
+        }
+        # En rad över taket (mätarreset-spik eller fel enhet på sensorn) skulle
+        # 422:a hela batchen server-side – släpp raden istället för att tappa allt.
+        if any(v > _BACKEND_MAX_KWH for k, v in row.items() if k != "ts"):
+            dropped += 1
+            continue
+        rows.append(row)
+    if dropped:
+        _LOGGER.warning(
+            "Dropped %d row(s) exceeding %.0f kWh per 15 min before upload; "
+            "check that the selected statistics are recorded in kWh "
+            "(a meter reset spike can also cause this)",
+            dropped,
+            _BACKEND_MAX_KWH,
         )
     return rows
 
@@ -212,6 +233,9 @@ async def async_fetch_change(
         end,
         statistic_ids,
         period,
-        None,
+        # Normalisera till kWh – statistik lagras i sensorns egen enhet, och en
+        # Wh-sensor gav annars 1000× för stora värden → 422 från backendens
+        # le=500-validering (sett i prod 2026-07-05/06).
+        {"energy": "kWh"},
         {"change"},
     )
