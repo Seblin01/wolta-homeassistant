@@ -20,7 +20,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_TOKEN, DOMAIN, profile_url
 from .coordinator import WoltaCoordinator, WoltaData
 
 
@@ -225,6 +225,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
             name="Wolta",
             manufacturer="Wolta",
             entry_type="service",
+            configuration_url=profile_url(entry.data[CONF_TOKEN]),
         )
 
     # ------------------------------------------------------------------

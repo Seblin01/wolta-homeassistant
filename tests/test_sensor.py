@@ -171,6 +171,7 @@ def _make_entry(entry_id: str = ENTRY_ID) -> MagicMock:
     entry = MagicMock()
     entry.entry_id = entry_id
     entry.unique_id = entry_id
+    entry.data = {"token": "tok-test"}
     entry.runtime_data = None  # will be set per test
     return entry
 
@@ -422,3 +423,22 @@ def test_unique_id_format():
     """unique_id is entry.unique_id + '_' + key."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     assert s.unique_id == f"{ENTRY_ID}_optimeringsbetyg"
+
+
+# ---------------------------------------------------------------------------
+# v0.4.1: configuration_url → profilens fullständiga resultat på wolta.se
+# ---------------------------------------------------------------------------
+
+
+def test_device_info_configuration_url():
+    """Enhetens configuration_url pekar på token-lägessidan (?profile=) på wolta.se."""
+    sensor = _sensor("optimeringsbetyg", RESULTS_FULL)
+    url = sensor._attr_device_info["configuration_url"]
+    assert url == "https://wolta.se/optimeringsbetyg?profile=tok-test"
+
+
+def test_profile_url_quotes_token():
+    """Token URL-encodas (framtidssäkring om tokenformatet ändras)."""
+    from custom_components.wolta.const import profile_url
+
+    assert profile_url("a/b+c") == "https://wolta.se/optimeringsbetyg?profile=a%2Fb%2Bc"

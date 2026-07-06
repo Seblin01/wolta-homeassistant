@@ -28,6 +28,7 @@ def _make_button(coord: WoltaCoordinator) -> WoltaRecomputeButton:
     entry = MagicMock()
     entry.entry_id = ENTRY_ID
     entry.unique_id = ENTRY_ID
+    entry.data = {"token": "tok-test"}
     entry.runtime_data = coord
     btn = WoltaRecomputeButton(coordinator=coord, entry=entry)
     return btn

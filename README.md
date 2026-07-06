@@ -72,6 +72,10 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically and the sensors update within minutes.
 
+## Full results on wolta.se
+
+The Wolta device page has a **Visit** link that opens your complete results on wolta.se (grade breakdown, economy drill-downs, history) using your profile token. Note: anyone with access to your Home Assistant can follow the link.
+
 ## Privacy
 
 Your 15-minute energy data is stored on Wolta's servers to power the analysis. No personal data (name, address, account) is sent or required.

@@ -30,6 +30,12 @@ DEFAULT_SHARE = False
 # API – wolta.se serverar API:t under /api/v1 (ingen api.-subdomän finns)
 WOLTA_API_BASE = "https://wolta.se"
 
+
+def profile_url(token: str) -> str:
+    """Link to the profile's full results on wolta.se (token mode: ?profile=)."""
+    from urllib.parse import quote
+    return f"{WOLTA_API_BASE}/optimeringsbetyg?profile={quote(token, safe='')}"
+
 # Supported price zones for the zone selector (SP3 multi-land requirement).
 # Covers all 26 countries in the Wolta backend; labels are shown in the UI.
 # Server-side validates the zone; unknown zones get a 422 response.
