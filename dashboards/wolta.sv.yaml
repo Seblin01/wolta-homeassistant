@@ -1,0 +1,81 @@
+# Wolta – exempeldashboard (svensk variant)
+#
+# För HA-instanser med SVENSKA som serverspråk: entity-IDn nedan är default-
+# slugarna av de svenska sensornamnen. Kör din instans engelska (eller annat
+# språk) – använd dashboards/wolta.yaml i stället (engelska IDn är förval).
+#
+# TVÅ sätt att använda den här filen:
+#   A) HELA filen som en egen dashboard: Inställningar → Dashboards → Lägg till
+#      dashboard → öppna → tre prickar → Redigera i råtextläge → klistra in ALLT.
+#   B) BARA ETT KORT på en befintlig vy: kopiera enbart "vertical-stack"-blocket
+#      nedan (från "type: vertical-stack") in i ett Manuellt kort.
+#
+# Sensorerna visar "unavailable"/"unknown" tills första omräkningen är klar
+# (kräver ≥30 dagars data; IRR/återbetalning/facit kräver dessutom
+# inköpspris+datum, ställbart via integrationens Konfigurera-dialog).
+
+title: Wolta Batterianalys
+views:
+  - title: Wolta
+    path: wolta
+    cards:
+      - type: vertical-stack
+        cards:
+          # ── Optimeringsbetyg (gauge 0–100) ──────────────────────────────
+          - type: gauge
+            entity: sensor.wolta_optimeringsbetyg
+            name: Optimeringsbetyg
+            min: 0
+            max: 100
+            severity:
+              green: 70
+              yellow: 40
+              red: 0
+            needle: true
+
+          # ── Ekonomisensorer (horisontell rad) ───────────────────────────
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.wolta_batterivarde_per_ar
+                name: "Batterivärde/år"
+              - type: entity
+                entity: sensor.wolta_facit_i_ar
+                name: "Facit i år"
+
+          # ── IRR och återbetalningstid ────────────────────────────────────
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.wolta_intern_avkastning_irr
+                name: IRR
+              - type: entity
+                entity: sensor.wolta_aterbetalningstid
+                name: "Återbetalningstid"
+
+          # ── Status + datastatus ──────────────────────────────────────────
+          - type: entities
+            title: Status
+            entities:
+              - entity: sensor.wolta_status
+                name: Status
+              - entity: sensor.wolta_datastatus
+                name: Senaste datapunkt
+
+          # ── Räkna om (knapp) ────────────────────────────────────────────
+          - type: button
+            entity: button.wolta_rakna_om
+            name: "Räkna om nu"
+            icon: mdi:calculator
+            tap_action:
+              action: toggle
+
+          # ── Fullständigt resultat på wolta.se ───────────────────────────
+          # Länken hämtas dynamiskt ur enhetens configuration_url (v0.4.1+).
+          - type: markdown
+            content: >-
+              [**Fullständigt resultat på wolta.se →**]({{
+              device_attr(device_id('sensor.wolta_optimeringsbetyg'),
+              'configuration_url') }})
+
+              Betygsuppdelning, ekonomi-drill-downs och historik för din profil.

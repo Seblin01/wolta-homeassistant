@@ -213,19 +213,20 @@ def test_optimeringsbetyg_attributes():
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     attrs = s.extra_state_attributes
     # Real keys present
-    assert "peer_percentil" in attrs
-    assert attrs["peer_percentil"] == 68
+    assert "peer_percentile" in attrs
+    assert attrs["peer_percentile"] == 68
     assert "peer_n" in attrs
     assert attrs["peer_n"] == 312
     assert "gap_sek" in attrs
     assert attrs["gap_sek"] == pytest.approx(1400.0)
     assert "price_skill" in attrs
     assert attrs["price_skill"] == pytest.approx(0.74)
-    assert "komponenter" in attrs
+    assert "components" in attrs
     # Stale keys must NOT be present
     assert "diagnos" not in attrs
     assert "mal" not in attrs
-    assert "peer_percentile" not in attrs
+    assert "peer_percentil" not in attrs  # svensk v0.4.3-nyckel, ersatt i v0.4.4
+    assert "komponenter" not in attrs
 
 
 def test_optimeringsbetyg_unavailable_when_betyg_none():
@@ -312,7 +313,7 @@ def test_payback_value():
 
 def test_payback_unit():
     s = _sensor("payback", RESULTS_FULL)
-    assert s.native_unit_of_measurement == "år"
+    assert s.native_unit_of_measurement == "yr"
 
 
 def test_payback_unavailable_when_decision_none():
@@ -480,16 +481,16 @@ def test_retains_value_during_recompute():
     assert s.native_value == pytest.approx(82.0, abs=0.01), "senaste värdet ska behållas"
 
 
-def test_retained_attrs_flag_beraknar():
-    """Behållna attribut flaggas med beraknar: True under omräkningen."""
+def test_retained_attrs_flag_computing():
+    """Behållna attribut flaggas med computing: True under omräkningen."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     _ = s.native_value
     _ = s.extra_state_attributes  # populerar last-attrs
 
     _swap_results(s, RESULTS_RECOMPUTING)
     attrs = s.extra_state_attributes
-    assert attrs.get("beraknar") is True
-    assert attrs.get("peer_percentil") == 68, "tidigare attribut ska behållas"
+    assert attrs.get("computing") is True
+    assert attrs.get("peer_percentile") == 68, "tidigare attribut ska behållas"
 
 
 def test_unavailable_when_missing_and_not_pending():

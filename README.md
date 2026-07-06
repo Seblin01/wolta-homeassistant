@@ -19,7 +19,7 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 | `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100). Available for all price zones. |
 | `sensor.wolta_battery_value_per_year` | SEK / EUR | Average annual battery value. SE zones only. |
 | `sensor.wolta_internal_rate_of_return_irr` | % | Internal rate of return on the battery investment. SE zones only. |
-| `sensor.wolta_payback_time` | år | Estimated payback period. SE zones only. |
+| `sensor.wolta_payback_time` | yr | Estimated payback period. SE zones only. |
 | `sensor.wolta_actual_savings_this_year` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_data_status` | timestamp | Last data point uploaded (diagnostic). Always available. |
 | `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
@@ -95,7 +95,7 @@ Anonymised corpus sharing is opt-in and defaults to off. See [wolta.se/om](https
 
 ## Example dashboard
 
-A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wolta.yaml`.
+A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wolta.yaml` (English entity IDs and labels — the default for most instances). A Swedish variant with Swedish entity IDs and labels is available in `dashboards/wolta.sv.yaml`.
 
 ### Using the dashboard
 
@@ -129,7 +129,7 @@ Economy sensors (battery value, IRR, payback, actual savings) are only available
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
 
-During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `beraknar: true` flag and `sensor.wolta_status` shows **Computing** (`computing`) until the new results land (v0.4.2+).
+During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `computing: true` flag and `sensor.wolta_status` shows **Computing** (`computing`) until the new results land (v0.4.2+).
 
 ## License
 

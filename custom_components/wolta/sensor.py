@@ -111,8 +111,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         value_fn=lambda r: _STATUS_MAP.get(r.get("status"), "waiting_for_data"),
         attr_fn=lambda data: {
             "server_status": data.results.get("status"),
-            "jobb": (data.results.get("job") or {}).get("status"),
-            "steg": (data.results.get("job") or {}).get("step"),
+            "job": (data.results.get("job") or {}).get("status"),
+            "step": (data.results.get("job") or {}).get("step"),
         },
     ),
     WoltaSensorEntityDescription(
@@ -124,7 +124,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_betyg_available,
         attr_fn=lambda data: (
             {
-                "peer_percentil": (
+                "peer_percentile": (
                     (data.results.get("betyg") or {}).get("peer") or {}
                 ).get("percentile"),
                 "peer_n": (
@@ -132,10 +132,10 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 ).get("n"),
                 "gap_sek": (data.results.get("betyg") or {}).get("gap_sek"),
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
-                "komponenter": (data.results.get("betyg") or {}).get("components"),
+                "components": (data.results.get("betyg") or {}).get("components"),
             }
             if _betyg_available(data.results)
-            else {"orsak": "för lite data för betyg"}
+            else {"reason": "not enough data for a grade yet"}
         ),
     ),
     WoltaSensorEntityDescription(
@@ -147,7 +147,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         attr_fn=lambda data: (
             {}
             if _decision_available(data.results)
-            else {"orsak": "ekonomiberäkning finns bara för elområden i Sverige"}
+            else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
     ),
     WoltaSensorEntityDescription(
@@ -164,19 +164,19 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         attr_fn=lambda data: (
             {}
             if _decision_available(data.results)
-            else {"orsak": "ekonomiberäkning finns bara för elområden i Sverige"}
+            else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
     ),
     WoltaSensorEntityDescription(
         key="payback",
         translation_key="payback",
-        native_unit_of_measurement="år",
+        native_unit_of_measurement="yr",
         value_fn=lambda r: (r.get("decision") or {}).get("payback_years"),
         available_fn=_decision_available,
         attr_fn=lambda data: (
             {}
             if _decision_available(data.results)
-            else {"orsak": "ekonomiberäkning finns bara för elområden i Sverige"}
+            else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
     ),
     WoltaSensorEntityDescription(
@@ -200,7 +200,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 ),
             }
             if _history_available(data.results)
-            else {"orsak": "ekonomiberäkning finns bara för elområden i Sverige"}
+            else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
     ),
     WoltaSensorEntityDescription(
@@ -304,8 +304,8 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
             and data.pending
             and self._last_attrs is not None
         ):
-            # Behållna attribut under omräkning, flaggade så det syns i UI:t
-            return {**self._last_attrs, "beraknar": True}
+            # Behållna attribut under omräkning, flaggade så det syns i UI:t (v0.4.4: eng. nycklar)
+            return {**self._last_attrs, "computing": True}
         attrs = self.entity_description.attr_fn(data)
         if self.entity_description.available_fn(data.results):
             self._last_attrs = attrs
