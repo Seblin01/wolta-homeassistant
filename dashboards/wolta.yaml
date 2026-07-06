@@ -66,3 +66,14 @@ views:
             icon: mdi:calculator
             tap_action:
               action: toggle
+
+          # ── Fullständigt resultat på wolta.se ───────────────────────────
+          # Länken hämtas dynamiskt ur enhetens configuration_url (v0.4.1+),
+          # så kortet fungerar utan att du klistrar in din token manuellt.
+          - type: markdown
+            content: >-
+              [**Fullständigt resultat på wolta.se →**]({{
+              device_attr(device_id('sensor.wolta_optimeringsbetyg'),
+              'configuration_url') }})
+
+              Betygsuppdelning, ekonomi-drill-downs och historik för din profil.

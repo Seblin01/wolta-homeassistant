@@ -119,6 +119,8 @@ If your entities have a different suffix (e.g. `_2` when installed more than onc
 
 ### Notes
 
+The dashboard ends with a markdown card linking to your full results on wolta.se. The link is resolved dynamically from the device's `configuration_url` (v0.4.1+), so no manual token pasting is needed.
+
 Economy sensors (`batterivarde_ar`, `irr`, `payback`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
