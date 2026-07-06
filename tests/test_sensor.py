@@ -521,3 +521,12 @@ def test_status_sensor_mapping():
         s = _sensor("status", results)
         assert s.available is True
         assert s.native_value == expected, f"{results['status']} → {expected}"
+
+
+def test_sek_sensors_suggest_zero_decimals():
+    """The two kr-valued sensors display without decimals by default
+    (dashboard entity cards can't set precision – it must come from the
+    integration via suggested_display_precision)."""
+    for key in ("batterivarde_ar", "facit_i_ar"):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.suggested_display_precision == 0, key

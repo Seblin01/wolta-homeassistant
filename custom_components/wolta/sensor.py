@@ -142,6 +142,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         key="batterivarde_ar",
         translation_key="batterivarde_ar",
         # unit set dynamically in sensor class
+        suggested_display_precision=0,
         value_fn=lambda r: (r.get("decision") or {}).get("avg_annual_sek"),
         available_fn=_decision_available,
         attr_fn=lambda data: (
@@ -183,6 +184,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         key="facit_i_ar",
         translation_key="facit_i_ar",
         # unit set dynamically in sensor class
+        suggested_display_precision=0,
         value_fn=lambda r: (
             (r.get("history") or {}).get("yearly", [{}])[-1].get("total_sek")
             if (r.get("history") or {}).get("yearly")
