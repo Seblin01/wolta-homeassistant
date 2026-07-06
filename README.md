@@ -12,19 +12,21 @@ After setup the integration automatically:
 
 ## Sensors
 
+Entity names are translated (English and Swedish bundled; other languages fall back to English), and HA generates entity IDs from the translated names at install time. Default IDs on an English-language instance:
+
 | Entity | Unit | Description |
 |--------|------|-------------|
-| `sensor.wolta_optimeringsbetyg` | % | Holistic optimisation score (0–100). Available for all price zones. |
-| `sensor.wolta_batterivarde_per_ar` | SEK / EUR | Average annual battery value. SE zones only. |
-| `sensor.wolta_intern_avkastning_irr` | % | Internal rate of return on the battery investment. SE zones only. |
-| `sensor.wolta_aterbetalningstid` | år | Estimated payback period. SE zones only. |
-| `sensor.wolta_facit_i_ar` | SEK / EUR | Actual battery revenue this year. SE zones only. |
-| `sensor.wolta_datastatus` | timestamp | Last data point uploaded (diagnostic). Always available. |
+| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100). Available for all price zones. |
+| `sensor.wolta_battery_value_per_year` | SEK / EUR | Average annual battery value. SE zones only. |
+| `sensor.wolta_internal_rate_of_return_irr` | % | Internal rate of return on the battery investment. SE zones only. |
+| `sensor.wolta_payback_time` | år | Estimated payback period. SE zones only. |
+| `sensor.wolta_actual_savings_this_year` | SEK / EUR | Actual battery revenue this year. SE zones only. |
+| `sensor.wolta_data_status` | timestamp | Last data point uploaded (diagnostic). Always available. |
 | `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
 
 A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
 
-Economy sensors (`batterivarde_per_ar`, `intern_avkastning_irr`, `aterbetalningstid`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). For other zones the `optimeringsbetyg`, `status` and `datastatus` sensors still work.
+Economy sensors (battery value, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). For other zones the grade, status and data-status sensors still work.
 
 ## Requirements
 
@@ -91,7 +93,7 @@ Anonymised corpus sharing is opt-in and defaults to off. See [wolta.se/om](https
 - [wolta.se/om](https://wolta.se/om) – about & privacy
 - [GitHub issues](https://github.com/Seblin01/wolta-homeassistant/issues) – bug reports & feature requests
 
-## Exempel-dashboard
+## Example dashboard
 
 A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wolta.yaml`.
 
@@ -104,30 +106,30 @@ A ready-made Lovelace view for the Wolta sensors is available in `dashboards/wol
 
 ### Verify entity IDs
 
-Entity names follow your Home Assistant language (English and Swedish translations are bundled; other languages fall back to English). HA generates entity IDs from the translated names at install time, so on a **Swedish** HA instance the defaults are:
+Entity names follow your Home Assistant language (English and Swedish translations are bundled; other languages fall back to English). HA generates entity IDs from the translated names at install time. The dashboard YAML uses the **English** defaults; on a **Swedish** HA instance, replace them as follows:
 
-| Sensor | Default entity ID |
-|--------|-------------------|
-| Optimeringsbetyg | `sensor.wolta_optimeringsbetyg` |
-| Batterivärde per år | `sensor.wolta_batterivarde_per_ar` |
-| Intern avkastning (IRR) | `sensor.wolta_intern_avkastning_irr` |
-| Återbetalningstid | `sensor.wolta_aterbetalningstid` |
-| Facit i år | `sensor.wolta_facit_i_ar` |
-| Status | `sensor.wolta_status` |
-| Datastatus | `sensor.wolta_datastatus` |
-| Räkna om (button) | `button.wolta_rakna_om` |
+| English ID (used in the YAML) | Swedish instance ID |
+|-------------------------------|---------------------|
+| `sensor.wolta_optimisation_grade` | `sensor.wolta_optimeringsbetyg` |
+| `sensor.wolta_battery_value_per_year` | `sensor.wolta_batterivarde_per_ar` |
+| `sensor.wolta_internal_rate_of_return_irr` | `sensor.wolta_intern_avkastning_irr` |
+| `sensor.wolta_payback_time` | `sensor.wolta_aterbetalningstid` |
+| `sensor.wolta_actual_savings_this_year` | `sensor.wolta_facit_i_ar` |
+| `sensor.wolta_data_status` | `sensor.wolta_datastatus` |
+| `sensor.wolta_status` | `sensor.wolta_status` |
+| `button.wolta_recompute` | `button.wolta_rakna_om` |
 
-On an English-language instance the IDs derive from the English names instead (e.g. `sensor.wolta_optimisation_grade`). If your entities differ (other language, or `_2` suffix when installed more than once): go to **Settings → Devices & Services → Wolta** to see the exact IDs, and adjust the dashboard YAML accordingly.
+If your entities differ (other language, integrations installed before v0.4.3, or a `_2` suffix when installed more than once): go to **Settings → Devices & Services → Wolta** to see the exact IDs, and adjust the dashboard YAML accordingly.
 
 ### Notes
 
 The dashboard ends with a markdown card linking to your full results on wolta.se. The link is resolved dynamically from the device's `configuration_url` (v0.4.1+), so no manual token pasting is needed.
 
-Economy sensors (`batterivarde_per_ar`, `intern_avkastning_irr`, `aterbetalningstid`, `facit_i_ar`) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
+Economy sensors (battery value, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
 
-During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `beraknar: true` flag and `sensor.wolta_status` shows **Beräknar** until the new results land (v0.4.2+).
+During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `beraknar: true` flag and `sensor.wolta_status` shows **Computing** (`computing`) until the new results land (v0.4.2+).
 
 ## License
 

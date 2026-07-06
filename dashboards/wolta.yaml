@@ -1,29 +1,33 @@
-# Wolta – Exempeldashboard
+# Wolta – example dashboard
 #
-# TVÅ sätt att använda den här filen:
-#   A) HELA filen som en egen dashboard: Inställningar → Dashboards → Lägg till
-#      dashboard → öppna → tre prickar → Redigera i råtextläge → klistra in ALLT.
-#   B) BARA ETT KORT på en befintlig vy: kopiera enbart "vertical-stack"-blocket
-#      nedan (från "type: vertical-stack") in i ett Manuellt kort. Klistrar du in
-#      hela filen (title:/views:) i ett kort får du felet "No card type configured".
+# TWO ways to use this file:
+#   A) The WHOLE file as its own dashboard: Settings → Dashboards → Add
+#      dashboard → open it → three-dot menu → Edit in raw mode → paste ALL of it.
+#   B) JUST ONE card on an existing view: copy only the "vertical-stack" block
+#      below (from "type: vertical-stack") into a Manual card. Pasting the whole
+#      file (title:/views:) into a card gives the error "No card type configured".
 #
-# Entity-IDn nedan är HA:s default-slugar av de svenska sensornamnen. Verifiera
-# mot din Wolta-enhetssida om du döpt om enheten (Inställningar → Enheter → Wolta).
+# Entity IDs below are HA's default slugs of the ENGLISH sensor names (names are
+# translated and IDs are generated from your HA instance language at install
+# time). On a Swedish-language instance, swap in the Swedish slugs (see README →
+# Verify entity IDs for the mapping table), and always check your Wolta device
+# page (Settings → Devices & Services → Wolta) if anything differs.
 #
-# Sensorerna visar "unavailable"/"unknown" tills första omräkningen är klar
-# (kräver ≥30 dagars data; IRR/återbetalning/facit kräver dessutom inköpspris+datum).
+# Sensors show "unavailable"/"unknown" until the first recompute completes
+# (requires ≥30 days of data; IRR/payback/actual savings also require purchase
+# price + date, configurable via the integration's Configure dialog).
 
-title: Wolta Batterianalys
+title: Wolta Battery Analysis
 views:
   - title: Wolta
     path: wolta
     cards:
       - type: vertical-stack
         cards:
-          # ── Optimeringsbetyg (gauge 0–100) ──────────────────────────────
+          # ── Optimisation grade (gauge 0–100) ────────────────────────────
           - type: gauge
-            entity: sensor.wolta_optimeringsbetyg
-            name: Optimeringsbetyg
+            entity: sensor.wolta_optimisation_grade
+            name: Optimisation grade
             min: 0
             max: 100
             severity:
@@ -32,50 +36,50 @@ views:
               red: 0
             needle: true
 
-          # ── Ekonomisensorer (horisontell rad) ───────────────────────────
+          # ── Economy sensors (horizontal row) ────────────────────────────
           - type: horizontal-stack
             cards:
               - type: entity
-                entity: sensor.wolta_batterivarde_per_ar
-                name: "Batterivärde/år"
+                entity: sensor.wolta_battery_value_per_year
+                name: "Battery value/yr"
               - type: entity
-                entity: sensor.wolta_facit_i_ar
-                name: "Facit i år"
+                entity: sensor.wolta_actual_savings_this_year
+                name: "Savings this year"
 
-          # ── IRR och återbetalningstid ────────────────────────────────────
+          # ── IRR and payback time ─────────────────────────────────────────
           - type: horizontal-stack
             cards:
               - type: entity
-                entity: sensor.wolta_intern_avkastning_irr
+                entity: sensor.wolta_internal_rate_of_return_irr
                 name: IRR
               - type: entity
-                entity: sensor.wolta_aterbetalningstid
-                name: "Återbetalningstid"
+                entity: sensor.wolta_payback_time
+                name: "Payback time"
 
-          # ── Status + datastatus ──────────────────────────────────────────
+          # ── Status + data status ─────────────────────────────────────────
           - type: entities
-            title: Datastatus
+            title: Status
             entities:
               - entity: sensor.wolta_status
                 name: Status
-              - entity: sensor.wolta_datastatus
-                name: Senaste datapunkt
+              - entity: sensor.wolta_data_status
+                name: Last data point
 
-          # ── Räkna om (knapp) ────────────────────────────────────────────
+          # ── Recompute (button) ───────────────────────────────────────────
           - type: button
-            entity: button.wolta_rakna_om
-            name: "Räkna om nu"
+            entity: button.wolta_recompute
+            name: "Recompute now"
             icon: mdi:calculator
             tap_action:
               action: toggle
 
-          # ── Fullständigt resultat på wolta.se ───────────────────────────
-          # Länken hämtas dynamiskt ur enhetens configuration_url (v0.4.1+),
-          # så kortet fungerar utan att du klistrar in din token manuellt.
+          # ── Full results on wolta.se ─────────────────────────────────────
+          # The link is resolved dynamically from the device's configuration_url
+          # (v0.4.1+), so the card works without pasting your token manually.
           - type: markdown
             content: >-
-              [**Fullständigt resultat på wolta.se →**]({{
-              device_attr(device_id('sensor.wolta_optimeringsbetyg'),
+              [**Full results on wolta.se →**]({{
+              device_attr(device_id('sensor.wolta_optimisation_grade'),
               'configuration_url') }})
 
-              Betygsuppdelning, ekonomi-drill-downs och historik för din profil.
+              Grade breakdown, economy drill-downs and history for your profile.
