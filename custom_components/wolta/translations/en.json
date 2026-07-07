@@ -22,7 +22,7 @@
           "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity.",
           "battery_kw": "Maximum battery charge/discharge power.",
           "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate 'facit i år'. Optional."
+          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional."
         }
       },
       "entities": {
@@ -78,7 +78,7 @@
           "battery_kw": "Maximum charge/discharge power in kW.",
           "eff": "Round-trip efficiency (0.5–1.0). Changing plant values triggers a server-side regrade.",
           "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate 'facit i år'. Clear the field to remove the value."
+          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate this year's actual savings. Clear the field to remove the value."
         }
       }
     },

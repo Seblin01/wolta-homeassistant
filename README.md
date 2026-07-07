@@ -1,6 +1,11 @@
 # Wolta for Home Assistant
 
-A Home Assistant custom integration that connects [Wolta](https://wolta.se) to your Home Assistant instance. Wolta analyses your 15-minute battery and grid data against day-ahead electricity prices to grade how well your battery is optimised — and, for Swedish zones, calculates the battery's actual economic value.
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![GitHub release](https://img.shields.io/github/v/release/Seblin01/wolta-homeassistant)](https://github.com/Seblin01/wolta-homeassistant/releases)
+[![License: MIT](https://img.shields.io/github/license/Seblin01/wolta-homeassistant)](LICENSE)
+[![Validate](https://github.com/Seblin01/wolta-homeassistant/actions/workflows/validate.yml/badge.svg)](https://github.com/Seblin01/wolta-homeassistant/actions/workflows/validate.yml)
+
+Grade how well your home battery is optimised against **day-ahead electricity prices** (Nord Pool / ENTSO-E), directly in Home Assistant. [Wolta](https://wolta.se) analyses your 15-minute battery and grid data and scores how much of your battery's achievable value your operation actually captured. The optimisation grade and measured battery value work across all supported European price zones. Full battery economics (IRR, payback and whole-plant savings) are currently available for Swedish price zones (SE1–SE4).
 
 ## What it does
 
@@ -25,7 +30,7 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 | `sensor.wolta_data_status` | timestamp | Last data point uploaded (diagnostic). Always available. |
 | `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
 
-A **Räkna om** button lets you trigger an immediate recompute outside the automatic schedule.
+A **Recompute** button lets you trigger an immediate recompute outside the automatic schedule.
 
 Economy sensors that require the decision engine (plant savings, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). The grade and the measured battery value work for all supported zones.
 
@@ -46,12 +51,20 @@ there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
 ## Installation via HACS
 
+One-click (opens HACS on your instance with this repository preloaded):
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Seblin01&repository=wolta-homeassistant&category=integration)
+
+Or add it manually:
+
 1. In Home Assistant, open **HACS** (install it first if needed).
-2. Go to **Integrations** → three-dot menu → **Custom repositories**.
-3. Paste `https://github.com/Seblin01/wolta-homeassistant`, category **Integration** → **Add**.
-4. Search for **Wolta** and click **Download**.
+2. Open the three-dot menu (top right) → **Custom repositories**.
+3. Paste `https://github.com/Seblin01/wolta-homeassistant`, choose category **Integration**, and select **Add**.
+4. Search for **Wolta** in HACS and select **Download**.
 5. Restart Home Assistant.
-6. Go to **Settings** → **Devices & Services** → **Add Integration** → search **Wolta**.
+6. Go to **Settings** → **Devices & Services** → **Add Integration** and search for **Wolta**.
+
+> Once Wolta is accepted into the HACS default store, you can find it by searching **Wolta** in HACS directly, without adding a custom repository.
 
 ## Manual installation
 
@@ -81,7 +94,7 @@ No account or API token is required. The integration provisions a profile automa
 Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration:
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
-- Battery purchase price and purchase date — used for IRR, payback and "facit i år". Clearing a field removes the value.
+- Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically and the sensors update within minutes.
 
