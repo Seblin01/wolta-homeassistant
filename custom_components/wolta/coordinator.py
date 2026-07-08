@@ -23,6 +23,7 @@ from .const import (
     CONF_BATT_OUT,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_INVERT_BATTERY,
     CONF_SOLAR,
     CONF_TOKEN,
     CONF_ZONE,
@@ -140,6 +141,26 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """Fetch statistics, upload to Wolta, trigger recompute, return results."""
         try:
             now = dt_util.utcnow()
+            # Invert-flaggan ändrad sedan senaste upload (issue #1) → nolla bokmärket så nästa steg
+            # kör en FULL re-backfill: hela historiken läses om och skrivs över (PUT upsertar) med
+            # den korrigerade batteri-riktningen. applied_invert bokförs i state så detta bara sker
+            # vid en faktisk ändring, inte varje tick.
+            invert_now = bool(self.config_entry.data.get(CONF_INVERT_BATTERY))
+            applied_invert = self._state.get("applied_invert")
+            if applied_invert is None:
+                # Första bokföringen (t.ex. befintlig installation som uppgraderar): initiera utan
+                # att röra bokmärket – den redan uppladdade datan byggdes med aktuell flagga.
+                self._state["applied_invert"] = invert_now
+                await self._store.async_save(self._state)
+            elif applied_invert != invert_now:
+                # Faktisk ändring → nolla bokmärket för en full re-backfill med korrigerad riktning,
+                # och flagga att betyget ska räknas om DIREKT efter uppladdningen (förbi 7-dygns-
+                # kadensen i _maybe_recompute) så det rättade betyget syns utan ~24 h fördröjning.
+                self._state.pop("last_uploaded_ts", None)
+                self._state["applied_invert"] = invert_now
+                self._state["pending_invert_recompute"] = True
+                await self._store.async_save(self._state)
+
             bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
 
             if bookmark is None:
@@ -216,9 +237,22 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """
         per_entity = [
             agg_fn(raw_data.get(entity_id) or [])
-            for entity_id in self._entity_map[stream]
+            for entity_id in self._entity_map[self._effective_stream(stream)]
         ]
         return sum_quarter_dicts(per_entity)
+
+    def _effective_stream(self, stream: str) -> str:
+        """Vid invert-flagga (issue #1) läser batt_in urladdnings-sensorn och batt_out
+        laddnings-sensorn – batteriets riktning vänds så en omvänd sensor-mappning korrigeras
+        utan att användaren rör sina HA-sensorer. Bara batteriströmmarna berörs (nät/sol orörda).
+        Flaggan läses live ur config_entry så en options-ändring slår igenom utan reload."""
+        if not self.config_entry.data.get(CONF_INVERT_BATTERY):
+            return stream
+        if stream == "batt_in":
+            return "batt_out"
+        if stream == "batt_out":
+            return "batt_in"
+        return stream
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
@@ -324,9 +358,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not period_end_str:
             return
 
+        # En invert-ändring (issue #1) har just laddat upp korrigerad data via full re-backfill →
+        # FORCERA en recompute förbi 7-dygnskadensen, annars visas det rättade betyget inte förrän
+        # nattlig rewarm/nästa tick. Flaggan sätts av self-healen och rensas först när recomputen
+        # lyckats (överlever ett misslyckat försök).
+        force = bool(self._state.get("pending_invert_recompute"))
+
         last_recompute_str = self._state.get("last_recompute")
 
-        if last_recompute_str:
+        if not force and last_recompute_str:
             try:
                 last_recompute_date = datetime.fromisoformat(last_recompute_str).date()
                 period_end_date = datetime.fromisoformat(period_end_str).date()
@@ -340,6 +380,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         try:
             await self.client.recompute(self.token)
             self._state["last_recompute"] = period_end_str
+            self._state.pop("pending_invert_recompute", None)  # rättad – rensa force-flaggan
             await self._store.async_save(self._state)
             _LOGGER.debug("Recompute triggered; last_recompute updated to %s", period_end_str)
         except WoltaRateLimitError:

@@ -19,6 +19,10 @@ CONF_PURCHASE_DATE = "purchase_date"
 CONF_GRID_VAR_ORE = "grid_var_ore"
 CONF_SURCHARGE_ORE = "surcharge_ore"
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
+# Batteriets laddning/urladdning omvänd (issue #1): en del community-integrationer/mätare
+# (Emaldo, signad Shelly) mappar riktningarna åt fel håll → inverterat betyg. Flaggan byter
+# batt_in/batt_out i upload-vägen så användaren slipper ändra sina HA-sensorer.
+CONF_INVERT_BATTERY = "invert_battery"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

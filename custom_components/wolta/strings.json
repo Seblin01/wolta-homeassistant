@@ -80,7 +80,8 @@
           "purchase_date": "Purchase date",
           "grid_var_ore": "Grid fee (öre/kWh)",
           "surcharge_ore": "Electricity supplier markup (öre/kWh)",
-          "export_extra_ore": "Export premium/discount (öre/kWh)"
+          "export_extra_ore": "Export premium/discount (öre/kWh)",
+          "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
           "battery_kwh": "Usable battery capacity in kWh.",
@@ -90,7 +91,8 @@
           "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate this year's actual savings. Clear the field to remove the value.",
           "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh. Clear the field to revert to the standard Swedish tariff.",
           "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh. Clear the field to revert to the standard Swedish tariff.",
-          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price. Can be negative. Clear the field to revert to the standard Swedish tariff."
+          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price. Can be negative. Clear the field to revert to the standard Swedish tariff.",
+          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
         }
       }
     },

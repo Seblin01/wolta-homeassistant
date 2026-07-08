@@ -28,6 +28,7 @@ from custom_components.wolta.const import (
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
+    CONF_INVERT_BATTERY,
     CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
@@ -1299,3 +1300,45 @@ async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
     assert CONF_GRID_VAR_ORE not in updated.data
     assert CONF_SURCHARGE_ORE not in updated.data
     assert CONF_EXPORT_EXTRA_ORE not in updated.data
+
+
+async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssistant) -> None:
+    """Toggla batteri-invert i options → entry.data uppdateras + coordinator-refresh (self-heal
+    re-backfill), och INGEN patch_profile (klient-sidig upload-transform, ej backend-fält)."""
+    entry = _make_mock_entry(hass)
+
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock()
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == FlowResultType.FORM
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,   # oförändrade anläggningsvärden
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_INVERT_BATTERY: True,  # slås på
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    # Invert är klient-sidig → ingen backend-PATCH
+    mock_client.patch_profile.assert_not_awaited()
+    # Flaggan lagras i entry.data
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_INVERT_BATTERY] is True
+    # Coordinatorn refreshas → self-heal-backfill kör
+    mock_coordinator.async_request_refresh.assert_awaited()
