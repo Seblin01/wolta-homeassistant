@@ -826,3 +826,70 @@ async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entr
 
     assert "hour" not in fetch_calls, "oförändrad flagga ska inte tvinga backfill"
     assert coordinator._state.get("last_uploaded_ts") == bookmark_str
+
+
+@pytest.mark.asyncio
+async def test_invert_change_forces_recompute_despite_recent_last_recompute(
+    hass: HomeAssistant, mock_entry
+):
+    """Efter en invert-ändring (issue #1) ska betyget räknas om DIREKT, förbi 7-dygnskadensen –
+    även om last_recompute är färskt. Force-flaggan sätts av self-healen och rensas när recomputen
+    lyckats."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    client = _mock_client()
+    recent_last_recompute = "2025-05-29"  # 2 dygn före period-end 2025-05-31 → normalt SKIP
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        patch("custom_components.wolta.coordinator.split_hour_to_quarters", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={
+                "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
+                "last_recompute": recent_last_recompute,
+                "applied_invert": False,  # skiljer sig från entry-flaggan → self-heal fyrar
+            },
+        )
+        await coordinator._async_update_data()
+
+    assert client.recompute.called, "invert-ändring ska forcera recompute förbi 7-dygnsgrinden"
+    assert coordinator._state.get("pending_invert_recompute") is None, \
+        "force-flaggan ska rensas när recomputen lyckats"
+
+
+@pytest.mark.asyncio
+async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, mock_entry):
+    """Om den forcerade recomputen 429:as ska force-flaggan behållas (nytt försök nästa tick)."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    client = _mock_client(raise_on_recompute=WoltaRateLimitError(3600))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        patch("custom_components.wolta.coordinator.split_hour_to_quarters", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={
+                "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
+                "last_recompute": "2025-05-29",
+                "applied_invert": False,
+            },
+        )
+        await coordinator._async_update_data()
+
+    assert client.recompute.called
+    assert coordinator._state.get("pending_invert_recompute") is True, \
+        "force-flaggan ska överleva ett 429 så nästa tick försöker igen"
