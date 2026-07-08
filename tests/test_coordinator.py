@@ -71,6 +71,38 @@ RESULTS_PENDING = {
     "history": [],
 }
 
+# Backend forces top-level status="done" as soon as a grade is cached (profile.py),
+# even while the economy recompute is still running — the `job` object is then the only
+# reliable "compute in flight" signal. Grade present, economy (decision/history) not yet.
+RESULTS_DONE_JOB_RUNNING = {
+    "status": "done",
+    "currency": "SEK",
+    "period": {
+        "start": "2025-01-01",
+        "end": "2025-05-31",
+        "n_days": 150,
+    },
+    "job": {"status": "running", "step": None},
+    "betyg": {"holistic": {"score_on": 0.67}},
+    "decision": None,
+    "history": None,
+}
+
+# A fully settled result: grade + economy present, job in a terminal state.
+RESULTS_DONE_JOB_SETTLED = {
+    "status": "done",
+    "currency": "SEK",
+    "period": {
+        "start": "2025-01-01",
+        "end": "2025-05-31",
+        "n_days": 150,
+    },
+    "job": {"status": "done", "step": None},
+    "betyg": {"holistic": {"score_on": 0.67}},
+    "decision": {"irr": 0.1},
+    "history": {"yearly": []},
+}
+
 
 def _make_rows(start: datetime, count: int = 4) -> list[dict]:
     """Produce minimal Wolta PUT rows for testing."""
@@ -502,6 +534,59 @@ async def test_pending_flag_set_when_status_running(hass: HomeAssistant, mock_en
     assert result.pending is True
 
 
+@pytest.mark.asyncio
+async def test_pending_flag_tracks_job_status_when_status_done(hass: HomeAssistant, mock_entry):
+    """pending must track job.status even when top-level status is 'done'.
+
+    The backend forces status='done' the moment a grade is cached, while a fresh economy
+    recompute is still running (job.status='running', decision=None). If pending keyed only
+    off the top-level status, the economy sensors would blank instead of holding their last
+    value, and polling would drop to the 6 h slow interval — so the finished decision would
+    not be picked up for hours. Regression for the options-flow value-change path.
+    """
+    client = _mock_client(results=RESULTS_DONE_JOB_RUNNING)
+    bookmark_str = (NOW - timedelta(hours=2)).isoformat()
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str}
+        )
+        result = await coordinator._async_update_data()
+
+    assert result.pending is True
+
+
+@pytest.mark.asyncio
+async def test_pending_flag_false_when_job_settled(hass: HomeAssistant, mock_entry):
+    """A settled job (terminal status) must leave pending False so the coordinator returns
+    to the slow poll and sensors expose the fresh values — guards against a naive fix that
+    would treat the mere presence of a job object as 'pending'."""
+    client = _mock_client(results=RESULTS_DONE_JOB_SETTLED)
+    bookmark_str = (NOW - timedelta(hours=2)).isoformat()
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str}
+        )
+        result = await coordinator._async_update_data()
+
+    assert result.pending is False
+
+
 # ---------------------------------------------------------------------------
 # Test: WoltaData structure
 # ---------------------------------------------------------------------------
@@ -601,6 +686,38 @@ async def test_async_trigger_recompute_calls_client(hass: HomeAssistant, mock_en
     assert client.recompute.called
     call_args = client.recompute.call_args
     assert call_args[0][0] == TOKEN or call_args.args[0] == TOKEN
+
+
+@pytest.mark.asyncio
+async def test_trigger_recompute_stamps_last_recompute_to_suppress_double_fire(
+    hass: HomeAssistant, mock_entry
+):
+    """async_trigger_recompute stamps last_recompute against the current period end on
+    success, so the coordinator refresh the button/options flow issues immediately after
+    does not make _maybe_recompute fire a redundant SECOND recompute (the backend answers
+    that with 429). The refresh's _maybe_recompute must therefore be a no-op."""
+    from custom_components.wolta.coordinator import WoltaData
+
+    client = _mock_client(results=RESULTS_PAYLOAD)  # period end 2025-05-31
+
+    with patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        # Simulate a prior successful refresh: coordinator.data holds the latest results.
+        coordinator.data = WoltaData(
+            results=RESULTS_PAYLOAD,
+            last_uploaded=None,
+            n_days=RESULTS_PAYLOAD["period"]["n_days"],
+            pending=False,
+        )
+
+        await coordinator.async_trigger_recompute()
+        assert coordinator._state.get("last_recompute") == "2025-05-31"
+
+        # Follow-up _maybe_recompute (from the caller's refresh) must not recompute again.
+        client.recompute.reset_mock()
+        with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+            await coordinator._maybe_recompute(NOW)
+        client.recompute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
