@@ -24,11 +24,14 @@ from custom_components.wolta.const import (
     CONF_BATTERY_KWH,
     CONF_COST_SEK,
     CONF_EFF,
+    CONF_EXPORT_EXTRA_ORE,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_VAR_ORE,
     CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
+    CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
     DEFAULT_EFF,
@@ -213,6 +216,109 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.CREATE_ENTRY
     data = result["data"]
     assert CONF_SOLAR not in data or not data.get(CONF_SOLAR)
+
+
+# ---------------------------------------------------------------------------
+# Tariff override fields (plan 35 / task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_tariff_fields_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """Tariff fields filled in the user step are passed to create_profile and stored."""
+    mock_client = _mock_client()
+    step_user_with_tariff = {
+        **STEP_USER_DATA,
+        CONF_GRID_VAR_ORE: 40.0,
+        CONF_SURCHARGE_ORE: 8.0,
+        CONF_EXPORT_EXTRA_ORE: 5.0,
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_tariff
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["grid_var_ore"] == 40.0
+    assert kwargs["surcharge_ore"] == 8.0
+    assert kwargs["export_extra_ore"] == 5.0
+
+    data = result["data"]
+    assert data[CONF_GRID_VAR_ORE] == 40.0
+    assert data[CONF_SURCHARGE_ORE] == 8.0
+    assert data[CONF_EXPORT_EXTRA_ORE] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_tariff_fields_not_sent(hass: HomeAssistant) -> None:
+    """Leaving tariff fields blank means they are not sent and not stored."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs.get("grid_var_ore") is None
+    assert kwargs.get("surcharge_ore") is None
+    assert kwargs.get("export_extra_ore") is None
+
+    data = result["data"]
+    assert CONF_GRID_VAR_ORE not in data
+    assert CONF_SURCHARGE_ORE not in data
+    assert CONF_EXPORT_EXTRA_ORE not in data
 
 
 # ---------------------------------------------------------------------------
@@ -1080,3 +1186,116 @@ async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> Non
     assert seen[CONF_BATTERY_KWH] == 22.0
     assert seen[CONF_BATTERY_KW] == 5.0
     assert seen[CONF_EFF] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_options_flow_changes_tariff_field(hass: HomeAssistant) -> None:
+    """Plan 35 task 5: changing grid_var_ore in the options flow → patch_profile
+    is called with the new value."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_ORE: 40.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_ORE: 55.0,  # changed
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"grid_var_ore": 55.0}
+
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_ORE] == 55.0
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_unrelated_change_preserves_tariff(hass: HomeAssistant) -> None:
+    """Max-review-regression (plan 35): changing ONLY an unrelated field (battery_kwh)
+    while a prefilled tariff value is re-submitted unchanged must NOT clear the tariff.
+    This is the highest-impact silent-failure mode (a user's tariff getting wiped by an
+    unrelated edit); the options flow must only PATCH genuinely changed fields."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_ORE: 40.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 25.0,  # changed
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_ORE: 40.0,  # unchanged, re-submitted as HA does for suggested_value
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    patched = mock_client.patch_profile.call_args.kwargs
+    assert "grid_var_ore" not in patched, "unchanged tariff must not be PATCHed"
+    assert patched.get("battery_kwh") == 25.0
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_ORE] == 40.0, "tariff must survive an unrelated edit"
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
+    """Plan 35 task 5: clearing a previously-set tariff field (absent key) →
+    patch_profile is called with None (clear-to-default) and the key is removed
+    from entry.data."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={
+            CONF_GRID_VAR_ORE: 40.0,
+            CONF_SURCHARGE_ORE: 8.0,
+            CONF_EXPORT_EXTRA_ORE: 5.0,
+        },
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # grid_var_ore/surcharge_ore/export_extra_ore utelämnade = rensade fält
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {
+        "grid_var_ore": None,
+        "surcharge_ore": None,
+        "export_extra_ore": None,
+    }
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_GRID_VAR_ORE not in updated.data
+    assert CONF_SURCHARGE_ORE not in updated.data
+    assert CONF_EXPORT_EXTRA_ORE not in updated.data

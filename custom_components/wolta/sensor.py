@@ -106,6 +106,17 @@ def _currency(results: dict) -> str:
     return results.get("currency") or "SEK"
 
 
+def _applied_tariff_attr(results: dict) -> dict[str, Any]:
+    """applied_tariff (plan 35 / issue #1): the grid fee/markup/export premium the
+    grade calculation actually used (own values or the Swedish default). Top-level
+    key on /results — omitted entirely (not None) when the backend hasn't sent it,
+    so older cached responses don't show a stale/empty attribute."""
+    applied = results.get("applied_tariff")
+    if applied is None:
+        return {}
+    return {"applied_tariff": applied}
+
+
 # Serverstatus → stabilt enum-state (slug) för statussensorn. Visningen översätts via
 # translation_key (sv: Klar/Beräknar/Väntar på data/Fel; en: Done/Computing/...) – v0.4.3.
 _STATUS_MAP = {
@@ -150,6 +161,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "gap_sek": (data.results.get("betyg") or {}).get("gap_sek"),
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
                 "components": (data.results.get("betyg") or {}).get("components"),
+                **_applied_tariff_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}

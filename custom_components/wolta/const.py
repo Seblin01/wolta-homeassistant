@@ -16,6 +16,9 @@ CONF_EFF = "eff"
 CONF_SHARE = "share"
 CONF_COST_SEK = "cost_sek"
 CONF_PURCHASE_DATE = "purchase_date"
+CONF_GRID_VAR_ORE = "grid_var_ore"
+CONF_SURCHARGE_ORE = "surcharge_ore"
+CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
 
 # Defaults
 DEFAULT_ZONE = "SE3"
