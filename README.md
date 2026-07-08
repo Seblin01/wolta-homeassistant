@@ -80,6 +80,7 @@ No account or API token is required. The integration provisions a profile automa
 - Select your Nordpool/ENTSO-E price zone (e.g. SE3).
 - Enter your battery capacity (kWh) and peak power (kW). Both are required and must be greater than zero.
 - Set the round-trip efficiency (default 0.9).
+- Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh, the export figure may be negative). Leave any tariff field blank to use the standard Swedish tariff.
 
 **Step 2 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
@@ -95,8 +96,14 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
+- Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh, the export figure may be negative). Clearing a field reverts it to the standard Swedish tariff.
+- **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically and the sensors update within minutes.
+
+## Troubleshooting
+
+**Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
 
 ## Full results on wolta.se
 
