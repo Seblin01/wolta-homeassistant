@@ -42,6 +42,7 @@ from .const import (
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
+    CONF_INVERT_BATTERY,
     CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
@@ -516,6 +517,15 @@ class WoltaOptionsFlow(OptionsFlow):
                     patch_fields[key] = val
                     new_data[key] = val
 
+            # Invert-toggle (issue #1): en KLIENT-sidig upload-transformation, inte ett backend-fält
+            # → PATCH:as inte. Vid ändring uppdateras entry.data och en refresh triggas; coordinatorn
+            # self-healar (nollar bokmärket → full re-backfill laddar upp korrigerad data → backend
+            # räknar om på den överskrivna datan).
+            invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
+            invert_changed = invert_new != bool(entry.data.get(CONF_INVERT_BATTERY, False))
+            if invert_changed:
+                new_data[CONF_INVERT_BATTERY] = invert_new
+
             if patch_fields:
                 try:
                     session = async_get_clientsession(self.hass)
@@ -526,32 +536,41 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors["base"] = "cannot_connect"
 
             if not errors:
-                if patch_fields:
+                if patch_fields or invert_changed:
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
+                coordinator = getattr(entry, "runtime_data", None)
+                if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
-                    # swallow 429 gracefully anyway.
-                    coordinator = getattr(entry, "runtime_data", None)
-                    if coordinator is not None:
+                    # swallow 429 gracefully anyway. (Denna refresh self-healar även invert.)
+                    try:
+                        await coordinator.async_trigger_recompute()
+                    except WoltaRateLimitError:
+                        _LOGGER.debug(
+                            "Options flow: recompute rate-limited (cooldown); "
+                            "sensors will update on the next results fetch or "
+                            "the nightly rewarm."
+                        )
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug(
+                            "Options flow: recompute failed; will retry.", exc_info=True
+                        )
+                    else:
+                        # Refresh coordinator data so sensors update immediately
                         try:
-                            await coordinator.async_trigger_recompute()
-                        except WoltaRateLimitError:
-                            _LOGGER.debug(
-                                "Options flow: recompute rate-limited (cooldown); "
-                                "sensors will update on the next results fetch or "
-                                "the nightly rewarm."
-                            )
+                            await coordinator.async_request_refresh()
                         except Exception:  # pylint: disable=broad-except
-                            _LOGGER.debug(
-                                "Options flow: recompute failed; will retry.", exc_info=True
-                            )
-                        else:
-                            # Refresh coordinator data so sensors update immediately
-                            try:
-                                await coordinator.async_request_refresh()
-                            except Exception:  # pylint: disable=broad-except
-                                pass
+                            pass
+                elif invert_changed and coordinator is not None:
+                    # Bara invert ändrad (ingen PATCH): trigga en refresh så coordinatorn kör
+                    # full re-backfill med korrigerad riktning och laddar upp den överskrivna datan.
+                    try:
+                        await coordinator.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug(
+                            "Options flow: invert refresh failed; will retry.", exc_info=True
+                        )
 
                 return self.async_create_entry(title="", data={})
 
@@ -604,6 +623,13 @@ class WoltaOptionsFlow(OptionsFlow):
                 if current_export_extra is not None
                 else None,
             ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            # Invert-toggle (issue #1): sätt om betyget är inverterat (batteriladdning/urladdning
+            # omvänd, t.ex. signad Shelly/Emaldo) – swappar strömmarna vid upload i st f att
+            # användaren ändrar sina HA-sensorer.
+            vol.Required(
+                CONF_INVERT_BATTERY,
+                default=bool(entry.data.get(CONF_INVERT_BATTERY, False)),
+            ): BooleanSelector(BooleanSelectorConfig()),
         }
 
         return self.async_show_form(

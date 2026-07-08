@@ -739,3 +739,90 @@ async def test_update_interval_fast_while_pending_slow_when_done(hass: HomeAssis
 
     assert await _run(RESULTS_PENDING) == _FAST_POLL
     assert await _run(RESULTS_PAYLOAD) == _SLOW_POLL
+
+
+# ---------------------------------------------------------------------------
+# Battery-invert toggle (issue #1): swap charge/discharge + full re-backfill
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_effective_stream_identity_without_invert(hass: HomeAssistant, mock_entry):
+    """Utan invert-flagga: strömnamnen är oförändrade."""
+    client = _mock_client()
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+    assert coordinator._effective_stream("batt_in") == "batt_in"
+    assert coordinator._effective_stream("batt_out") == "batt_out"
+    assert coordinator._effective_stream("solar") == "solar"
+
+
+@pytest.mark.asyncio
+async def test_effective_stream_swaps_battery_when_inverted(hass: HomeAssistant, mock_entry):
+    """Invert-flagga satt: batt_in läser urladdnings-sensorn, batt_out laddnings-sensorn.
+    Nät/sol är orörda (bara batteriets riktning vänds)."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    client = _mock_client()
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+    assert coordinator._effective_stream("batt_in") == "batt_out"
+    assert coordinator._effective_stream("batt_out") == "batt_in"
+    assert coordinator._effective_stream("grid_in") == "grid_in"
+    assert coordinator._effective_stream("solar") == "solar"
+
+
+@pytest.mark.asyncio
+async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entry):
+    """Flaggan ändrad sedan senaste upload (applied_invert i state) → bokmärket nollas →
+    full re-backfill (LTS 'hour'-fönstret hämtas) så historiken skrivs över med rätt riktning."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    client = _mock_client()
+    fetch_calls: list[str] = []
+
+    async def mock_fetch(h, ids, start, end, period):
+        fetch_calls.append(period)
+        return {}
+
+    bookmark_str = (NOW - timedelta(days=1)).isoformat()  # färskt → normalt inkrementellt
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str, "applied_invert": False},
+        )
+        await coordinator._async_update_data()
+
+    assert "hour" in fetch_calls, "invert-ändring ska tvinga full backfill (LTS-fönstret)"
+    assert coordinator._state.get("applied_invert") is True
+
+
+@pytest.mark.asyncio
+async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entry):
+    """Oförändrad flagga (applied_invert == aktuell) → bokmärket behålls → inkrementell väg
+    (inget LTS-'hour'-fönster hämtas)."""
+    client = _mock_client()
+    fetch_calls: list[str] = []
+
+    async def mock_fetch(h, ids, start, end, period):
+        fetch_calls.append(period)
+        return {}
+
+    bookmark_str = (NOW - timedelta(days=1)).isoformat()
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark_str, "applied_invert": False},
+        )
+        await coordinator._async_update_data()
+
+    assert "hour" not in fetch_calls, "oförändrad flagga ska inte tvinga backfill"
+    assert coordinator._state.get("last_uploaded_ts") == bookmark_str
