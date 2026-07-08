@@ -99,11 +99,13 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh, the export figure may be negative). Clearing a field reverts it to the standard Swedish tariff.
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
-Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically and the sensors update within minutes.
+Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).
 
 ## Troubleshooting
 
 **Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
+
+**Payback time shows `unknown`.** The sensor has no payback year to report because the battery doesn't reach break-even — typically a small or expensive battery whose modelled internal rate of return (IRR) is negative. This is a real result, not an error; the IRR sensor shows the (negative) return. Increasing the battery capacity or lowering the entered purchase price moves it towards a payback.
 
 ## Full results on wolta.se
 
@@ -159,7 +161,7 @@ Economy sensors (battery value, IRR, payback, actual savings) are only available
 
 All sensors show `unavailable` until the first recompute run completes, which requires at least 30 days of uploaded data.
 
-During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `computing: true` flag and `sensor.wolta_status` shows **Computing** (`computing`) until the new results land (v0.4.2+).
+During a recompute (e.g. after changing values), sensors keep their last known values instead of flickering to `unavailable`; retained attributes carry a `computing: true` flag and `sensor.wolta_status` shows **Computing** (`computing`) until the new results land (v0.4.2+). The grade is recomputed first and the economy figures (IRR, payback, actual savings) follow a few minutes later; they hold their previous value in the meantime rather than going `unavailable` (v0.7.1+).
 
 ## License
 
