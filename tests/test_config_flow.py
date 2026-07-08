@@ -1186,3 +1186,80 @@ async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> Non
     assert seen[CONF_BATTERY_KWH] == 22.0
     assert seen[CONF_BATTERY_KW] == 5.0
     assert seen[CONF_EFF] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_options_flow_changes_tariff_field(hass: HomeAssistant) -> None:
+    """Plan 35 task 5: changing grid_var_ore in the options flow → patch_profile
+    is called with the new value."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_ORE: 40.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_ORE: 55.0,  # changed
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"grid_var_ore": 55.0}
+
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_ORE] == 55.0
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
+    """Plan 35 task 5: clearing a previously-set tariff field (absent key) →
+    patch_profile is called with None (clear-to-default) and the key is removed
+    from entry.data."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={
+            CONF_GRID_VAR_ORE: 40.0,
+            CONF_SURCHARGE_ORE: 8.0,
+            CONF_EXPORT_EXTRA_ORE: 5.0,
+        },
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # grid_var_ore/surcharge_ore/export_extra_ore utelämnade = rensade fält
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {
+        "grid_var_ore": None,
+        "surcharge_ore": None,
+        "export_extra_ore": None,
+    }
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_GRID_VAR_ORE not in updated.data
+    assert CONF_SURCHARGE_ORE not in updated.data
+    assert CONF_EXPORT_EXTRA_ORE not in updated.data

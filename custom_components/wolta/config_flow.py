@@ -464,7 +464,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 # Required fields (always present in the form, prefilled from entry.data)
 _OPTIONS_PLANT_KEYS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
 # Optional fields (absent key when the user clears the prefilled value = clear)
-_OPTIONS_CLEARABLE_KEYS = (CONF_COST_SEK, CONF_PURCHASE_DATE)
+_OPTIONS_CLEARABLE_KEYS = (
+    CONF_COST_SEK,
+    CONF_PURCHASE_DATE,
+    CONF_GRID_VAR_ORE,
+    CONF_SURCHARGE_ORE,
+    CONF_EXPORT_EXTRA_ORE,
+)
 
 
 class WoltaOptionsFlow(OptionsFlow):
@@ -548,6 +554,9 @@ class WoltaOptionsFlow(OptionsFlow):
         # Pre-fill from entry.data
         current_cost = entry.data.get(CONF_COST_SEK)
         current_date = entry.data.get(CONF_PURCHASE_DATE)
+        current_grid_var = entry.data.get(CONF_GRID_VAR_ORE)
+        current_surcharge = entry.data.get(CONF_SURCHARGE_ORE)
+        current_export_extra = entry.data.get(CONF_EXPORT_EXTRA_ORE)
 
         schema_dict: dict[Any, Any] = {
             vol.Required(
@@ -573,6 +582,24 @@ class WoltaOptionsFlow(OptionsFlow):
                 CONF_PURCHASE_DATE,
                 description={"suggested_value": current_date} if current_date is not None else None,
             ): _date_selector(),
+            vol.Optional(
+                CONF_GRID_VAR_ORE,
+                description={"suggested_value": current_grid_var}
+                if current_grid_var is not None
+                else None,
+            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            vol.Optional(
+                CONF_SURCHARGE_ORE,
+                description={"suggested_value": current_surcharge}
+                if current_surcharge is not None
+                else None,
+            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            vol.Optional(
+                CONF_EXPORT_EXTRA_ORE,
+                description={"suggested_value": current_export_extra}
+                if current_export_extra is not None
+                else None,
+            ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"),
         }
 
         return self.async_show_form(
