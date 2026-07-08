@@ -189,11 +189,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 if last_uploaded_str
                 else None
             )
+            # `pending` = en server-side-beräkning pågår. Topp-`status` DUGER INTE ENSAMT:
+            # backenden tvingar status="done" så fort ett betyg ligger cachat (profile.py),
+            # även medan ekonomi-omräkningen (decision/history) fortfarande kör. Då är `job`
+            # den enda pålitliga in-flight-signalen. Utan detta blankas ekonomisensorerna
+            # (de behåller bara sitt förra värde när pending=True) och pollen faller till 6 h
+            # → ett färdigt decision syns inte förrän nästa långsamma poll (upp till 6 h).
+            job = results.get("job") or {}
             data = WoltaData(
                 results=results,
                 last_uploaded=last_uploaded,
                 n_days=results["period"]["n_days"],
-                pending=results.get("status") in ("pending", "running"),
+                pending=(
+                    results.get("status") in ("pending", "running")
+                    or job.get("status") in ("pending", "running")
+                ),
             )
             # Poll fast medan en server-side-beräkning pågår så betyget dyker upp inom ~en
             # minut i stället för upp till 6 h; tillbaka till den lugna takten när den är klar.
@@ -421,8 +431,20 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # ------------------------------------------------------------------
 
     async def async_trigger_recompute(self) -> None:
-        """Immediately trigger a server-side recompute (used by the button entity)."""
+        """Immediately trigger a server-side recompute (button entity + options flow).
+
+        Stamps last_recompute against the current period end on success, so the coordinator
+        refresh the caller issues right after does NOT make _maybe_recompute fire a redundant
+        second recompute (the backend rejects that with 429). On 429/error the recompute call
+        raises before the stamp, so last_recompute is left untouched (retryable next cycle).
+        """
         await self.client.recompute(self.token)
+        period_end = None
+        if self.data is not None:
+            period_end = (self.data.results.get("period") or {}).get("end")
+        if period_end:
+            self._state["last_recompute"] = period_end
+            await self._store.async_save(self._state)
 
     # ------------------------------------------------------------------
     # Utilities
