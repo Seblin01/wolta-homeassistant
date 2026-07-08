@@ -1223,6 +1223,42 @@ async def test_options_flow_changes_tariff_field(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_options_flow_unrelated_change_preserves_tariff(hass: HomeAssistant) -> None:
+    """Max-review-regression (plan 35): changing ONLY an unrelated field (battery_kwh)
+    while a prefilled tariff value is re-submitted unchanged must NOT clear the tariff.
+    This is the highest-impact silent-failure mode (a user's tariff getting wiped by an
+    unrelated edit); the options flow must only PATCH genuinely changed fields."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_ORE: 40.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 25.0,  # changed
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_ORE: 40.0,  # unchanged, re-submitted as HA does for suggested_value
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    patched = mock_client.patch_profile.call_args.kwargs
+    assert "grid_var_ore" not in patched, "unchanged tariff must not be PATCHed"
+    assert patched.get("battery_kwh") == 25.0
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_ORE] == 40.0, "tariff must survive an unrelated edit"
+
+
+@pytest.mark.asyncio
 async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
     """Plan 35 task 5: clearing a previously-set tariff field (absent key) →
     patch_profile is called with None (clear-to-default) and the key is removed

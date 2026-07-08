@@ -327,6 +327,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             solar = self._entities_data.get(CONF_SOLAR)
             cost_sek: float | None = self._user_data.get(CONF_COST_SEK) or None
             purchase_date: str | None = self._user_data.get(CONF_PURCHASE_DATE) or None
+            # Tariff fields use a plain .get() (NOT `.get() or None` like cost_sek):
+            # 0.0 is a MEANINGFUL value here (a user whose grid fee or export premium is
+            # genuinely zero), so it must reach the backend, not be swallowed as "unset".
+            # Do not "consistency-refactor" these to `or None`.
             grid_var_ore: float | None = self._user_data.get(CONF_GRID_VAR_ORE)
             surcharge_ore: float | None = self._user_data.get(CONF_SURCHARGE_ORE)
             export_extra_ore: float | None = self._user_data.get(CONF_EXPORT_EXTRA_ORE)
