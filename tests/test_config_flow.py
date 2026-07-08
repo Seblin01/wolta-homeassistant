@@ -24,11 +24,14 @@ from custom_components.wolta.const import (
     CONF_BATTERY_KWH,
     CONF_COST_SEK,
     CONF_EFF,
+    CONF_EXPORT_EXTRA_ORE,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_VAR_ORE,
     CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
+    CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
     DEFAULT_EFF,
@@ -213,6 +216,109 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.CREATE_ENTRY
     data = result["data"]
     assert CONF_SOLAR not in data or not data.get(CONF_SOLAR)
+
+
+# ---------------------------------------------------------------------------
+# Tariff override fields (plan 35 / task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_tariff_fields_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """Tariff fields filled in the user step are passed to create_profile and stored."""
+    mock_client = _mock_client()
+    step_user_with_tariff = {
+        **STEP_USER_DATA,
+        CONF_GRID_VAR_ORE: 40.0,
+        CONF_SURCHARGE_ORE: 8.0,
+        CONF_EXPORT_EXTRA_ORE: 5.0,
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_tariff
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["grid_var_ore"] == 40.0
+    assert kwargs["surcharge_ore"] == 8.0
+    assert kwargs["export_extra_ore"] == 5.0
+
+    data = result["data"]
+    assert data[CONF_GRID_VAR_ORE] == 40.0
+    assert data[CONF_SURCHARGE_ORE] == 8.0
+    assert data[CONF_EXPORT_EXTRA_ORE] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_tariff_fields_not_sent(hass: HomeAssistant) -> None:
+    """Leaving tariff fields blank means they are not sent and not stored."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs.get("grid_var_ore") is None
+    assert kwargs.get("surcharge_ore") is None
+    assert kwargs.get("export_extra_ore") is None
+
+    data = result["data"]
+    assert CONF_GRID_VAR_ORE not in data
+    assert CONF_SURCHARGE_ORE not in data
+    assert CONF_EXPORT_EXTRA_ORE not in data
 
 
 # ---------------------------------------------------------------------------

@@ -38,11 +38,14 @@ from .const import (
     CONF_BATTERY_KWH,
     CONF_COST_SEK,
     CONF_EFF,
+    CONF_EXPORT_EXTRA_ORE,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_VAR_ORE,
     CONF_PURCHASE_DATE,
     CONF_SHARE,
     CONF_SOLAR,
+    CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
     DEFAULT_BATTERY_KW,
@@ -230,6 +233,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"
                 ),
                 vol.Optional(CONF_PURCHASE_DATE): _date_selector(),
+                vol.Optional(CONF_GRID_VAR_ORE): _number_selector(
+                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                ),
+                vol.Optional(CONF_SURCHARGE_ORE): _number_selector(
+                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                ),
+                vol.Optional(CONF_EXPORT_EXTRA_ORE): _number_selector(
+                    min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                ),
             }
         )
 
@@ -315,6 +327,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             solar = self._entities_data.get(CONF_SOLAR)
             cost_sek: float | None = self._user_data.get(CONF_COST_SEK) or None
             purchase_date: str | None = self._user_data.get(CONF_PURCHASE_DATE) or None
+            grid_var_ore: float | None = self._user_data.get(CONF_GRID_VAR_ORE)
+            surcharge_ore: float | None = self._user_data.get(CONF_SURCHARGE_ORE)
+            export_extra_ore: float | None = self._user_data.get(CONF_EXPORT_EXTRA_ORE)
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -328,6 +343,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     share_profile=share,
                     cost_sek=cost_sek,
                     purchase_date=purchase_date,
+                    grid_var_ore=grid_var_ore,
+                    surcharge_ore=surcharge_ore,
+                    export_extra_ore=export_extra_ore,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -358,6 +376,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_COST_SEK] = cost_sek
                 if purchase_date is not None:
                     entry_data[CONF_PURCHASE_DATE] = purchase_date
+                if grid_var_ore is not None:
+                    entry_data[CONF_GRID_VAR_ORE] = grid_var_ore
+                if surcharge_ore is not None:
+                    entry_data[CONF_SURCHARGE_ORE] = surcharge_ore
+                if export_extra_ore is not None:
+                    entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",

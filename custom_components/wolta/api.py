@@ -110,6 +110,9 @@ class WoltaApiClient:
         share_profile: bool,
         cost_sek: float | None = None,
         purchase_date: str | None = None,
+        grid_var_ore: float | None = None,
+        surcharge_ore: float | None = None,
+        export_extra_ore: float | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -127,6 +130,12 @@ class WoltaApiClient:
             payload["cost_sek"] = cost_sek
         if purchase_date is not None:
             payload["purchase_date"] = purchase_date
+        if grid_var_ore is not None:
+            payload["grid_var_ore"] = grid_var_ore
+        if surcharge_ore is not None:
+            payload["surcharge_ore"] = surcharge_ore
+        if export_extra_ore is not None:
+            payload["export_extra_ore"] = export_extra_ore
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
 

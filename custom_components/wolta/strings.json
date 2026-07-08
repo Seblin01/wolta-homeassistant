@@ -16,13 +16,19 @@
           "battery_kw": "Battery max power (kW)",
           "eff": "Round-trip efficiency (0.5–1.0)",
           "cost_sek": "Battery purchase price (kr) – battery only, optional",
-          "purchase_date": "Purchase date – optional"
+          "purchase_date": "Purchase date – optional",
+          "grid_var_ore": "Grid fee (öre/kWh) – optional",
+          "surcharge_ore": "Electricity supplier markup (öre/kWh) – optional",
+          "export_extra_ore": "Export premium/discount (öre/kWh) – optional"
         },
         "data_description": {
           "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity.",
           "battery_kw": "Maximum battery charge/discharge power.",
           "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional."
+          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional.",
+          "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh. Leave blank to use the standard Swedish tariff.",
+          "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh. Leave blank to use the standard Swedish tariff.",
+          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price. Can be negative. Leave blank to use the standard Swedish tariff."
         }
       },
       "entities": {
