@@ -13,5 +13,3 @@ economy figure was computed against the 2026 Swedish default tariff.
 - The **optimisation grade sensor** now shows which tariff was actually applied as an attribute
   (`applied_tariff`): the source (`user` or `country_default`) plus the grid fee, markup and
   export premium values used in the calculation — so you can confirm your own numbers took effect.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
