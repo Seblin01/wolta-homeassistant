@@ -585,3 +585,57 @@ def test_plant_savings_value_is_avg_annual():
 def test_plant_savings_unavailable_without_decision():
     s = _sensor("anlaggningsbesparing_ar", RESULTS_NO_DECISION)
     assert s.available is False
+
+
+# ---------------------------------------------------------------------------
+# applied_tariff on optimeringsbetyg (plan 35 / task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_applied_tariff_user():
+    """When results carries a top-level applied_tariff (user override), the grade
+    sensor's attributes expose it (source + the three values)."""
+    results = {
+        **RESULTS_FULL,
+        "applied_tariff": {
+            "source": "user",
+            "grid_var_ore": 40.0,
+            "surcharge_ore": 8.0,
+            "export_extra_ore": 5.0,
+            "currency": "SEK",
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("applied_tariff") == {
+        "source": "user",
+        "grid_var_ore": 40.0,
+        "surcharge_ore": 8.0,
+        "export_extra_ore": 5.0,
+        "currency": "SEK",
+    }
+
+
+def test_optimeringsbetyg_exposes_applied_tariff_country_default():
+    """Source can be country_default when no override was set."""
+    results = {
+        **RESULTS_FULL,
+        "applied_tariff": {
+            "source": "country_default",
+            "grid_var_ore": 25.0,
+            "surcharge_ore": 6.0,
+            "export_extra_ore": 0.0,
+            "currency": "SEK",
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs["applied_tariff"]["source"] == "country_default"
+
+
+def test_optimeringsbetyg_applied_tariff_absent_when_missing():
+    """No applied_tariff in results (older backend/no data yet) → key omitted,
+    no crash."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    assert "applied_tariff" not in attrs
