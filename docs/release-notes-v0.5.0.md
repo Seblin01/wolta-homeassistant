@@ -22,5 +22,3 @@ battery; the solar's value belongs to the solar investment. This follows establi
 (battery-retrofit calculations, NREL's solar-plus-storage analyses, Solcellskollen's Swedish
 calculations) and the incremental cash-flow principle in investment appraisal. In short: the new
 numbers are less flattering but true.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
