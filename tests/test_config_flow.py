@@ -1064,9 +1064,9 @@ async def test_options_flow_patches_only_changed_plant_fields(hass: HomeAssistan
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_BATTERY_KWH: 30.0,   # ändrad
-                CONF_BATTERY_KW: 5.0,     # oförändrad
-                CONF_EFF: 0.9,            # oförändrad
+                CONF_BATTERY_KWH: 30.0,   # changed
+                CONF_BATTERY_KW: 5.0,     # unchanged
+                CONF_EFF: 0.9,            # unchanged
             },
         )
 
@@ -1129,7 +1129,7 @@ async def test_options_flow_clears_cost_and_date(hass: HomeAssistant) -> None:
                 CONF_BATTERY_KWH: 22.0,
                 CONF_BATTERY_KW: 5.0,
                 CONF_EFF: 0.9,
-                # cost_sek/purchase_date utelämnade = rensade fält
+                # cost_sek/purchase_date omitted = cleared fields
             },
         )
 
@@ -1285,7 +1285,7 @@ async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
                 CONF_BATTERY_KWH: 22.0,
                 CONF_BATTERY_KW: 5.0,
                 CONF_EFF: 0.9,
-                # grid_var_ore/surcharge_ore/export_extra_ore utelämnade = rensade fält
+                # grid_var_ore/surcharge_ore/export_extra_ore omitted = cleared fields
             },
         )
 
@@ -1303,8 +1303,8 @@ async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
 
 
 async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssistant) -> None:
-    """Toggla batteri-invert i options → entry.data uppdateras + coordinator-refresh (self-heal
-    re-backfill), och INGEN patch_profile (klient-sidig upload-transform, ej backend-fält)."""
+    """Toggling battery-invert in options → entry.data is updated + coordinator refresh (self-heal
+    re-backfill), and NO patch_profile (client-side upload transform, not a backend field)."""
     entry = _make_mock_entry(hass)
 
     mock_client = MagicMock()
@@ -1327,18 +1327,18 @@ async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssis
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_BATTERY_KWH: 22.0,   # oförändrade anläggningsvärden
+                CONF_BATTERY_KWH: 22.0,   # unchanged plant values
                 CONF_BATTERY_KW: 5.0,
                 CONF_EFF: 0.9,
-                CONF_INVERT_BATTERY: True,  # slås på
+                CONF_INVERT_BATTERY: True,  # turned on
             },
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    # Invert är klient-sidig → ingen backend-PATCH
+    # Invert is client-side → no backend PATCH
     mock_client.patch_profile.assert_not_awaited()
-    # Flaggan lagras i entry.data
+    # The flag is stored in entry.data
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert updated.data[CONF_INVERT_BATTERY] is True
-    # Coordinatorn refreshas → self-heal-backfill kör
+    # The coordinator is refreshed → self-heal backfill runs
     mock_coordinator.async_request_refresh.assert_awaited()

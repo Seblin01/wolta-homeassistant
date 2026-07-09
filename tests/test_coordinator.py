@@ -865,7 +865,7 @@ async def test_update_interval_fast_while_pending_slow_when_done(hass: HomeAssis
 
 @pytest.mark.asyncio
 async def test_effective_stream_identity_without_invert(hass: HomeAssistant, mock_entry):
-    """Utan invert-flagga: strömnamnen är oförändrade."""
+    """Without the invert flag: stream names are unchanged."""
     client = _mock_client()
     coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
     assert coordinator._effective_stream("batt_in") == "batt_in"
@@ -875,8 +875,8 @@ async def test_effective_stream_identity_without_invert(hass: HomeAssistant, moc
 
 @pytest.mark.asyncio
 async def test_effective_stream_swaps_battery_when_inverted(hass: HomeAssistant, mock_entry):
-    """Invert-flagga satt: batt_in läser urladdnings-sensorn, batt_out laddnings-sensorn.
-    Nät/sol är orörda (bara batteriets riktning vänds)."""
+    """Invert flag set: batt_in reads the discharge sensor, batt_out the charge sensor.
+    Grid/solar are untouched (only the battery direction is flipped)."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
@@ -890,8 +890,8 @@ async def test_effective_stream_swaps_battery_when_inverted(hass: HomeAssistant,
 
 @pytest.mark.asyncio
 async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entry):
-    """Flaggan ändrad sedan senaste upload (applied_invert i state) → bokmärket nollas →
-    full re-backfill (LTS 'hour'-fönstret hämtas) så historiken skrivs över med rätt riktning."""
+    """Flag changed since the last upload (applied_invert in state) → the bookmark is reset →
+    full re-backfill (the LTS 'hour' window is fetched) so history is overwritten with the correct direction."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
@@ -902,7 +902,7 @@ async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entr
         fetch_calls.append(period)
         return {}
 
-    bookmark_str = (NOW - timedelta(days=1)).isoformat()  # färskt → normalt inkrementellt
+    bookmark_str = (NOW - timedelta(days=1)).isoformat()  # fresh → normally incremental
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
@@ -914,14 +914,14 @@ async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entr
         )
         await coordinator._async_update_data()
 
-    assert "hour" in fetch_calls, "invert-ändring ska tvinga full backfill (LTS-fönstret)"
+    assert "hour" in fetch_calls, "invert change should force a full backfill (the LTS window)"
     assert coordinator._state.get("applied_invert") is True
 
 
 @pytest.mark.asyncio
 async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entry):
-    """Oförändrad flagga (applied_invert == aktuell) → bokmärket behålls → inkrementell väg
-    (inget LTS-'hour'-fönster hämtas)."""
+    """Unchanged flag (applied_invert == current) → the bookmark is kept → incremental path
+    (no LTS 'hour' window is fetched)."""
     client = _mock_client()
     fetch_calls: list[str] = []
 
@@ -941,7 +941,7 @@ async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entr
         )
         await coordinator._async_update_data()
 
-    assert "hour" not in fetch_calls, "oförändrad flagga ska inte tvinga backfill"
+    assert "hour" not in fetch_calls, "unchanged flag should not force a backfill"
     assert coordinator._state.get("last_uploaded_ts") == bookmark_str
 
 
@@ -949,14 +949,14 @@ async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entr
 async def test_invert_change_forces_recompute_despite_recent_last_recompute(
     hass: HomeAssistant, mock_entry
 ):
-    """Efter en invert-ändring (issue #1) ska betyget räknas om DIREKT, förbi 7-dygnskadensen –
-    även om last_recompute är färskt. Force-flaggan sätts av self-healen och rensas när recomputen
-    lyckats."""
+    """After an invert change (issue #1), the grade should be recomputed IMMEDIATELY, bypassing the 7-day gate –
+    even if last_recompute is fresh. The force flag is set by the self-heal and cleared once the recompute
+    succeeds."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
     client = _mock_client()
-    recent_last_recompute = "2025-05-29"  # 2 dygn före period-end 2025-05-31 → normalt SKIP
+    recent_last_recompute = "2025-05-29"  # 2 days before period-end 2025-05-31 → normally SKIP
 
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
@@ -971,19 +971,19 @@ async def test_invert_change_forces_recompute_despite_recent_last_recompute(
             store_state={
                 "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
                 "last_recompute": recent_last_recompute,
-                "applied_invert": False,  # skiljer sig från entry-flaggan → self-heal fyrar
+                "applied_invert": False,  # differs from the entry flag → self-heal fires
             },
         )
         await coordinator._async_update_data()
 
-    assert client.recompute.called, "invert-ändring ska forcera recompute förbi 7-dygnsgrinden"
+    assert client.recompute.called, "invert change should force recompute past the 7-day gate"
     assert coordinator._state.get("pending_invert_recompute") is None, \
-        "force-flaggan ska rensas när recomputen lyckats"
+        "the force flag should be cleared once the recompute succeeds"
 
 
 @pytest.mark.asyncio
 async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, mock_entry):
-    """Om den forcerade recomputen 429:as ska force-flaggan behållas (nytt försök nästa tick)."""
+    """If the forced recompute gets a 429, the force flag should be retained (retry on the next tick)."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
@@ -1009,4 +1009,4 @@ async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, moc
 
     assert client.recompute.called
     assert coordinator._state.get("pending_invert_recompute") is True, \
-        "force-flaggan ska överleva ett 429 så nästa tick försöker igen"
+        "the force flag should survive a 429 so the next tick retries"

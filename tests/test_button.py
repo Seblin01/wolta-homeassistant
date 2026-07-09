@@ -107,7 +107,7 @@ def test_button_unique_id():
 
 
 def test_button_has_translation_key():
-    """v0.4.3: namnet kommer från translations (sv: Räkna om / en: Recompute)."""
+    """v0.4.3: the name comes from translations (sv: Räkna om / en: Recompute)."""
     coord = _make_coordinator()
     btn = _make_button(coord)
     assert btn._attr_translation_key == "recompute"

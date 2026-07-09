@@ -252,16 +252,16 @@ def test_optimeringsbetyg_unavailable_when_score_on_missing():
 
 
 def test_batterivarde_ar_value_is_measured_battery_value():
-    """v0.5.0 (plan 33): sensorn visar betygets UPPMÄTTA batterivärde
-    (betyg.holistic.measured_total_sek) – samma siffra som webbens "Du fångade" –
-    inte decision.avg_annual_sek som är HELA anläggningens besparing (sol+batteri)."""
+    """v0.5.0 (plan 33): the sensor shows the grade's MEASURED battery value
+    (betyg.holistic.measured_total_sek) – the same figure as the website's "Du fångade" –
+    not decision.avg_annual_sek which is the ENTIRE plant's savings (solar+battery)."""
     s = _sensor("batterivarde_ar", RESULTS_FULL)
     assert s.native_value == pytest.approx(9800.0)
 
 
 def test_batterivarde_ar_falls_back_to_modelled_battery_value():
-    """Utan betyg men med decision → decision.avg_battery_sek (batteri-only), ALDRIG
-    anläggningstotalen."""
+    """Without grade but with decision → decision.avg_battery_sek (battery-only), NEVER
+    the plant total."""
     results = {
         **RESULTS_FULL,
         "betyg": None,
@@ -300,8 +300,8 @@ def test_batterivarde_ar_unit_eur():
 
 
 def test_batterivarde_ar_available_from_grade_without_decision():
-    """v0.5.0: uppmätt batterivärde kommer ur BETYGET → tillgängligt även när
-    decision saknas (t.ex. icke-SE-profiler)."""
+    """v0.5.0: measured battery value comes from the GRADE → available even when
+    decision is missing (e.g. non-SE profiles)."""
     s = _sensor("batterivarde_ar", RESULTS_NO_DECISION)
     assert s.available is True
     assert s.native_value == pytest.approx(8000.0)
@@ -430,8 +430,8 @@ def test_sp3_nonse_grade_available():
 
 
 def test_sp3_nonse_economy_sensors_unavailable():
-    """Non-SE profile: IRR/payback/plant-besparing kräver decision (SE-only).
-    Batterivärdet är sedan v0.5.0 UPPMÄTT ur betyget → tillgängligt även non-SE."""
+    """Non-SE profile: IRR/payback/plant-savings require decision (SE-only).
+    The battery value has been MEASURED from the grade since v0.5.0 → available even non-SE."""
     for key in ("irr", "payback", "anlaggningsbesparing_ar"):
         s = _sensor(key, RESULTS_EUR)
         assert s.available is False, f"{key} should be unavailable for non-SE"
@@ -467,30 +467,30 @@ def test_unique_id_format():
 
 
 # ---------------------------------------------------------------------------
-# v0.4.1: configuration_url → profilens fullständiga resultat på wolta.se
+# v0.4.1: configuration_url → the profile's full results on wolta.se
 # ---------------------------------------------------------------------------
 
 
 def test_device_info_configuration_url():
-    """Enhetens configuration_url pekar på token-lägessidan (?profile=) på wolta.se."""
+    """The device's configuration_url points to the token-mode page (?profile=) on wolta.se."""
     sensor = _sensor("optimeringsbetyg", RESULTS_FULL)
     url = sensor._attr_device_info["configuration_url"]
     assert url == "https://wolta.se/optimeringsbetyg?profile=tok-test"
 
 
 def test_profile_url_quotes_token():
-    """Token URL-encodas (framtidssäkring om tokenformatet ändras)."""
+    """Token is URL-encoded (future-proofing in case the token format changes)."""
     from custom_components.wolta.const import profile_url
 
     assert profile_url("a/b+c") == "https://wolta.se/optimeringsbetyg?profile=a%2Fb%2Bc"
 
 
 # ---------------------------------------------------------------------------
-# v0.4.2: behåll värden under pågående omräkning + statussensor
+# v0.4.2: retain values during ongoing recompute + status sensor
 # ---------------------------------------------------------------------------
 
 RESULTS_RECOMPUTING = {
-    # recompute har bytt fingerprint → betyg/decision/history saknas medan workern räknar
+    # recompute changed fingerprint → grade/decision/history missing while the worker is computing
     "status": "running",
     "currency": "SEK",
     "period": {"start": "2025-01-01", "end": "2025-05-31", "n_days": 150},
@@ -501,7 +501,7 @@ RESULTS_RECOMPUTING = {
 
 
 def _swap_results(sensor: WoltaSensor, results: dict) -> None:
-    """Simulera en ny coordinator-uppdatering med andra results."""
+    """Simulate a new coordinator update with different results."""
     sensor.coordinator.data = WoltaData(
         results=results,
         last_uploaded=datetime(2025, 5, 31, 0, 0, 0, tzinfo=timezone.utc),
@@ -511,30 +511,30 @@ def _swap_results(sensor: WoltaSensor, results: dict) -> None:
 
 
 def test_retains_value_during_recompute():
-    """Pågående omräkning (pending) → sensorn behåller senaste kända värdet
-    i stället för unavailable-blipp."""
+    """Ongoing recompute (pending) → the sensor retains the last known value
+    instead of an unavailable blip."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
-    assert s.native_value == pytest.approx(82.0, abs=0.01)  # populerar last-value
+    assert s.native_value == pytest.approx(82.0, abs=0.01)  # populates last-value
 
     _swap_results(s, RESULTS_RECOMPUTING)
-    assert s.available is True, "ska vara available under pågående beräkning"
-    assert s.native_value == pytest.approx(82.0, abs=0.01), "senaste värdet ska behållas"
+    assert s.available is True, "should be available during ongoing computation"
+    assert s.native_value == pytest.approx(82.0, abs=0.01), "the last value should be retained"
 
 
 def test_retained_attrs_flag_computing():
-    """Behållna attribut flaggas med computing: True under omräkningen."""
+    """Retained attributes are flagged with computing: True during the recompute."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     _ = s.native_value
-    _ = s.extra_state_attributes  # populerar last-attrs
+    _ = s.extra_state_attributes  # populates last-attrs
 
     _swap_results(s, RESULTS_RECOMPUTING)
     attrs = s.extra_state_attributes
     assert attrs.get("computing") is True
-    assert attrs.get("peer_percentile") == 68, "tidigare attribut ska behållas"
+    assert attrs.get("peer_percentile") == 68, "the previous attribute should be retained"
 
 
 def test_unavailable_when_missing_and_not_pending():
-    """Saknat värde UTAN pågående beräkning → unavailable som förr (ingen maskering)."""
+    """Missing value WITHOUT an ongoing computation → unavailable as before (no masking)."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     _ = s.native_value
     _swap_results(s, {**RESULTS_RECOMPUTING, "status": "done"})
@@ -542,13 +542,13 @@ def test_unavailable_when_missing_and_not_pending():
 
 
 def test_fresh_sensor_during_recompute_still_unavailable():
-    """Utan tidigare känt värde (t.ex. efter HA-omstart) → unavailable även under pending."""
+    """Without a previously known value (e.g. after an HA restart) → unavailable even during pending."""
     s = _sensor("optimeringsbetyg", RESULTS_RECOMPUTING)
     assert s.available is False
 
 
 def test_status_sensor_mapping():
-    """Statussensorn mappar serverstatus → stabila slugs (visningen översätts via translation_key)."""
+    """The status sensor maps server status → stable slugs (the display is translated via translation_key)."""
     cases = [
         ({**RESULTS_FULL, "status": "done"}, "done"),
         (RESULTS_RECOMPUTING, "computing"),
