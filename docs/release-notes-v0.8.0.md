@@ -29,6 +29,15 @@ data actually shows.
 - Both texts are updated in the setup flow and the options flow (gear icon → Configure), in
   English and Swedish.
 
+## Changed – tariff fields no longer assume a Swedish zone
+
+- The three tariff fields (grid fee, supplier markup, export premium) were labelled
+  "öre/kWh" and described the blank-field fallback as "the standard Swedish tariff",
+  even though the zone selector covers all 29 ENTSO-E countries. For non-SEK zones the
+  backend interprets these values as euro cents/kWh and falls back to *that country's*
+  standard tariff. Labels now say "öre/ct per kWh" and the descriptions spell out both
+  cases. The values you have already entered are unaffected — this is wording only.
+
 ## Fixed – recompute error message now respects your language
 
 - The error shown when a manual recompute fails was a hardcoded Swedish string regardless of

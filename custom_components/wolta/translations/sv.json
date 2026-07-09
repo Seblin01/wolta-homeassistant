@@ -17,9 +17,9 @@
           "eff": "Rundtripsverkningsgrad (0,5–1,0)",
           "cost_sek": "Batteriets inköpspris (kr) – endast batteriet, valfritt",
           "purchase_date": "Inköpsdatum – valfritt",
-          "grid_var_ore": "Nätavgift (öre/kWh) – valfritt",
-          "surcharge_ore": "Elhandlarens påslag (öre/kWh) – valfritt",
-          "export_extra_ore": "Exportjustering (öre/kWh) – valfritt"
+          "grid_var_ore": "Nätavgift (öre/ct per kWh) – valfritt",
+          "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh) – valfritt",
+          "export_extra_ore": "Exportjustering (öre/ct per kWh) – valfritt"
         },
         "data_description": {
           "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. Batterier med SoC-golv eller reserv (t.ex. Emaldo) har mindre användbart än märkt. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
@@ -27,9 +27,9 @@
           "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
           "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller/installation) i kr. Används för att räkna batteriets IRR och återbetalningstid. Valfritt.",
           "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt.",
-          "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh. Lämna tomt för att använda den svenska schablonen.",
-          "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh. Lämna tomt för att använda den svenska schablonen.",
-          "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset. Kan vara negativt. Lämna tomt för att använda den svenska schablonen."
+          "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
+          "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
+          "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset, i öre eller eurocent. Kan vara negativt. Lämna tomt för att använda landets schablon."
         }
       },
       "entities": {
@@ -79,9 +79,9 @@
           "eff": "Verkningsgrad (tur och retur)",
           "cost_sek": "Inköpspris batteri (kr) – endast batteriet",
           "purchase_date": "Inköpsdatum",
-          "grid_var_ore": "Nätavgift (öre/kWh)",
-          "surcharge_ore": "Elhandlarens påslag (öre/kWh)",
-          "export_extra_ore": "Exportjustering (öre/kWh)",
+          "grid_var_ore": "Nätavgift (öre/ct per kWh)",
+          "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh)",
+          "export_extra_ore": "Exportjustering (öre/ct per kWh)",
           "invert_battery": "Batteriladdning/urladdning omvänd"
         },
         "data_description": {
@@ -90,9 +90,9 @@
           "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Ändrade anläggningsvärden räknar om betyget server-side.",
           "cost_sek": "Inköpspris för ENDAST batteriet (inte solpaneler) i SEK. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
           "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Används för 'Facit i år'. Rensa fältet för att ta bort värdet.",
-          "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh. Rensa fältet för att återgå till den svenska schablonen.",
-          "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh. Rensa fältet för att återgå till den svenska schablonen.",
-          "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset. Kan vara negativt. Rensa fältet för att återgå till den svenska schablonen.",
+          "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Rensa fältet för att återgå till landets schablon.",
+          "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Rensa fältet för att återgå till landets schablon.",
+          "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset, i öre eller eurocent. Kan vara negativt. Rensa fältet för att återgå till landets schablon.",
           "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Byter batteriets laddning och urladdning vid uppladdning, så du slipper ändra dina Home Assistant-sensorer."
         }
       }

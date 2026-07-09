@@ -235,13 +235,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Optional(CONF_PURCHASE_DATE): _date_selector(),
                 vol.Optional(CONF_GRID_VAR_ORE): _number_selector(
-                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
                 vol.Optional(CONF_SURCHARGE_ORE): _number_selector(
-                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
                 vol.Optional(CONF_EXPORT_EXTRA_ORE): _number_selector(
-                    min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"
+                    min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
             }
         )
@@ -610,19 +610,19 @@ class WoltaOptionsFlow(OptionsFlow):
                 description={"suggested_value": current_grid_var}
                 if current_grid_var is not None
                 else None,
-            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
             vol.Optional(
                 CONF_SURCHARGE_ORE,
                 description={"suggested_value": current_surcharge}
                 if current_surcharge is not None
                 else None,
-            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
             vol.Optional(
                 CONF_EXPORT_EXTRA_ORE,
                 description={"suggested_value": current_export_extra}
                 if current_export_extra is not None
                 else None,
-            ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"),
+            ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
             # Invert toggle (issue #1): set if the grade is inverted (battery charge/discharge
             # reversed, e.g. signed Shelly/Emaldo) – swaps the currents on upload instead of
             # requiring the user to change their HA sensors.
