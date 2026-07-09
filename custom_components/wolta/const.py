@@ -19,9 +19,9 @@ CONF_PURCHASE_DATE = "purchase_date"
 CONF_GRID_VAR_ORE = "grid_var_ore"
 CONF_SURCHARGE_ORE = "surcharge_ore"
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
-# Batteriets laddning/urladdning omvänd (issue #1): en del community-integrationer/mätare
-# (Emaldo, signad Shelly) mappar riktningarna åt fel håll → inverterat betyg. Flaggan byter
-# batt_in/batt_out i upload-vägen så användaren slipper ändra sina HA-sensorer.
+# Battery charge/discharge reversed (issue #1): some community integrations/meters
+# (Emaldo, signed Shelly) map the directions the wrong way → inverted grade. The flag swaps
+# batt_in/batt_out in the upload path so the user doesn't have to change their HA sensors.
 CONF_INVERT_BATTERY = "invert_battery"
 
 # Defaults
@@ -34,7 +34,7 @@ DEFAULT_EFF = 0.9
 # Privacy opt-in – must default to False (users must explicitly opt in to sharing)
 DEFAULT_SHARE = False
 
-# API – wolta.se serverar API:t under /api/v1 (ingen api.-subdomän finns)
+# API – wolta.se serves the API under /api/v1 (no api. subdomain exists)
 WOLTA_API_BASE = "https://wolta.se"
 
 

@@ -41,8 +41,8 @@ from .stats import (
 _LOGGER = logging.getLogger(__name__)
 
 # How far back to backfill on first install
-# Polling-takt: lugn i vila, snabb medan en server-side-beräkning pågår (så betyget
-# dyker upp strax efter att workern blivit klar i stället för vid nästa 6h-poll).
+# Polling rate: slow at rest, fast while a server-side computation is in progress (so the grade
+# shows up shortly after the worker finishes instead of at the next 6h poll).
 _SLOW_POLL = timedelta(hours=6)
 _FAST_POLL = timedelta(seconds=60)
 
@@ -141,21 +141,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """Fetch statistics, upload to Wolta, trigger recompute, return results."""
         try:
             now = dt_util.utcnow()
-            # Invert-flaggan ändrad sedan senaste upload (issue #1) → nolla bokmärket så nästa steg
-            # kör en FULL re-backfill: hela historiken läses om och skrivs över (PUT upsertar) med
-            # den korrigerade batteri-riktningen. applied_invert bokförs i state så detta bara sker
-            # vid en faktisk ändring, inte varje tick.
+            # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
+            # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
+            # the corrected battery direction. applied_invert is recorded in state so this only happens
+            # on an actual change, not on every tick.
             invert_now = bool(self.config_entry.data.get(CONF_INVERT_BATTERY))
             applied_invert = self._state.get("applied_invert")
             if applied_invert is None:
-                # Första bokföringen (t.ex. befintlig installation som uppgraderar): initiera utan
-                # att röra bokmärket – den redan uppladdade datan byggdes med aktuell flagga.
+                # First-time recording (e.g. an existing install upgrading): initialize without
+                # touching the bookmark – the already-uploaded data was built with the current flag.
                 self._state["applied_invert"] = invert_now
                 await self._store.async_save(self._state)
             elif applied_invert != invert_now:
-                # Faktisk ändring → nolla bokmärket för en full re-backfill med korrigerad riktning,
-                # och flagga att betyget ska räknas om DIREKT efter uppladdningen (förbi 7-dygns-
-                # kadensen i _maybe_recompute) så det rättade betyget syns utan ~24 h fördröjning.
+                # Actual change → reset the bookmark for a full re-backfill with the corrected direction,
+                # and flag that the grade should be recomputed IMMEDIATELY after the upload (bypassing the
+                # 7-day cadence in _maybe_recompute) so the corrected grade shows up without a ~24h delay.
                 self._state.pop("last_uploaded_ts", None)
                 self._state["applied_invert"] = invert_now
                 self._state["pending_invert_recompute"] = True
@@ -189,12 +189,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 if last_uploaded_str
                 else None
             )
-            # `pending` = en server-side-beräkning pågår. Topp-`status` DUGER INTE ENSAMT:
-            # backenden tvingar status="done" så fort ett betyg ligger cachat (profile.py),
-            # även medan ekonomi-omräkningen (decision/history) fortfarande kör. Då är `job`
-            # den enda pålitliga in-flight-signalen. Utan detta blankas ekonomisensorerna
-            # (de behåller bara sitt förra värde när pending=True) och pollen faller till 6 h
-            # → ett färdigt decision syns inte förrän nästa långsamma poll (upp till 6 h).
+            # `pending` = a server-side computation is in progress. Top-level `status` is NOT ENOUGH
+            # ALONE: the backend forces status="done" as soon as a grade is cached (profile.py),
+            # even while the economy recompute (decision/history) is still running. In that case `job`
+            # is the only reliable in-flight signal. Without this, the economy sensors go blank
+            # (they only keep their previous value when pending=True) and polling falls back to 6h
+            # → a finished decision doesn't show up until the next slow poll (up to 6h).
             job = results.get("job") or {}
             data = WoltaData(
                 results=results,
@@ -205,8 +205,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     or job.get("status") in ("pending", "running")
                 ),
             )
-            # Poll fast medan en server-side-beräkning pågår så betyget dyker upp inom ~en
-            # minut i stället för upp till 6 h; tillbaka till den lugna takten när den är klar.
+            # Poll fast while a server-side computation is in progress so the grade shows up within ~one
+            # minute instead of up to 6h; back to the slow rate once it's done.
             self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
             return data
 
@@ -214,8 +214,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             raise ConfigEntryAuthFailed from err
 
         except WoltaRateLimitError as err:
-            # retry_after MÅSTE vara en kwarg (inte bara i meddelandet) – HA 2025.12+ använder
-            # den för att schemalägga nästa uppdatering istället för det fasta 6h-intervallet.
+            # retry_after MUST be a kwarg (not just in the message) – HA 2025.12+ uses
+            # it to schedule the next update instead of the fixed 6h interval.
             raise UpdateFailed(
                 f"Wolta rate limited; retry after {err.retry_after}s",
                 retry_after=err.retry_after,
@@ -252,10 +252,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         return sum_quarter_dicts(per_entity)
 
     def _effective_stream(self, stream: str) -> str:
-        """Vid invert-flagga (issue #1) läser batt_in urladdnings-sensorn och batt_out
-        laddnings-sensorn – batteriets riktning vänds så en omvänd sensor-mappning korrigeras
-        utan att användaren rör sina HA-sensorer. Bara batteriströmmarna berörs (nät/sol orörda).
-        Flaggan läses live ur config_entry så en options-ändring slår igenom utan reload."""
+        """With the invert flag (issue #1), batt_in reads the discharge sensor and batt_out
+        the charge sensor – the battery direction is flipped so a reversed sensor mapping is corrected
+        without the user touching their HA sensors. Only the battery currents are affected (grid/solar untouched).
+        The flag is read live from config_entry so an options change takes effect without a reload."""
         if not self.config_entry.data.get(CONF_INVERT_BATTERY):
             return stream
         if stream == "batt_in":
@@ -368,10 +368,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not period_end_str:
             return
 
-        # En invert-ändring (issue #1) har just laddat upp korrigerad data via full re-backfill →
-        # FORCERA en recompute förbi 7-dygnskadensen, annars visas det rättade betyget inte förrän
-        # nattlig rewarm/nästa tick. Flaggan sätts av self-healen och rensas först när recomputen
-        # lyckats (överlever ett misslyckat försök).
+        # An invert change (issue #1) just uploaded corrected data via a full re-backfill →
+        # FORCE a recompute bypassing the 7-day cadence, otherwise the corrected grade won't show until
+        # the nightly rewarm/next tick. The flag is set by the self-heal and only cleared once the recompute
+        # succeeds (survives a failed attempt).
         force = bool(self._state.get("pending_invert_recompute"))
 
         last_recompute_str = self._state.get("last_recompute")
@@ -390,7 +390,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         try:
             await self.client.recompute(self.token)
             self._state["last_recompute"] = period_end_str
-            self._state.pop("pending_invert_recompute", None)  # rättad – rensa force-flaggan
+            self._state.pop("pending_invert_recompute", None)  # corrected – clear the force flag
             await self._store.async_save(self._state)
             _LOGGER.debug("Recompute triggered; last_recompute updated to %s", period_end_str)
         except WoltaRateLimitError:

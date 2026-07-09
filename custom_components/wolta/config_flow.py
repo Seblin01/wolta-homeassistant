@@ -517,10 +517,10 @@ class WoltaOptionsFlow(OptionsFlow):
                     patch_fields[key] = val
                     new_data[key] = val
 
-            # Invert-toggle (issue #1): en KLIENT-sidig upload-transformation, inte ett backend-fält
-            # → PATCH:as inte. Vid ändring uppdateras entry.data och en refresh triggas; coordinatorn
-            # self-healar (nollar bokmärket → full re-backfill laddar upp korrigerad data → backend
-            # räknar om på den överskrivna datan).
+            # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend field
+            # → not PATCHed. On change, entry.data is updated and a refresh is triggered; the coordinator
+            # self-heals (resets the bookmark → full re-backfill uploads corrected data → backend
+            # recomputes on the overwritten data).
             invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
             invert_changed = invert_new != bool(entry.data.get(CONF_INVERT_BATTERY, False))
             if invert_changed:
@@ -543,7 +543,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
-                    # swallow 429 gracefully anyway. (Denna refresh self-healar även invert.)
+                    # swallow 429 gracefully anyway. (This refresh also self-heals invert.)
                     try:
                         await coordinator.async_trigger_recompute()
                     except WoltaRateLimitError:
@@ -563,8 +563,8 @@ class WoltaOptionsFlow(OptionsFlow):
                         except Exception:  # pylint: disable=broad-except
                             pass
                 elif invert_changed and coordinator is not None:
-                    # Bara invert ändrad (ingen PATCH): trigga en refresh så coordinatorn kör
-                    # full re-backfill med korrigerad riktning och laddar upp den överskrivna datan.
+                    # Only invert changed (no PATCH): trigger a refresh so the coordinator runs
+                    # a full re-backfill with the corrected direction and uploads the overwritten data.
                     try:
                         await coordinator.async_request_refresh()
                     except Exception:  # pylint: disable=broad-except
@@ -594,9 +594,9 @@ class WoltaOptionsFlow(OptionsFlow):
                 CONF_EFF,
                 default=entry.data.get(CONF_EFF, DEFAULT_EFF),
             ): _number_selector(min_val=0.5, max_val=1.0, step=0.01),
-            # suggested_value (INTE default): prefyller UI:t men återinjiceras inte av
-            # voluptuous när fältet rensas – annars går ett rensat fält aldrig att skilja
-            # från ett orört (v0.3.0-warten: rensade värden svaldes tyst).
+            # suggested_value (NOT default): prefills the UI but isn't reinjected by
+            # voluptuous when the field is cleared – otherwise a cleared field could never be
+            # distinguished from an untouched one (v0.3.0-era bug: cleared values were silently swallowed).
             vol.Optional(
                 CONF_COST_SEK,
                 description={"suggested_value": current_cost} if current_cost is not None else None,
@@ -623,9 +623,9 @@ class WoltaOptionsFlow(OptionsFlow):
                 if current_export_extra is not None
                 else None,
             ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/kWh"),
-            # Invert-toggle (issue #1): sätt om betyget är inverterat (batteriladdning/urladdning
-            # omvänd, t.ex. signad Shelly/Emaldo) – swappar strömmarna vid upload i st f att
-            # användaren ändrar sina HA-sensorer.
+            # Invert toggle (issue #1): set if the grade is inverted (battery charge/discharge
+            # reversed, e.g. signed Shelly/Emaldo) – swaps the currents on upload instead of
+            # requiring the user to change their HA sensors.
             vol.Required(
                 CONF_INVERT_BATTERY,
                 default=bool(entry.data.get(CONF_INVERT_BATTERY, False)),

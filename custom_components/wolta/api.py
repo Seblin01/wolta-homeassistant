@@ -8,9 +8,9 @@ import aiohttp
 
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
-# NPM/nginx defaults can be as low as 1 MB). ~5000 15-min-rader ≈ 0.8 MB → passerar
-# även en 1 MB-gräns. Backenden tillåter upp till 40k/PUT, men proxyn är den bindande
-# gränsen — se 413-incidenten 2026-07-05 (backfill mot Bronäs).
+# NPM/nginx defaults can be as low as 1 MB). ~5000 15-min rows ≈ 0.8 MB → passes
+# even a 1 MB limit. The backend allows up to 40k/PUT, but the proxy is the binding
+# limit — see the 413 incident 2026-07-05 (backfill against Bronäs).
 MAX_ROWS_PER_PUT = 5_000
 
 

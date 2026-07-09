@@ -53,8 +53,8 @@ def _betyg_score(results: dict) -> float | None:
 
 
 def _period_end_ts(results: dict) -> datetime | None:
-    """period.end är en date-sträng ('YYYY-MM-DD'); en TIMESTAMP-sensor kräver en
-    aware datetime, annars blir state:t ogiltigt i HA. Parsa + fäst UTC om naiv."""
+    """period.end is a date string ('YYYY-MM-DD'); a TIMESTAMP sensor requires an
+    aware datetime, otherwise the state becomes invalid in HA. Parse + attach UTC if naive."""
     end = (results.get("period") or {}).get("end")
     if not end:
         return None
@@ -78,11 +78,11 @@ def _decision_available(results: dict) -> bool:
 
 
 def _battery_value(results: dict) -> float | None:
-    """Batteriets värde per år – UPPMÄTT ur betygsberäkningen när det finns
-    (betyg.holistic.measured_total_sek, samma siffra som wolta.se visar),
-    annars decision-motorns modellerade batteridel (avg_battery_sek).
-    ALDRIG decision.avg_annual_sek – den är hela anläggningens besparing
-    inklusive solvärdet (plan 33)."""
+    """Battery value per year – MEASURED from the grade calculation when available
+    (betyg.holistic.measured_total_sek, the same figure wolta.se shows),
+    otherwise the decision engine's modeled battery share (avg_battery_sek).
+    NEVER decision.avg_annual_sek – that's the whole plant's savings
+    including the solar value (plan 33)."""
     holistic = (results.get("betyg") or {}).get("holistic") or {}
     measured = holistic.get("measured_total_sek")
     if measured is not None:
@@ -127,7 +127,7 @@ def _capacity_hint_attr(results: dict) -> dict[str, Any]:
     return {"capacity_hint": hint}
 
 
-# Serverstatus → stabilt enum-state (slug) för statussensorn. Visningen översätts via
+# Server status → stable enum state (slug) for the status sensor. The display is translated via
 # translation_key (sv: Klar/Beräknar/Väntar på data/Fel; en: Done/Computing/...) – v0.4.3.
 _STATUS_MAP = {
     "done": "done",
@@ -316,10 +316,10 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._entry = entry
-        # v0.4.2: senaste kända värde/attribut – serveras under en pågående server-
-        # beräkning (recompute byter fingerprint → betyg/decision saknas någon minut)
-        # så sensorerna slipper unavailable-blippen. Bara i minnet: efter HA-omstart
-        # mitt i en beräkning blir sensorn unavailable tills beräkningen är klar (ok).
+        # v0.4.2: last known value/attribute – served during an in-progress server
+        # computation (recompute changes the fingerprint → betyg/decision is missing for a minute)
+        # so the sensors avoid the unavailable blip. In-memory only: after an HA restart
+        # mid-computation, the sensor is unavailable until the computation finishes (fine).
         self._last_value: Any = None
         self._last_attrs: dict[str, Any] | None = None
         self._attr_unique_id = f"{entry.unique_id}_{description.key}"
@@ -338,8 +338,8 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
     @property
     def available(self) -> bool:
         """Sensor is available when coordinator has data and source is not None.
-        Under en pågående server-beräkning (pending) räknas sensorn som available
-        om ett tidigare känt värde finns att behålla."""
+        During an in-progress server computation (pending), the sensor counts as available
+        if a previously known value is there to keep."""
         if not self.coordinator.last_update_success or self.coordinator.data is None:
             return False
         if self.entity_description.available_fn(self.coordinator.data.results):
@@ -376,7 +376,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
             and data.pending
             and self._last_attrs is not None
         ):
-            # Behållna attribut under omräkning, flaggade så det syns i UI:t (v0.4.4: eng. nycklar)
+            # Retained attributes during recompute, flagged so it's visible in the UI (v0.4.4: eng. keys)
             return {**self._last_attrs, "computing": True}
         attrs = self.entity_description.attr_fn(data)
         if self.entity_description.available_fn(data.results):

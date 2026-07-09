@@ -44,8 +44,8 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
         try:
             await self.coordinator.async_trigger_recompute()
         except WoltaRateLimitError:
-            # Redan omräknat nyligen (cooldown, max 1/dygn) – ingen ny beräkning behövs.
-            # Hämta bara färska resultat så användaren ser senaste betyget, utan felruta.
+            # Already recomputed recently (cooldown, max 1/day) – no new computation needed.
+            # Just fetch fresh results so the user sees the latest grade, without an error dialog.
             await self.coordinator.async_request_refresh()
             return
         except WoltaApiError as err:
@@ -53,8 +53,8 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
                 translation_domain=DOMAIN,
                 translation_key="recompute_failed",
             ) from err
-        # Omräkning köad → hämta färska resultat direkt (koordinatorns snabb-polling tar
-        # vid tills beräkningen är klar).
+        # Recompute queued → fetch fresh results right away (the coordinator's fast polling
+        # takes over until the computation is done).
         await self.coordinator.async_request_refresh()
 
 

@@ -155,9 +155,9 @@ def merge_streams(
     valid_quarters = _batt_in.keys() | _batt_out.keys()
 
     def _nn(v: float) -> float:
-        # Recorderns `change` på en energiräknare kan bli aningen negativ (flyttalsbrus
-        # eller en liten mätarkorrigering/reset), t.ex. -0.025 kWh. Dessa storheter är
-        # fysiskt icke-negativa och backenden avvisar negativa värden (422). Golva till 0.
+        # The recorder's `change` on an energy counter can go slightly negative (float noise
+        # or a small meter correction/reset), e.g. -0.025 kWh. These quantities are
+        # physically non-negative and the backend rejects negative values (422). Floor to 0.
         return v if v > 0.0 else 0.0
 
     rows = []
@@ -171,8 +171,8 @@ def merge_streams(
             "grid_import_kwh": _nn(_grid_in.get(qt, 0.0)),
             "grid_export_kwh": _nn(_grid_out.get(qt, 0.0)),
         }
-        # En rad över taket (mätarreset-spik eller fel enhet på sensorn) skulle
-        # 422:a hela batchen server-side – släpp raden istället för att tappa allt.
+        # A row above the cap (meter reset spike or wrong unit on the sensor) would
+        # 422 the whole batch server-side – drop the row instead of losing everything.
         if any(v > _BACKEND_MAX_KWH for k, v in row.items() if k != "ts"):
             dropped += 1
             continue
@@ -233,9 +233,9 @@ async def async_fetch_change(
         end,
         statistic_ids,
         period,
-        # Normalisera till kWh – statistik lagras i sensorns egen enhet, och en
-        # Wh-sensor gav annars 1000× för stora värden → 422 från backendens
-        # le=500-validering (sett i prod 2026-07-05/06).
+        # Normalize to kWh – statistics are stored in the sensor's own unit, and a
+        # Wh sensor would otherwise give 1000× too-large values → 422 from the backend's
+        # le=500 validation (seen in prod 2026-07-05/06).
         {"energy": "kWh"},
         {"change"},
     )
