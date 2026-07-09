@@ -139,5 +139,10 @@
         "name": "Räkna om"
       }
     }
+  },
+  "exceptions": {
+    "recompute_failed": {
+      "message": "Wolta kunde inte räkna om just nu – försök igen senare"
+    }
   }
 }

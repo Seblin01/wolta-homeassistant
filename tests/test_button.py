@@ -81,6 +81,20 @@ async def test_button_press_api_error_raises_homeassistant_error():
         await btn.async_press()
 
 
+@pytest.mark.asyncio
+async def test_button_press_api_error_is_translated():
+    """v0.8.0: the error toast is raised via translation_key (English default,
+    Swedish in sv.json) instead of a hardcoded Swedish string."""
+    coord = _make_coordinator(
+        raise_on_recompute=WoltaApiError("HTTP 422 from .../recompute: cooldown", status=422)
+    )
+    btn = _make_button(coord)
+    with pytest.raises(HomeAssistantError) as ei:
+        await btn.async_press()
+    assert ei.value.translation_domain == "wolta"
+    assert ei.value.translation_key == "recompute_failed"
+
+
 # ---------------------------------------------------------------------------
 # unique_id and device info
 # ---------------------------------------------------------------------------

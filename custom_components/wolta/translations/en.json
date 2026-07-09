@@ -139,5 +139,10 @@
         "name": "Recompute"
       }
     }
+  },
+  "exceptions": {
+    "recompute_failed": {
+      "message": "Wolta could not recompute right now – try again later"
+    }
   }
 }

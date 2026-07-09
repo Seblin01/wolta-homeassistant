@@ -50,7 +50,8 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
             return
         except WoltaApiError as err:
             raise HomeAssistantError(
-                "Wolta kunde inte räkna om just nu – försök igen senare."
+                translation_domain=DOMAIN,
+                translation_key="recompute_failed",
             ) from err
         # Omräkning köad → hämta färska resultat direkt (koordinatorns snabb-polling tar
         # vid tills beräkningen är klar).

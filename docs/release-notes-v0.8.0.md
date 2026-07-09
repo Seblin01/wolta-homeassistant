@@ -29,6 +29,12 @@ data actually shows.
 - Both texts are updated in the setup flow and the options flow (gear icon → Configure), in
   English and Swedish.
 
+## Fixed – recompute error message now respects your language
+
+- The error shown when a manual recompute fails was a hardcoded Swedish string regardless of
+  your Home Assistant language. It is now a translated exception (English default, Swedish
+  translation included), using Home Assistant's standard exception-translation mechanism.
+
 **Why?** Entering nameplate capacity instead of usable capacity is one of the most common setup
 mistakes, and it quietly distorts the optimisation grade and economy figures without any error
 being raised. The new hint catches it after the fact from measured behaviour; the clearer field
