@@ -22,8 +22,9 @@
           "export_extra_ore": "Exportjustering (öre/kWh) – valfritt"
         },
         "data_description": {
-          "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
+          "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. Batterier med SoC-golv eller reserv (t.ex. Emaldo) har mindre användbart än märkt. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
           "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt.",
+          "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
           "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller/installation) i kr. Används för att räkna batteriets IRR och återbetalningstid. Valfritt.",
           "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt.",
           "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh. Lämna tomt för att använda den svenska schablonen.",
@@ -84,9 +85,9 @@
           "invert_battery": "Batteriladdning/urladdning omvänd"
         },
         "data_description": {
-          "battery_kwh": "Användbar batterikapacitet i kWh.",
+          "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. Batterier med SoC-golv eller reserv (t.ex. Emaldo) har mindre användbart än märkt. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
           "battery_kw": "Maximal ladd-/urladdningseffekt i kW.",
-          "eff": "Verkningsgrad tur och retur (0,5–1,0). Ändrade anläggningsvärden räknar om betyget server-side.",
+          "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Ändrade anläggningsvärden räknar om betyget server-side.",
           "cost_sek": "Inköpspris för ENDAST batteriet (inte solpaneler) i SEK. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
           "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Används för 'Facit i år'. Rensa fältet för att ta bort värdet.",
           "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh. Rensa fältet för att återgå till den svenska schablonen.",
