@@ -117,6 +117,16 @@ def _applied_tariff_attr(results: dict) -> dict[str, Any]:
     return {"applied_tariff": applied}
 
 
+def _capacity_hint_attr(results: dict) -> dict[str, Any]:
+    """capacity_hint (plan 37 / issue #1): set by the backend when the entered battery
+    capacity is clearly higher than what the measured data shows (nameplate vs usable).
+    Omitted entirely (not None) when absent, so older cached responses stay clean."""
+    hint = (results.get("betyg") or {}).get("capacity_hint")
+    if hint is None:
+        return {}
+    return {"capacity_hint": hint}
+
+
 # Serverstatus → stabilt enum-state (slug) för statussensorn. Visningen översätts via
 # translation_key (sv: Klar/Beräknar/Väntar på data/Fel; en: Done/Computing/...) – v0.4.3.
 _STATUS_MAP = {
@@ -162,6 +172,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
                 "components": (data.results.get("betyg") or {}).get("components"),
                 **_applied_tariff_attr(data.results),
+                **_capacity_hint_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}

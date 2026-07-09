@@ -639,3 +639,38 @@ def test_optimeringsbetyg_applied_tariff_absent_when_missing():
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     attrs = s.extra_state_attributes
     assert "applied_tariff" not in attrs
+
+
+# ---------------------------------------------------------------------------
+# capacity_hint on optimeringsbetyg (plan 37 / issue #1)
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_capacity_hint():
+    """When betyg carries capacity_hint (entered capacity >> observed usable),
+    the grade sensor exposes it as a structured attribute."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {
+            **RESULTS_FULL["betyg"],
+            "capacity_hint": {
+                "entered_kwh": 15.0,
+                "observed_usable_kwh": 10.45,
+                "suggested_kwh": 10.5,
+            },
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("capacity_hint") == {
+        "entered_kwh": 15.0,
+        "observed_usable_kwh": 10.45,
+        "suggested_kwh": 10.5,
+    }
+
+
+def test_optimeringsbetyg_omits_capacity_hint_when_absent():
+    """No capacity_hint key in betyg (backend didn't flag, or older cached
+    response) -> attribute omitted entirely, not None."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    assert "capacity_hint" not in s.extra_state_attributes
