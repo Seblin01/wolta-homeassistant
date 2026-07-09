@@ -78,9 +78,9 @@ No account or API token is required. The integration provisions a profile automa
 
 **Step 1 – Zone & battery**
 - Select your Nordpool/ENTSO-E price zone (e.g. SE3).
-- Enter your battery capacity (kWh) and peak power (kW). Both are required and must be greater than zero.
-- Set the round-trip efficiency (default 0.9).
-- Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh, the export figure may be negative). Leave any tariff field blank to use the standard Swedish tariff.
+- Enter your battery's **usable** capacity (kWh) — not the rated/nameplate figure; batteries with a SoC floor or reserve have less usable than rated — and peak power (kW). Both are required and must be greater than zero.
+- Set the round-trip efficiency (default 0.9), measured on the AC side — not the DC/cell figure.
+- Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Leave any tariff field blank to use your country's standard tariff.
 
 **Step 2 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
@@ -96,7 +96,7 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
-- Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh, the export figure may be negative). Clearing a field reverts it to the standard Swedish tariff.
+- Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Clearing a field reverts it to your country's standard tariff.
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).
@@ -106,6 +106,8 @@ Only changed fields are sent to Wolta. After saving, a recompute is triggered au
 **Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
 
 **Payback time shows `unknown`.** The sensor has no payback year to report because the battery doesn't reach break-even — typically a small or expensive battery whose modelled internal rate of return (IRR) is negative. This is a real result, not an error; the IRR sensor shows the (negative) return. Increasing the battery capacity or lowering the entered purchase price moves it towards a payback.
+
+**The grade sensor has a `capacity_hint` attribute (v0.8.0+).** The backend sets it when the battery capacity you entered is clearly higher than the usable capacity your measured data shows — a nameplate-vs-usable mix-up. The grade compares you against a perfect dispatch on the capacity you *entered*, so an oversized entry unfairly lowers the score. Open **Configure** and set the battery capacity to the attribute's `suggested_kwh` (or your own better estimate of usable capacity); the grade is recomputed automatically. No hint means no mismatch was detected.
 
 ## Full results on wolta.se
 
