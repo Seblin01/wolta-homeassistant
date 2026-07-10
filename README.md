@@ -74,26 +74,37 @@ Or add it manually:
 
 ## Setup flow
 
-No account or API token is required. The integration provisions a profile automatically during setup.
+No account or API token is required. Setup starts with a choice:
 
-**Step 1 – Zone & battery**
-- Select your Nordpool/ENTSO-E price zone (e.g. SE3).
-- Enter your battery's **usable** capacity (kWh) — not the rated/nameplate figure; batteries with a SoC floor or reserve have less usable than rated — and peak power (kW). Both are required and must be greater than zero.
-- Set the round-trip efficiency (default 0.9), measured on the AC side — not the DC/cell figure.
-- Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Leave any tariff field blank to use your country's standard tariff.
-- Optionally set a **reserve floor (%)** — the share of usable capacity your control system never discharges below (e.g. a backup reserve). Enter usable capacity above; the reserve is subtracted here, don't subtract it twice.
+- **Create a new profile** — Home Assistant provisions a Wolta profile automatically (the flow below).
+- **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data).
 
-**Step 2 – Energy sensors**
+**Step 1 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
 - Solar production is optional.
 
-**Step 3 – Privacy**
+**Step 2 – Zone & battery (create path)**
+- Select your Nordpool/ENTSO-E price zone (e.g. SE3). The dropdown is preselected from your Home Assistant country and, for Sweden, latitude.
+- Enter your battery's **usable** capacity (kWh) — not the rated/nameplate figure; batteries with a SoC floor or reserve have less usable than rated — and peak power (kW). Both are required and must be greater than zero.
+- Set the round-trip efficiency (default 0.9), measured on the AC side — not the DC/cell figure. With a few months of battery history in Home Assistant, the field is prefilled with your plant's *measured* AC round-trip efficiency, and the purchase date is suggested from the first recorded data point.
+- Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Leave any tariff field blank to use your country's standard tariff.
+- Optionally set a **reserve floor (%)** — the share of usable capacity your control system never discharges below (e.g. a backup reserve). Enter usable capacity above; the reserve is subtracted here, don't subtract it twice.
+
+If your history shows more energy leaving the battery than entering it, the **Battery charge/discharge reversed** toggle is preselected (linked profiles get a separate confirmation step) — see Troubleshooting.
+
+**Step 3 – Privacy (create path)**
 - Opt in to anonymised data sharing (off by default) if you want to contribute to the Wolta benchmark.
 - Confirm to create the profile and complete setup.
 
+## Shared profile with wolta.se
+
+The integration and wolta.se show the **same profile**. The server is the source of truth: change a value in the Configure dialog and it shows up on wolta.se; change it on wolta.se and Home Assistant picks it up on its next poll (within hours) — the Configure form always opens with the current server values. Last write wins.
+
+Because a linked profile belongs to your wolta.se usage, **removing the integration never deletes a linked profile** (profiles created by the integration keep the documented delete-on-remove behaviour, see Privacy). A purged/deleted profile triggers re-authentication, which creates a fresh HA-owned profile from the cached settings.
+
 ## Adjusting values afterwards
 
-Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration:
+Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration. The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
@@ -102,6 +113,8 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).
+
+**Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The full history is re-uploaded from the new sensors and the grade recomputed — no need to remove the integration.
 
 ## Troubleshooting
 
@@ -119,7 +132,7 @@ The Wolta device page has a **Visit** link that opens your complete results on w
 
 Your 15-minute energy data is stored on Wolta's servers to power the analysis. No personal data (name, address, account) is sent or required.
 
-**Deleting the integration removes your data server-side.** Removing the config entry in Home Assistant triggers a right-to-erasure request to the Wolta backend.
+**Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
 Anonymised corpus sharing is opt-in and defaults to off. See [wolta.se/om](https://wolta.se/om) for the full privacy policy.
 
