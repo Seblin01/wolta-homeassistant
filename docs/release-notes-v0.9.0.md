@@ -7,9 +7,6 @@ compares you against the same window you actually operate in.
   services → Wolta → Configure): "Reserve floor (%)" — the share of usable capacity your
   control system never discharges below (e.g. a backup reserve). Optional; leave it blank
   if you don't reserve any capacity.
-- **Why**: without this, a deliberate reserve looked like wasted capacity to the grade
-  benchmark and quietly dragged the score down, even though never touching that last slice
-  of charge was the correct, intentional behaviour.
 - **How to set it**: enter your battery's *usable* capacity in the capacity field as before,
   then the reserve percentage separately in the new field — the reserve is subtracted from
   that usable figure on the backend, so don't subtract it yourself in the capacity field too.
