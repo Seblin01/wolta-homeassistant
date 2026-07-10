@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -474,3 +474,45 @@ class TestSumQuarterDicts:
         d3 = {b: 0.5}
         result = sum_quarter_dicts([d1, d2, d3])
         assert result[b] == pytest.approx(1.5)
+
+
+# ---------------------------------------------------------------------------
+# analyze_battery_history (auto-prefill vid setup: eff/purchase_date/invert)
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.stats import analyze_battery_history
+
+_NOW = datetime(2026, 7, 10, tzinfo=timezone.utc)
+_OLD = _NOW - timedelta(days=365)
+
+
+def test_analysis_suggests_eff_and_date():
+    out = analyze_battery_history(1000.0, 880.0, _OLD, _NOW)
+    assert out["eff"] == 0.88
+    assert out["purchase_date"] == _OLD.date().isoformat()
+    assert out["invert_suspected"] is False
+
+
+def test_analysis_detects_inverted_sensors():
+    out = analyze_battery_history(880.0, 1000.0, _OLD, _NOW)  # ur > in → omkastat
+    assert out["invert_suspected"] is True
+    assert out["eff"] == 0.88  # speglad kvot = eff med rättvända sensorer
+
+
+def test_analysis_requires_enough_history():
+    recent = _NOW - timedelta(days=10)
+    out = analyze_battery_history(1000.0, 880.0, recent, _NOW)
+    assert out["eff"] is None                                  # < 60 dagar
+    assert out["purchase_date"] == recent.date().isoformat()   # datum föreslås ändå
+    out = analyze_battery_history(50.0, 44.0, _OLD, _NOW)
+    assert out["eff"] is None                                  # < 100 kWh laddat
+
+
+def test_analysis_clamps_eff():
+    out = analyze_battery_history(1000.0, 300.0, _OLD, _NOW)  # kvot 0.3 → orimlig
+    assert out["eff"] == 0.5
+
+
+def test_analysis_no_history():
+    out = analyze_battery_history(0.0, 0.0, None, _NOW)
+    assert out == {"eff": None, "purchase_date": None, "invert_suspected": False}

@@ -189,6 +189,48 @@ def merge_streams(
 
 
 # ---------------------------------------------------------------------------
+# Setup auto-prefill: analyse lifetime battery history (pure function)
+# ---------------------------------------------------------------------------
+
+# Thresholds for auto-prefill from lifetime battery statistics: the measured
+# discharge/charge ratio only converges to the true AC round-trip efficiency with
+# months of data and real throughput. Below these we suggest nothing.
+_PREFILL_MIN_DAYS = 60
+_PREFILL_MIN_CHARGED_KWH = 100.0
+# Ratio persistently above 1 means the charge/discharge sensors are swapped
+# (signed Shelly/Emaldo, issue #1); small margin for metering noise.
+_INVERT_RATIO_THRESHOLD = 1.05
+
+
+def analyze_battery_history(
+    charged_kwh: float,
+    discharged_kwh: float,
+    first_ts: datetime | None,
+    now: datetime,
+) -> dict:
+    """Suggest eff/purchase_date and detect inverted sensors from lifetime sums.
+
+    Pure function (no HA imports). Returns
+    {"eff": float | None, "purchase_date": str | None, "invert_suspected": bool}.
+    """
+    out: dict = {"eff": None, "purchase_date": None, "invert_suspected": False}
+    if first_ts is None:
+        return out
+    out["purchase_date"] = first_ts.date().isoformat()
+    span_days = (now - first_ts).days
+    if span_days < _PREFILL_MIN_DAYS or charged_kwh < _PREFILL_MIN_CHARGED_KWH:
+        return out
+    if discharged_kwh <= 0:
+        return out
+    ratio = discharged_kwh / charged_kwh
+    if ratio > _INVERT_RATIO_THRESHOLD:
+        out["invert_suspected"] = True
+        ratio = 1.0 / ratio  # mirrored ratio = eff with the streams swapped
+    out["eff"] = round(min(max(ratio, 0.5), 1.0), 2)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Recorder-touching function (must run via recorder executor)
 # ---------------------------------------------------------------------------
 
@@ -239,3 +281,37 @@ async def async_fetch_change(
         {"energy": "kWh"},
         {"change"},
     )
+
+
+async def async_fetch_lifetime(
+    hass: Any,
+    batt_in_ids: list[str],
+    batt_out_ids: list[str],
+) -> tuple[float, float, datetime | None]:
+    """Lifetime charged/discharged sums + first statistics timestamp.
+
+    Reads monthly LTS 'change' from epoch via async_fetch_change (which carries the
+    kWh unit normalization – Wh sensors would otherwise inflate sums 1000×). Used by
+    the config flow to prefill eff/purchase_date and detect inverted sensors.
+    Returns (charged_kwh, discharged_kwh, first_ts).
+    """
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ids = set(batt_in_ids) | set(batt_out_ids)
+    stats = await async_fetch_change(hass, ids, start, None, "month")
+
+    def _sum(entity_ids: list[str]) -> float:
+        return sum(
+            row["change"] or 0.0
+            for eid in entity_ids
+            for row in stats.get(eid, [])
+            if row.get("change") is not None
+        )
+
+    first_ts: datetime | None = None
+    for rows in stats.values():
+        for row in rows:
+            # row["start"] är unix-epoch (samma läsning som aggregate_5min_to_15min)
+            ts = datetime.fromtimestamp(row["start"], tz=timezone.utc)
+            if first_ts is None or ts < first_ts:
+                first_ts = ts
+    return _sum(batt_in_ids), _sum(batt_out_ids), first_ts
