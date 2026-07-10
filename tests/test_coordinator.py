@@ -1193,3 +1193,63 @@ async def test_profile_sync_skipped_during_fast_poll(hass: HomeAssistant, mock_e
         await coordinator._async_update_data()
 
     client.get_profile.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Sidopoll (v0.11.0): webbändringar ska synas i HA inom minuter, inte timmar
+# ---------------------------------------------------------------------------
+
+
+async def _side_poll_coordinator(hass, mock_entry, client):
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client,
+        store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                     "applied_invert": False, "applied_entities": None})
+    coordinator.async_request_refresh = AsyncMock()
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_side_poll_applies_change_and_refreshes(hass: HomeAssistant, mock_entry):
+    """Webbändring upptäckt av sidopollen → entry.data speglas + full refresh triggas."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await coordinator.async_check_profile_sync()
+    assert mock_upd.called
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_no_change_no_refresh(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await coordinator.async_check_profile_sync()
+    mock_upd.assert_not_called()
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_skipped_during_fast_poll(hass: HomeAssistant, mock_entry):
+    """Under fast-poll refreshar huvudcykeln redan varje minut – sidopollen vilar."""
+    from custom_components.wolta.coordinator import _FAST_POLL
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    coordinator.update_interval = _FAST_POLL
+    await coordinator.async_check_profile_sync()
+    client.get_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_swallows_errors(hass: HomeAssistant, mock_entry):
+    """Nätfel i sidopollen får aldrig bubbla (timer-callback) – huvudcykeln tar auth."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(side_effect=WoltaAuthError("purged"))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    await coordinator.async_check_profile_sync()  # får inte kasta
+    coordinator.async_request_refresh.assert_not_awaited()

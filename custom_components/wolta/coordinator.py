@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -70,6 +71,10 @@ _REPAIR_FAILURE_DAYS = 7
 # Store version / key
 _STORE_VERSION = 1
 _STORE_KEY = "wolta_coordinator"
+
+# Side-poll cadence: cheap GET /profile so web-side edits show up in HA within
+# minutes instead of at the next 6h main cycle. Single-row read server-side.
+_PROFILE_SYNC_INTERVAL = timedelta(minutes=5)
 
 # Issue IDs
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
@@ -151,18 +156,24 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         loaded = await self._store.async_load()
         self._state = dict(loaded) if loaded else {}
         _LOGGER.debug("Coordinator state loaded: %s", self._state)
+        # Sidopoll för webbändringar (delad profil) – avregistreras vid unload.
+        self.config_entry.async_on_unload(
+            async_track_time_interval(
+                self.hass, self.async_check_profile_sync, _PROFILE_SYNC_INTERVAL
+            )
+        )
 
     # ------------------------------------------------------------------
     # Main update
     # ------------------------------------------------------------------
 
-    def _apply_profile_sync(self, profile: dict) -> None:
+    def _apply_profile_sync(self, profile: dict) -> bool:
         """Mirror server-side profile fields into entry.data (write only on change).
 
         entry.data is a CACHE of the shared profile – the server is the source of
         truth. No update listener is registered, so async_update_entry does not
         trigger a reload; we only write when something actually changed to avoid
-        a disk write per poll tick.
+        a disk write per poll tick. Returns True when something changed.
         """
         entry = self.config_entry
         new_data = dict(entry.data)
@@ -177,12 +188,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 new_data[key] = server_val
                 changed = True
         if not changed:
-            return
+            return False
         zone = new_data.get(CONF_ZONE, self._zone)
         self._zone = zone
         self.hass.config_entries.async_update_entry(
             entry, data=new_data, title=f"Wolta ({zone})"
         )
+        return True
+
+    async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
+        """Side-poll (every 5 min): pick up web-side profile edits within minutes.
+
+        The main cycle only runs every 6h at rest, so without this a change made on
+        wolta.se would not show in HA for hours. On a detected change we mirror it
+        and run a full refresh – the web already queued the recompute, so the
+        pending-detection switches to fast-poll until the fresh grade lands.
+        Never raises (timer callback); auth errors are left to the main cycle,
+        which owns the reauth path.
+        """
+        if self.update_interval == _FAST_POLL:
+            return  # main cycle is already refreshing every minute
+        try:
+            profile = await self.client.get_profile(self.token)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Profile side-poll failed; retrying next tick", exc_info=True)
+            return
+        if self._apply_profile_sync(profile):
+            _LOGGER.debug("Web-side profile change detected; refreshing results")
+            await self.async_request_refresh()
 
     async def _async_update_data(self) -> WoltaData:
         """Fetch statistics, upload to Wolta, trigger recompute, return results."""

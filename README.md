@@ -98,7 +98,7 @@ If your history shows more energy leaving the battery than entering it, the **Ba
 
 ## Shared profile with wolta.se
 
-The integration and wolta.se show the **same profile**. The server is the source of truth: change a value in the Configure dialog and it shows up on wolta.se; change it on wolta.se and Home Assistant picks it up on its next poll (within hours) — the Configure form always opens with the current server values. Last write wins.
+The integration and wolta.se show the **same profile**. The server is the source of truth: change a value in the Configure dialog and it shows up on wolta.se; change it on wolta.se and Home Assistant picks it up within about five minutes (a lightweight side-poll watches the profile and refreshes the results as soon as something changed) — the Configure form always opens with the current server values. Last write wins.
 
 Because a linked profile belongs to your wolta.se usage, **removing the integration never deletes a linked profile** (profiles created by the integration keep the documented delete-on-remove behaviour, see Privacy). A purged/deleted profile triggers re-authentication, which creates a fresh HA-owned profile from the cached settings.
 
