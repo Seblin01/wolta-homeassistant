@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import WoltaApiClient
-from .const import CONF_TOKEN, WOLTA_API_BASE
+from .const import CONF_CREATED_BY_HA, CONF_TOKEN, WOLTA_API_BASE
 from .coordinator import WoltaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,6 +39,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     README and strings.  Errors are swallowed (best-effort; the profile may
     already be purged server-side).
     """
+    # Linked profiles (created on wolta.se, adopted via the link flow) must survive
+    # integration removal – the user's web profile incl. CSV history is not ours to
+    # delete. Default True keeps the documented delete-on-remove behaviour for all
+    # HA-created entries (every pre-v0.10.0 install).
+    if not entry.data.get(CONF_CREATED_BY_HA, True):
+        _LOGGER.debug("Linked Wolta profile – skipping server-side delete on removal")
+        return
+
     token = entry.data[CONF_TOKEN]
     try:
         session = async_get_clientsession(hass)

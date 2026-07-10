@@ -158,3 +158,52 @@ async def test_async_remove_entry_swallows_client_error(hass: HomeAssistant):
 
         # Must not raise
         await async_remove_entry(hass, mock_entry)
+
+
+# ---------------------------------------------------------------------------
+# B8: radera-skydd – länkade profiler (created_by_ha=False) överlever borttagning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_remove_entry_keeps_linked_profile(hass: HomeAssistant):
+    """created_by_ha=False (koppla-spåret) → INGEN server-DELETE vid borttagning.
+    Webbprofilen inkl. CSV-historik är inte vår att radera."""
+    from custom_components.wolta.const import CONF_CREATED_BY_HA
+
+    mock_entry = MagicMock()
+    mock_entry.data = {**ENTRY_DATA, CONF_CREATED_BY_HA: False}
+
+    mock_client = MagicMock()
+    mock_client.delete = AsyncMock()
+
+    with (
+        patch("custom_components.wolta.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.async_get_clientsession"),
+    ):
+        from custom_components.wolta import async_remove_entry
+
+        await async_remove_entry(hass, mock_entry)
+
+    mock_client.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_async_remove_entry_legacy_entry_still_deletes(hass: HomeAssistant):
+    """Nyckeln saknas (pre-v0.10.0-entry) → default True → DELETE som dokumenterat."""
+    mock_entry = MagicMock()
+    mock_entry.data = ENTRY_DATA.copy()
+    assert "created_by_ha" not in mock_entry.data
+
+    mock_client = MagicMock()
+    mock_client.delete = AsyncMock()
+
+    with (
+        patch("custom_components.wolta.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.async_get_clientsession"),
+    ):
+        from custom_components.wolta import async_remove_entry
+
+        await async_remove_entry(hass, mock_entry)
+
+    mock_client.delete.assert_awaited_once_with(TOKEN)
