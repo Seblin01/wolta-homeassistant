@@ -113,6 +113,7 @@ class WoltaApiClient:
         grid_var_ore: float | None = None,
         surcharge_ore: float | None = None,
         export_extra_ore: float | None = None,
+        reserve_pct: float | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -136,6 +137,11 @@ class WoltaApiClient:
             payload["surcharge_ore"] = surcharge_ore
         if export_extra_ore is not None:
             payload["export_extra_ore"] = export_extra_ore
+        # Plain `is not None` (not `or None`): reserve_pct=0 is a legitimate value
+        # (a user whose control system keeps zero reserve floor) and must reach
+        # the backend, not be swallowed as "unset". Mirrors the tariff fields above.
+        if reserve_pct is not None:
+            payload["reserve_pct"] = reserve_pct
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
 

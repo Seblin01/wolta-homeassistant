@@ -44,6 +44,7 @@ from .const import (
     CONF_GRID_VAR_ORE,
     CONF_INVERT_BATTERY,
     CONF_PURCHASE_DATE,
+    CONF_RESERVE_PCT,
     CONF_SHARE,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
@@ -230,6 +231,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_EFF, default=DEFAULT_EFF): _number_selector(
                     min_val=0.5, max_val=1.0, step=0.01
                 ),
+                vol.Optional(CONF_RESERVE_PCT): _number_selector(
+                    min_val=0.0, max_val=100.0, step=1.0, unit="%"
+                ),
                 vol.Optional(CONF_COST_SEK): _number_selector(
                     min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"
                 ),
@@ -328,13 +332,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             solar = self._entities_data.get(CONF_SOLAR)
             cost_sek: float | None = self._user_data.get(CONF_COST_SEK) or None
             purchase_date: str | None = self._user_data.get(CONF_PURCHASE_DATE) or None
-            # Tariff fields use a plain .get() (NOT `.get() or None` like cost_sek):
-            # 0.0 is a MEANINGFUL value here (a user whose grid fee or export premium is
-            # genuinely zero), so it must reach the backend, not be swallowed as "unset".
+            # Tariff fields (and reserve_pct) use a plain .get() (NOT `.get() or None`
+            # like cost_sek): 0.0 is a MEANINGFUL value here (a user whose grid fee or
+            # export premium is genuinely zero, or whose control system keeps zero
+            # reserve floor), so it must reach the backend, not be swallowed as "unset".
             # Do not "consistency-refactor" these to `or None`.
             grid_var_ore: float | None = self._user_data.get(CONF_GRID_VAR_ORE)
             surcharge_ore: float | None = self._user_data.get(CONF_SURCHARGE_ORE)
             export_extra_ore: float | None = self._user_data.get(CONF_EXPORT_EXTRA_ORE)
+            reserve_pct: float | None = self._user_data.get(CONF_RESERVE_PCT)
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -351,6 +357,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     grid_var_ore=grid_var_ore,
                     surcharge_ore=surcharge_ore,
                     export_extra_ore=export_extra_ore,
+                    reserve_pct=reserve_pct,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -387,6 +394,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_SURCHARGE_ORE] = surcharge_ore
                 if export_extra_ore is not None:
                     entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
+                if reserve_pct is not None:
+                    entry_data[CONF_RESERVE_PCT] = reserve_pct
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",
@@ -470,6 +479,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 _OPTIONS_PLANT_KEYS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
 # Optional fields (absent key when the user clears the prefilled value = clear)
 _OPTIONS_CLEARABLE_KEYS = (
+    CONF_RESERVE_PCT,
     CONF_COST_SEK,
     CONF_PURCHASE_DATE,
     CONF_GRID_VAR_ORE,
@@ -575,6 +585,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 return self.async_create_entry(title="", data={})
 
         # Pre-fill from entry.data
+        current_reserve = entry.data.get(CONF_RESERVE_PCT)
         current_cost = entry.data.get(CONF_COST_SEK)
         current_date = entry.data.get(CONF_PURCHASE_DATE)
         current_grid_var = entry.data.get(CONF_GRID_VAR_ORE)
@@ -597,6 +608,12 @@ class WoltaOptionsFlow(OptionsFlow):
             # suggested_value (NOT default): prefills the UI but isn't reinjected by
             # voluptuous when the field is cleared – otherwise a cleared field could never be
             # distinguished from an untouched one (v0.3.0-era bug: cleared values were silently swallowed).
+            vol.Optional(
+                CONF_RESERVE_PCT,
+                description={"suggested_value": current_reserve}
+                if current_reserve is not None
+                else None,
+            ): _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%"),
             vol.Optional(
                 CONF_COST_SEK,
                 description={"suggested_value": current_cost} if current_cost is not None else None,

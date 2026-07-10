@@ -30,6 +30,7 @@ from custom_components.wolta.const import (
     CONF_GRID_VAR_ORE,
     CONF_INVERT_BATTERY,
     CONF_PURCHASE_DATE,
+    CONF_RESERVE_PCT,
     CONF_SHARE,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
@@ -320,6 +321,139 @@ async def test_full_flow_without_tariff_fields_not_sent(hass: HomeAssistant) -> 
     assert CONF_GRID_VAR_ORE not in data
     assert CONF_SURCHARGE_ORE not in data
     assert CONF_EXPORT_EXTRA_ORE not in data
+
+
+# ---------------------------------------------------------------------------
+# reserve_pct field (plan 38 / task 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_reserve_pct_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """reserve_pct filled in the user step is passed to create_profile and stored."""
+    mock_client = _mock_client()
+    step_user_with_reserve = {**STEP_USER_DATA, CONF_RESERVE_PCT: 10.0}
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_reserve
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["reserve_pct"] == 10.0
+
+    data = result["data"]
+    assert data[CONF_RESERVE_PCT] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_reserve_pct_not_sent(hass: HomeAssistant) -> None:
+    """Leaving reserve_pct blank means it is not sent and not stored."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs.get("reserve_pct") is None
+
+    data = result["data"]
+    assert CONF_RESERVE_PCT not in data
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_reserve_pct_zero_is_sent(hass: HomeAssistant) -> None:
+    """A legitimate reserve_pct of 0.0 (no reserve floor) must reach create_profile,
+    not be swallowed as "unset" (the `.get() or None` gotcha)."""
+    mock_client = _mock_client()
+    step_user_with_zero_reserve = {**STEP_USER_DATA, CONF_RESERVE_PCT: 0.0}
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_zero_reserve
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["reserve_pct"] == 0.0
+
+    data = result["data"]
+    assert data[CONF_RESERVE_PCT] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1300,6 +1434,142 @@ async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
     assert CONF_GRID_VAR_ORE not in updated.data
     assert CONF_SURCHARGE_ORE not in updated.data
     assert CONF_EXPORT_EXTRA_ORE not in updated.data
+
+
+@pytest.mark.asyncio
+async def test_options_flow_changes_reserve_pct(hass: HomeAssistant) -> None:
+    """Plan 38 task 5: changing reserve_pct in the options flow → patch_profile
+    is called with the new value."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_RESERVE_PCT: 5.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_RESERVE_PCT: 15.0,  # changed
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"reserve_pct": 15.0}
+
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_RESERVE_PCT] == 15.0
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_unrelated_change_preserves_reserve_pct(
+    hass: HomeAssistant,
+) -> None:
+    """Changing ONLY an unrelated field (battery_kwh) while a prefilled reserve_pct
+    value is re-submitted unchanged must NOT clear the reserve (mirrors the tariff
+    max-review regression from plan 35)."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_RESERVE_PCT: 5.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 25.0,  # changed
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_RESERVE_PCT: 5.0,  # unchanged, re-submitted as HA does for suggested_value
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    patched = mock_client.patch_profile.call_args.kwargs
+    assert "reserve_pct" not in patched, "unchanged reserve_pct must not be PATCHed"
+    assert patched.get("battery_kwh") == 25.0
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_RESERVE_PCT] == 5.0, "reserve_pct must survive an unrelated edit"
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_reserve_pct(hass: HomeAssistant) -> None:
+    """Plan 38 task 5: clearing a previously-set reserve_pct (absent key) →
+    patch_profile is called with None (clear-to-default) and the key is removed
+    from entry.data."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_RESERVE_PCT: 5.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # reserve_pct omitted = cleared field
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"reserve_pct": None}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_RESERVE_PCT not in updated.data
+
+
+@pytest.mark.asyncio
+async def test_options_flow_reserve_pct_zero_is_sent(hass: HomeAssistant) -> None:
+    """A legitimate reserve_pct of 0.0 (no reserve floor) must be PATCHed, not
+    treated as an empty/cleared field."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_RESERVE_PCT: 5.0},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_RESERVE_PCT: 0.0,  # changed to legit zero
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"reserve_pct": 0.0}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_RESERVE_PCT] == 0.0
 
 
 async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssistant) -> None:

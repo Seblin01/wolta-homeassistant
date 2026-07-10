@@ -215,6 +215,82 @@ async def test_create_profile_omits_cost_and_date_when_none(aioclient_mock: Aioh
 
 
 # ---------------------------------------------------------------------------
+# create_profile with reserve_pct (plan 38 / task 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_profile_includes_reserve_pct(aioclient_mock: AiohttpClientMocker):
+    """create_profile includes reserve_pct in the POST body when provided."""
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile",
+        status=201,
+        json={"profile_token": TOKEN},
+    )
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3",
+        battery_kwh=22.0,
+        battery_kw=5.0,
+        eff=0.9,
+        has_solar=True,
+        share_profile=False,
+        reserve_pct=10.0,
+    )
+    post_calls = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"]
+    assert len(post_calls) == 1
+    body = post_calls[0][2]
+    assert body["reserve_pct"] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_reserve_pct_when_none(aioclient_mock: AiohttpClientMocker):
+    """create_profile omits reserve_pct from the POST body when None (default)."""
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile",
+        status=201,
+        json={"profile_token": TOKEN},
+    )
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3",
+        battery_kwh=22.0,
+        battery_kw=5.0,
+        eff=0.9,
+        has_solar=False,
+        share_profile=False,
+        # reserve_pct not passed (defaults to None)
+    )
+    post_calls = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"]
+    body = post_calls[0][2]
+    assert "reserve_pct" not in body
+
+
+@pytest.mark.asyncio
+async def test_create_profile_reserve_pct_zero_is_included(aioclient_mock: AiohttpClientMocker):
+    """A legitimate reserve_pct of 0.0 (no reserve floor) must reach the backend,
+    not be swallowed as "unset"."""
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile",
+        status=201,
+        json={"profile_token": TOKEN},
+    )
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3",
+        battery_kwh=22.0,
+        battery_kw=5.0,
+        eff=0.9,
+        has_solar=False,
+        share_profile=False,
+        reserve_pct=0.0,
+    )
+    post_calls = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"]
+    body = post_calls[0][2]
+    assert body["reserve_pct"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # patch_profile (v0.3.0)
 # ---------------------------------------------------------------------------
 
