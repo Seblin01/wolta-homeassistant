@@ -81,6 +81,7 @@ No account or API token is required. The integration provisions a profile automa
 - Enter your battery's **usable** capacity (kWh) — not the rated/nameplate figure; batteries with a SoC floor or reserve have less usable than rated — and peak power (kW). Both are required and must be greater than zero.
 - Set the round-trip efficiency (default 0.9), measured on the AC side — not the DC/cell figure.
 - Optionally add economy details: battery purchase price and purchase date (used for IRR, payback and this year's actual savings), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Leave any tariff field blank to use your country's standard tariff.
+- Optionally set a **reserve floor (%)** — the share of usable capacity your control system never discharges below (e.g. a backup reserve). Enter usable capacity above; the reserve is subtracted here, don't subtract it twice.
 
 **Step 2 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
@@ -97,6 +98,7 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
 - Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Clearing a field reverts it to your country's standard tariff.
+- Reserve floor (%) — the share of usable capacity your control system never discharges below. Clearing the field removes the reserve.
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).

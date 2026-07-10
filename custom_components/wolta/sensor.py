@@ -117,6 +117,18 @@ def _applied_tariff_attr(results: dict) -> dict[str, Any]:
     return {"applied_tariff": applied}
 
 
+def _applied_reserve_attr(results: dict) -> dict[str, Any]:
+    """applied_reserve (plan 38 / issue #1): the SoC reserve floor the grade
+    calculation actually used, when one is configured. Top-level key on /results —
+    omitted entirely (not None) when the backend hasn't sent one (no reserve
+    configured, or no grade cached yet), so existing automations checking for its
+    presence keep working unchanged."""
+    applied = results.get("applied_reserve")
+    if applied is None:
+        return {}
+    return {"applied_reserve": applied}
+
+
 def _capacity_hint_attr(results: dict) -> dict[str, Any]:
     """capacity_hint (plan 37 / issue #1): set by the backend when the entered battery
     capacity is clearly higher than what the measured data shows (nameplate vs usable).
@@ -172,6 +184,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
                 "components": (data.results.get("betyg") or {}).get("components"),
                 **_applied_tariff_attr(data.results),
+                **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),
             }
             if _betyg_available(data.results)

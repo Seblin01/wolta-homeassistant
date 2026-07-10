@@ -674,3 +674,43 @@ def test_optimeringsbetyg_omits_capacity_hint_when_absent():
     response) -> attribute omitted entirely, not None."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     assert "capacity_hint" not in s.extra_state_attributes
+
+
+# ---------------------------------------------------------------------------
+# applied_reserve on optimeringsbetyg (plan 38 / task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_applied_reserve():
+    """When results carries a top-level applied_reserve (a reserve floor was
+    configured), the grade sensor's attributes expose it."""
+    results = {
+        **RESULTS_FULL,
+        "applied_reserve": {
+            "reserve_pct": 10.0,
+            "effective_kwh": 9.45,
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("applied_reserve") == {
+        "reserve_pct": 10.0,
+        "effective_kwh": 9.45,
+    }
+
+
+def test_optimeringsbetyg_applied_reserve_absent_when_null():
+    """Backend sends applied_reserve: null (no grade cached yet, or no reserve
+    configured) -> attribute omitted entirely, not set to None."""
+    results = {**RESULTS_FULL, "applied_reserve": None}
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert "applied_reserve" not in attrs
+
+
+def test_optimeringsbetyg_applied_reserve_absent_when_missing():
+    """No applied_reserve key in results at all (older backend) -> attribute
+    omitted, no crash."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    assert "applied_reserve" not in attrs
