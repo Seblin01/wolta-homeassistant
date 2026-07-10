@@ -3,37 +3,14 @@
     "upload_failure": {
       "title": "Wolta data upload failure",
       "description": "Wolta has been unable to upload energy data for more than 7 days. Last error: {error}. Check your internet connection and verify the integration is configured correctly."
+    },
+    "profile_full": {
+      "title": "Wolta profile is full",
+      "description": "Your Wolta profile has reached its storage limit (about 2.3 years of 15-minute data), so new energy data can no longer be uploaded. Your grade and economy figures keep working on the stored history. To start fresh, remove the integration and set it up again."
     }
   },
   "config": {
     "step": {
-      "user": {
-        "title": "Set up Wolta",
-        "description": "Connect Wolta to Home Assistant to receive battery optimization grades and economy sensors.",
-        "data": {
-          "zone": "Electricity price zone",
-          "battery_kwh": "Usable battery capacity (kWh)",
-          "battery_kw": "Battery max power (kW)",
-          "eff": "Round-trip efficiency (0.5–1.0)",
-          "reserve_pct": "Reserve floor (%) – optional",
-          "cost_sek": "Battery purchase price (kr) – battery only, optional",
-          "purchase_date": "Purchase date – optional",
-          "grid_var_ore": "Grid fee (öre/ct per kWh) – optional",
-          "surcharge_ore": "Electricity supplier markup (öre/ct per kWh) – optional",
-          "export_extra_ore": "Export premium/discount (öre/ct per kWh) – optional"
-        },
-        "data_description": {
-          "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
-          "battery_kw": "Maximum battery charge/discharge power.",
-          "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
-          "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
-          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional.",
-          "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
-          "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
-          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Leave blank to use your country's standard tariff."
-        }
-      },
       "entities": {
         "title": "Select energy entities",
         "description": "Select the energy sensors that measure your battery, grid and solar production. Battery and grid sensors are required; solar is optional.",
@@ -56,6 +33,73 @@
         "title": "Re-authenticate Wolta",
         "description": "Your Wolta profile token has expired or been deleted. Confirm to create a new profile and re-link this integration.",
         "data": {}
+      },
+      "user": {
+        "title": "Set up Wolta",
+        "description": "Connect Wolta for battery optimization grades and economy sensors.",
+        "menu_options": {
+          "create": "Create a new profile",
+          "link": "Link an existing wolta.se profile"
+        },
+        "menu_option_descriptions": {
+          "create": "Start from scratch – Home Assistant creates your Wolta profile.",
+          "link": "Already used wolta.se? Paste your profile link or token and keep your existing history."
+        }
+      },
+      "plant": {
+        "title": "Battery and economy",
+        "description": "Prefilled where possible from your Home Assistant location and sensor history – check the values and adjust.",
+        "data": {
+          "zone": "Electricity price zone",
+          "battery_kwh": "Usable battery capacity (kWh)",
+          "battery_kw": "Battery max power (kW)",
+          "eff": "Round-trip efficiency (0.5–1.0)",
+          "reserve_pct": "Reserve floor (%) – optional",
+          "cost_sek": "Battery purchase price (kr) – battery only, optional",
+          "purchase_date": "Purchase date – optional",
+          "grid_var_ore": "Grid fee (öre/ct per kWh) – optional",
+          "surcharge_ore": "Electricity supplier markup (öre/ct per kWh) – optional",
+          "export_extra_ore": "Export premium/discount (öre/ct per kWh) – optional",
+          "invert_battery": "Battery charge/discharge reversed"
+        },
+        "data_description": {
+          "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
+          "battery_kw": "Maximum battery charge/discharge power.",
+          "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
+          "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
+          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional.",
+          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional.",
+          "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
+          "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
+          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Leave blank to use your country's standard tariff.",
+          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
+        }
+      },
+      "link": {
+        "title": "Link your wolta.se profile",
+        "description": "Paste your personal wolta.se link (the one with ?profile=…) or just the token. Home Assistant takes over data uploads from here – overlapping periods are overwritten with sensor data.",
+        "data": {
+          "profile_input": "Profile link or token"
+        }
+      },
+      "invert_check": {
+        "title": "Check battery sensor direction",
+        "description": "Your history shows more energy leaving the battery than entering it, which usually means the charge/discharge sensors are swapped (common with signed meters like Shelly or Emaldo). Keeping this on uploads the streams swapped so your grade is computed correctly.",
+        "data": {
+          "invert_battery": "Swap battery charge/discharge"
+        }
+      },
+      "reconfigure": {
+        "title": "Change energy sensors",
+        "description": "Pick the new sensors. Home Assistant re-uploads your full history from the new sensors and your grade is recomputed – no need to remove the integration.",
+        "data": {
+          "batt_in": "Battery charge energy",
+          "batt_out": "Battery discharge energy",
+          "grid_in": "Grid import energy",
+          "grid_out": "Grid export energy",
+          "solar": "Solar production energy (optional)"
+        },
+        "data_description": {}
       }
     },
     "error": {
@@ -63,46 +107,75 @@
       "invalid_input": "Invalid battery configuration – battery capacity and power must both be greater than zero.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "invalid_token": "Unknown or deleted profile token – check the link and try again."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
-      "reauth_successful": "Re-authentication was successful"
+      "reauth_successful": "Re-authentication was successful",
+      "reconfigure_successful": "Sensors updated. Your history is being re-uploaded in the background."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Wolta – adjust profile",
-        "description": "Adjust battery specs and economy values. Only changed fields are sent to Wolta; clearing an optional field removes the value (tariff fields revert to the standard Swedish tariff). After saving, Wolta recomputes grade and economy (sensors update within minutes).",
+        "title": "Wolta profile",
+        "description": "These values are your shared Wolta profile – changes here show up on wolta.se too, and changes made on wolta.se show up here. Clear an optional field to remove its value.",
+        "sections": {
+          "battery": {
+            "name": "Battery",
+            "data": {
+              "battery_kwh": "Battery capacity (kWh)",
+              "battery_kw": "Battery power (kW)",
+              "eff": "Round-trip efficiency",
+              "reserve_pct": "Reserve floor (%)"
+            },
+            "data_description": {
+              "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
+              "battery_kw": "Maximum charge/discharge power in kW.",
+              "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Changing plant values triggers a server-side regrade.",
+              "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
+            }
+          },
+          "economy": {
+            "name": "Economy",
+            "data": {
+              "cost_sek": "Battery purchase price (kr) – battery only",
+              "purchase_date": "Purchase date"
+            },
+            "data_description": {
+              "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
+              "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate this year's actual savings. Clear the field to remove the value."
+            }
+          },
+          "tariffs": {
+            "name": "Tariffs",
+            "description": "Leave blank to use your country's standard tariff.",
+            "data": {
+              "grid_var_ore": "Grid fee (öre/ct per kWh)",
+              "surcharge_ore": "Electricity supplier markup (öre/ct per kWh)",
+              "export_extra_ore": "Export premium/discount (öre/ct per kWh)"
+            },
+            "data_description": {
+              "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
+              "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
+              "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff."
+            }
+          }
+        },
         "data": {
-          "battery_kwh": "Battery capacity (kWh)",
-          "battery_kw": "Battery power (kW)",
-          "eff": "Round-trip efficiency",
-          "reserve_pct": "Reserve floor (%)",
-          "cost_sek": "Battery purchase price (kr) – battery only",
-          "purchase_date": "Purchase date",
-          "grid_var_ore": "Grid fee (öre/ct per kWh)",
-          "surcharge_ore": "Electricity supplier markup (öre/ct per kWh)",
-          "export_extra_ore": "Export premium/discount (öre/ct per kWh)",
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
-          "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
-          "battery_kw": "Maximum charge/discharge power in kW.",
-          "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Changing plant values triggers a server-side regrade.",
-          "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve.",
-          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate this year's actual savings. Clear the field to remove the value.",
-          "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
-          "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
-          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff.",
           "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
         }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again."
+    },
+    "abort": {
+      "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later."
     }
   },
   "entity": {
