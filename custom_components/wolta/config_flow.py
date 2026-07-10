@@ -258,11 +258,36 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             except WoltaApiError:
                 errors["base"] = "cannot_connect"
             else:
+                prof = self._link_profile or {}
+                if not prof.get(CONF_BATTERY_KWH) or not prof.get(CONF_BATTERY_KW):
+                    # Solar-only-profil: integrationen förutsätter batteri (grade-
+                    # semantiken + reauth läser battery_kwh/kw ur entry.data).
+                    errors["profile_input"] = "profile_no_battery"
+                    return self._show_link_form(errors)
                 unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
+                # Adoptera profilen (upload → integration-kind): utan detta 404:ar
+                # backendens kind-gate PUT /data, /recompute och /results för
+                # webbskapade profiler → reauth skulle tyst ersätta användarens token
+                # med en ny tom profil. Idempotent för redan-integrationsprofiler.
+                try:
+                    await client.adopt_profile(token)
+                except WoltaAuthError:
+                    errors["profile_input"] = "invalid_token"
+                    return self._show_link_form(errors)
+                except WoltaApiError as err:
+                    if getattr(err, "status", None) == 422:
+                        errors["profile_input"] = "profile_no_battery"
+                    else:
+                        errors["base"] = "cannot_connect"
+                    return self._show_link_form(errors)
                 self._link_token = token
                 return await self.async_step_entities()
+        return self._show_link_form(errors)
+
+    def _show_link_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+        """Visa (eller åter-visa med fel) koppla-formuläret."""
         return self.async_show_form(
             step_id="link",
             data_schema=vol.Schema(
@@ -596,7 +621,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
-        zone = entry_data.get(CONF_ZONE, DEFAULT_ZONE)
+        # Zone måste alltid finnas – WoltaCoordinator.__init__ läser entry.data[zone]
+        # ovillkorligt och skulle annars KeyError:a vid setup (defensivt; servern
+        # returnerar normalt alltid zone).
+        entry_data.setdefault(CONF_ZONE, DEFAULT_ZONE)
+        zone = entry_data[CONF_ZONE]
         return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
 
     async def async_step_invert_check(
@@ -709,6 +738,11 @@ class WoltaOptionsFlow(OptionsFlow):
         if self._server is None:
             try:
                 self._server = await client.get_profile(token)
+            except WoltaAuthError:
+                # Purgad/okänd profil: cannot_connect vore vilseledande – starta
+                # reauth-flödet direkt istället för att vänta på nästa poll.
+                entry.async_start_reauth(self.hass)
+                return self.async_abort(reason="reauth_required")
             except WoltaApiError:
                 # A PATCH would fail too – profile editing needs the server.
                 return self.async_abort(reason="cannot_connect")

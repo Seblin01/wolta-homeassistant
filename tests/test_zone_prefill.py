@@ -35,3 +35,8 @@ def test_multizone_defaults_most_populous():
 def test_unknown_or_missing_country():
     assert suggest_zone("US", 40.0) is None
     assert suggest_zone(None, 59.0) is None
+
+
+def test_sweden_unconfigured_latitude_zero_gives_none():
+    """HA:s latitude defaultar till 0.0 när platsen inte är satt – ingen gissning då."""
+    assert suggest_zone("SE", 0.0) is None

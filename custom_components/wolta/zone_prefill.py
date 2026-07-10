@@ -33,7 +33,9 @@ def suggest_zone(country: str | None, latitude: float | None) -> str | None:
     Callers must validate the result against their supported-zone list before use.
     """
     if country == "SE":
-        if latitude is None:
+        # `not latitude` (inte `is None`): HA:s latitude defaultar till 0.0 när
+        # platsen aldrig konfigurerats – 0°N är inte en svensk position.
+        if not latitude:
             return None
         for floor, zone in _SE_BANDS:
             if latitude >= floor:

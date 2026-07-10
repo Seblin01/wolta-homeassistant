@@ -365,3 +365,21 @@ async def test_get_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMo
     client = _client(aioclient_mock)
     with pytest.raises(WoltaAuthError):
         await client.get_profile("dead")
+
+
+@pytest.mark.asyncio
+async def test_adopt_profile_posts(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile/{TOKEN}/adopt", json={"adopted": True}
+    )
+    client = _client(aioclient_mock)
+    resp = await client.adopt_profile(TOKEN)
+    assert resp["adopted"] is True
+
+
+@pytest.mark.asyncio
+async def test_adopt_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/dead/adopt", status=404)
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.adopt_profile("dead")

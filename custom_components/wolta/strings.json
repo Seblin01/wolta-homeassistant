@@ -108,7 +108,8 @@
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
       "unknown": "Unexpected error",
-      "invalid_token": "Unknown or deleted profile token – check the link and try again."
+      "invalid_token": "Unknown or deleted profile token – check the link and try again.",
+      "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
@@ -175,7 +176,8 @@
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again."
     },
     "abort": {
-      "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later."
+      "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later.",
+      "reauth_required": "The profile no longer exists on wolta.se – re-authentication has been started, check your notifications."
     }
   },
   "entity": {

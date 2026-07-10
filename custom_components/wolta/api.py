@@ -161,6 +161,16 @@ class WoltaApiClient:
         """
         return await self._request("GET", f"/profile/{token}")
 
+    async def adopt_profile(self, token: str) -> dict:
+        """Convert a web-created (upload-kind) profile into an integration profile.
+
+        POST /api/v1/profile/{token}/adopt → 200 {"adopted": bool}. Without this,
+        the backend's kind-gate 404s PUT/recompute/results for linked web profiles.
+        Raises WoltaAuthError on 404, WoltaApiError(status=422) for battery-less
+        profiles.
+        """
+        return await self._request("POST", f"/profile/{token}/adopt")
+
     async def put_data(self, token: str, rows: list[dict]) -> dict:
         """Upload energy rows for the given profile.
 

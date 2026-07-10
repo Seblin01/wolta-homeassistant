@@ -4,7 +4,7 @@ The integration and wolta.se now share **one profile**. The server is the source
 
 ## New
 
-- **Link an existing wolta.se profile.** Setup now starts with a choice: create a new profile, or paste your personal wolta.se link (`?profile=…`) or token to adopt the profile you already built on the website — CSV history included. Home Assistant takes over data uploads from there.
+- **Link an existing wolta.se profile.** Setup now starts with a choice: create a new profile, or paste your personal wolta.se link (`?profile=…`) or token to adopt the profile you already built on the website — CSV history included. The profile is converted for integration use server-side (battery profiles only; solar-only profiles are rejected with a clear error) and Home Assistant takes over data uploads from there.
 - **Continuous profile sync.** Values changed on wolta.se (capacity, efficiency, economy, tariffs, reserve floor, zone) show up in Home Assistant automatically; the Configure dialog always opens with the current server values and only genuinely changed fields are sent back. No more silent drift between the two.
 - **Reconfigure energy sensors** without removing the integration (three-dot menu → Reconfigure). The full history is re-uploaded from the new sensors and the grade recomputed.
 - **Smarter setup prefill:** the price zone is preselected from your Home Assistant country (and latitude within Sweden), the round-trip efficiency is prefilled with your plant's *measured* AC value when enough battery history exists, the purchase date is suggested from the first recorded data point, and swapped charge/discharge sensors are detected up front instead of surfacing later as an inverted grade.
@@ -18,7 +18,7 @@ The integration and wolta.se now share **one profile**. The server is the source
 
 ## Requires
 
-- Wolta backend v0.19.0+ (tariff fields and sharing flag exposed on the profile endpoint).
+- Wolta backend v0.19.0+ (tariff fields and sharing flag exposed on the profile endpoint, plus the profile adopt endpoint used by the link flow).
 
 ## Upgrade notes
 

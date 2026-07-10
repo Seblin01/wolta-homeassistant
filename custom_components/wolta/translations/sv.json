@@ -108,7 +108,8 @@
       "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
       "required_sensor": "Minst en sensor krävs för detta flöde.",
       "unknown": "Oväntat fel",
-      "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen."
+      "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
+      "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
@@ -175,7 +176,8 @@
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen."
     },
     "abort": {
-      "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare."
+      "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare.",
+      "reauth_required": "Profilen finns inte längre på wolta.se – återautentisering har startats, se dina aviseringar."
     }
   },
   "entity": {

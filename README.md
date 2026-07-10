@@ -77,7 +77,7 @@ Or add it manually:
 No account or API token is required. Setup starts with a choice:
 
 - **Create a new profile** — Home Assistant provisions a Wolta profile automatically (the flow below).
-- **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data).
+- **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server, the profile is adopted for integration use (backend v0.19.0+), and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data). The profile must include a battery — solar-only profiles are rejected.
 
 **Step 1 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.

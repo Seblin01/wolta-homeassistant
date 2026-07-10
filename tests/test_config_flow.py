@@ -1807,6 +1807,7 @@ async def test_link_flow_creates_entry_with_server_profile(hass: HomeAssistant) 
     """Koppla-spåret: token ur Besök-länk → entities → entry utan ny profil (POST)."""
     mock_client = _mock_client()
     mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
 
     with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
          patch("custom_components.wolta.config_flow.async_get_clientsession"), \
@@ -1932,6 +1933,7 @@ async def test_link_flow_invert_suspected_shows_check_step(hass: HomeAssistant) 
     """Koppla-spåret saknar plant-steg → misstänkt inversion ger eget kontrollsteg."""
     mock_client = _mock_client()
     mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
     first = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
     with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
@@ -2003,3 +2005,109 @@ async def test_reconfigure_requires_mandatory_streams(hass: HomeAssistant) -> No
         )
     assert result["type"] == FlowResultType.FORM
     assert result["errors"].get(CONF_BATT_IN) == "required_sensor"
+
+
+# ---------------------------------------------------------------------------
+# Max-granskningsfixar: adopt vid länkning, batterikrav, zon-fallback, reauth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_link_flow_adopts_web_profile(hass: HomeAssistant) -> None:
+    """Länkning ska adoptera profilen (upload→integration-kind) – annars 404:ar
+    PUT/recompute/results på webbskapade profiler och reauth ersätter token tyst."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        assert result["step_id"] == "entities"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.adopt_profile.assert_awaited_once_with(LINK_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_link_flow_rejects_batteryless_profile(hass: HomeAssistant) -> None:
+    """Solar-only-profil (battery_kwh=null) → formulärfel, ingen adopt."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(
+        return_value={**LINK_PROFILE, "battery_kwh": None, "battery_kw": None})
+    mock_client.adopt_profile = AsyncMock()
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "profile_no_battery"}
+    mock_client.adopt_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_link_flow_zone_fallback_when_server_lacks_zone(hass: HomeAssistant) -> None:
+    """Zone saknas i serversvaret (defensivt) → DEFAULT_ZONE, aldrig KeyError vid setup."""
+    from custom_components.wolta.const import DEFAULT_ZONE
+
+    mock_client = _mock_client()
+    profile = dict(LINK_PROFILE)
+    profile["zone"] = None
+    mock_client.get_profile = AsyncMock(return_value=profile)
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["result"].data[CONF_ZONE] == DEFAULT_ZONE
+
+
+@pytest.mark.asyncio
+async def test_options_flow_purged_profile_starts_reauth(hass: HomeAssistant) -> None:
+    """WoltaAuthError på options-GET (purgad profil) → reauth startas + abort."""
+    from custom_components.wolta.api import WoltaAuthError
+
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(side_effect=WoltaAuthError("404"))
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_required"
+    reauth_flows = [
+        f for f in hass.config_entries.flow.async_progress()
+        if f["context"].get("source") == config_entries.SOURCE_REAUTH
+    ]
+    assert len(reauth_flows) == 1

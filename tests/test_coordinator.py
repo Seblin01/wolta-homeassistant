@@ -1165,3 +1165,31 @@ async def test_entity_fingerprint_first_recording_keeps_bookmark(hass, mock_entr
 
     assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
     assert "applied_entities" in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_skipped_during_fast_poll(hass: HomeAssistant, mock_entry):
+    """Under fast-poll (60 s medan server-jobb pågår) hoppas profil-syncen över."""
+    from custom_components.wolta.coordinator import _FAST_POLL
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": None})
+        coordinator.update_interval = _FAST_POLL
+        await coordinator._async_update_data()
+
+    client.get_profile.assert_not_awaited()

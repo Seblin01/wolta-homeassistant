@@ -190,14 +190,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now = dt_util.utcnow()
             # Profile sync (server = source of truth): mirror web-side changes into
             # entry.data. Network errors are non-fatal – the cache just stays stale.
-            try:
-                profile = await self.client.get_profile(self.token)
-            except WoltaAuthError:
-                raise  # purged profile → same reauth path as results()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
-            else:
-                self._apply_profile_sync(profile)
+            # Skipped during fast-poll (60 s while a server job runs) – nothing
+            # profile-related changes on that timescale and it saves a GET per tick.
+            if self.update_interval != _FAST_POLL:
+                try:
+                    profile = await self.client.get_profile(self.token)
+                except WoltaAuthError:
+                    raise  # purged profile → same reauth path as results()
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
+                else:
+                    self._apply_profile_sync(profile)
 
             # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
             # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
