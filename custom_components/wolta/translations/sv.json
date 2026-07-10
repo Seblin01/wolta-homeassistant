@@ -68,7 +68,7 @@
           "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
           "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger.",
           "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller/installation) i kr. Används för att räkna batteriets IRR och återbetalningstid. Valfritt.",
-          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt.",
+          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt. När datumet föreslås ur din sensorhistorik är det första registrerade månadens start – justera om du vet exakt datum.",
           "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
           "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
           "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset, i öre eller eurocent. Kan vara negativt. Lämna tomt för att använda landets schablon.",

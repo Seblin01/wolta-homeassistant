@@ -68,7 +68,7 @@
           "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
           "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
           "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional.",
+          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional. When suggested from your sensor history, the date is the start of the first recorded month — adjust if you know the exact date.",
           "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
           "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
           "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Leave blank to use your country's standard tariff.",
