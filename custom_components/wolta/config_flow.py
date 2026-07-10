@@ -10,6 +10,7 @@ import voluptuous as vol
 
 from homeassistant.components.energy.data import async_get_manager
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
@@ -198,7 +199,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> "WoltaOptionsFlow":
         """Return the options flow for this handler."""
-        return WoltaOptionsFlow(config_entry)
+        return WoltaOptionsFlow()
 
     def __init__(self) -> None:
         """Initialise the flow."""
@@ -468,78 +469,86 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 # ---------------------------------------------------------------------------
-# Options flow (v0.4.0) – edit battery specs, cost_sek and purchase_date on an
-# existing entry. Only CHANGED fields are PATCHed (a plant change triggers a
-# server-side regrade via the follow-up recompute); a cleared optional field is
-# PATCHed as null so the backend actually clears it (v0.3.0 silently swallowed
-# cleared values).
+# Options flow – edit the SHARED Wolta profile. The server is the source of
+# truth: the form is prefilled from a fresh GET /profile and the diff is
+# computed against that snapshot, never against entry.data (which is only a
+# cache) – otherwise a web-side change could be silently clobbered with stale
+# values. Fields are grouped in collapsible sections (battery/economy/tariffs);
+# sections nest user_input one level.
 # ---------------------------------------------------------------------------
 
-# Required fields (always present in the form, prefilled from entry.data)
-_OPTIONS_PLANT_KEYS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
-# Optional fields (absent key when the user clears the prefilled value = clear)
-_OPTIONS_CLEARABLE_KEYS = (
-    CONF_RESERVE_PCT,
-    CONF_COST_SEK,
-    CONF_PURCHASE_DATE,
-    CONF_GRID_VAR_ORE,
-    CONF_SURCHARGE_ORE,
-    CONF_EXPORT_EXTRA_ORE,
-)
+_SEC_BATTERY = "battery"
+_SEC_ECONOMY = "economy"
+_SEC_TARIFFS = "tariffs"
+_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    _SEC_BATTERY: (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT),
+    _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
+    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE),
+}
+# Required fields (always present in the form, prefilled from the server snapshot)
+_REQUIRED_FIELDS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
 
 
 class WoltaOptionsFlow(OptionsFlow):
-    """Handle options for an existing Wolta config entry."""
+    """Handle options for an existing Wolta config entry (shared-profile edit)."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
+    def __init__(self) -> None:
         """Initialise the options flow."""
-        self._config_entry = config_entry
+        self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show and handle the options form."""
-        entry = self._config_entry
+        entry = self.config_entry
         errors: dict[str, str] = {}
+        token: str = entry.data[CONF_TOKEN]
+        session = async_get_clientsession(self.hass)
+        client = WoltaApiClient(session)
+
+        if self._server is None:
+            try:
+                self._server = await client.get_profile(token)
+            except WoltaApiError:
+                # A PATCH would fail too – profile editing needs the server.
+                return self.async_abort(reason="cannot_connect")
 
         if user_input is not None:
-            token: str = entry.data[CONF_TOKEN]
+            # Un-nest the section structure to flat {field: value}.
+            flat: dict[str, Any] = {}
+            for sec, fields in _SECTION_FIELDS.items():
+                sec_input = user_input.get(sec) or {}
+                for key in fields:
+                    if key in sec_input:
+                        flat[key] = sec_input[key]
 
-            # Diff against entry.data – only changed fields go in the PATCH payload.
+            # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
-            new_data = dict(entry.data)
+            for sec, fields in _SECTION_FIELDS.items():
+                for key in fields:
+                    val = flat.get(key)
+                    server_val = self._server.get(key)
+                    if key in _REQUIRED_FIELDS:
+                        if val != server_val:
+                            patch_fields[key] = val
+                    elif val is None or val == "":
+                        # The form prefills current values, so an absent/empty key means
+                        # the user actively cleared the field → PATCH null to clear it.
+                        if server_val is not None:
+                            patch_fields[key] = None
+                    elif val != server_val:
+                        patch_fields[key] = val
 
-            for key in _OPTIONS_PLANT_KEYS:
-                val = user_input[key]
-                if val != entry.data.get(key):
-                    patch_fields[key] = val
-                    new_data[key] = val
-
-            for key in _OPTIONS_CLEARABLE_KEYS:
-                val = user_input.get(key)
-                if val is None or val == "":
-                    # The form prefills current values, so an absent/empty key means
-                    # the user actively cleared the field → PATCH null to clear it.
-                    if entry.data.get(key) is not None:
-                        patch_fields[key] = None
-                        new_data.pop(key, None)
-                elif val != entry.data.get(key):
-                    patch_fields[key] = val
-                    new_data[key] = val
-
-            # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend field
-            # → not PATCHed. On change, entry.data is updated and a refresh is triggered; the coordinator
-            # self-heals (resets the bookmark → full re-backfill uploads corrected data → backend
-            # recomputes on the overwritten data).
+            # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend
+            # field → not PATCHed. On change the coordinator self-heals (bookmark reset →
+            # full re-backfill uploads corrected data).
             invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
-            invert_changed = invert_new != bool(entry.data.get(CONF_INVERT_BATTERY, False))
-            if invert_changed:
-                new_data[CONF_INVERT_BATTERY] = invert_new
+            invert_changed = invert_new != bool(
+                entry.data.get(CONF_INVERT_BATTERY, False)
+            )
 
             if patch_fields:
                 try:
-                    session = async_get_clientsession(self.hass)
-                    client = WoltaApiClient(session)
                     await client.patch_profile(token, **patch_fields)
                 except WoltaApiError as err:
                     _LOGGER.error("Failed to patch Wolta profile: %s", err)
@@ -547,6 +556,14 @@ class WoltaOptionsFlow(OptionsFlow):
 
             if not errors:
                 if patch_fields or invert_changed:
+                    new_data = dict(entry.data)
+                    for key, val in patch_fields.items():
+                        if val is None:
+                            new_data.pop(key, None)
+                        else:
+                            new_data[key] = val
+                    if invert_changed:
+                        new_data[CONF_INVERT_BATTERY] = invert_new
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
                 coordinator = getattr(entry, "runtime_data", None)
@@ -573,8 +590,8 @@ class WoltaOptionsFlow(OptionsFlow):
                         except Exception:  # pylint: disable=broad-except
                             pass
                 elif invert_changed and coordinator is not None:
-                    # Only invert changed (no PATCH): trigger a refresh so the coordinator runs
-                    # a full re-backfill with the corrected direction and uploads the overwritten data.
+                    # Only invert changed (no PATCH): trigger a refresh so the coordinator
+                    # runs a full re-backfill with the corrected direction.
                     try:
                         await coordinator.async_request_refresh()
                     except Exception:  # pylint: disable=broad-except
@@ -584,73 +601,45 @@ class WoltaOptionsFlow(OptionsFlow):
 
                 return self.async_create_entry(title="", data={})
 
-        # Pre-fill from entry.data
-        current_reserve = entry.data.get(CONF_RESERVE_PCT)
-        current_cost = entry.data.get(CONF_COST_SEK)
-        current_date = entry.data.get(CONF_PURCHASE_DATE)
-        current_grid_var = entry.data.get(CONF_GRID_VAR_ORE)
-        current_surcharge = entry.data.get(CONF_SURCHARGE_ORE)
-        current_export_extra = entry.data.get(CONF_EXPORT_EXTRA_ORE)
+        srv = self._server
 
-        schema_dict: dict[Any, Any] = {
-            vol.Required(
-                CONF_BATTERY_KWH,
-                default=entry.data.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH),
-            ): _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"),
-            vol.Required(
-                CONF_BATTERY_KW,
-                default=entry.data.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW),
-            ): _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"),
-            vol.Required(
-                CONF_EFF,
-                default=entry.data.get(CONF_EFF, DEFAULT_EFF),
-            ): _number_selector(min_val=0.5, max_val=1.0, step=0.01),
-            # suggested_value (NOT default): prefills the UI but isn't reinjected by
-            # voluptuous when the field is cleared – otherwise a cleared field could never be
-            # distinguished from an untouched one (v0.3.0-era bug: cleared values were silently swallowed).
-            vol.Optional(
-                CONF_RESERVE_PCT,
-                description={"suggested_value": current_reserve}
-                if current_reserve is not None
-                else None,
-            ): _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%"),
-            vol.Optional(
-                CONF_COST_SEK,
-                description={"suggested_value": current_cost} if current_cost is not None else None,
-            ): _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"),
-            vol.Optional(
-                CONF_PURCHASE_DATE,
-                description={"suggested_value": current_date} if current_date is not None else None,
-            ): _date_selector(),
-            vol.Optional(
-                CONF_GRID_VAR_ORE,
-                description={"suggested_value": current_grid_var}
-                if current_grid_var is not None
-                else None,
-            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
-            vol.Optional(
-                CONF_SURCHARGE_ORE,
-                description={"suggested_value": current_surcharge}
-                if current_surcharge is not None
-                else None,
-            ): _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
-            vol.Optional(
-                CONF_EXPORT_EXTRA_ORE,
-                description={"suggested_value": current_export_extra}
-                if current_export_extra is not None
-                else None,
-            ): _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"),
-            # Invert toggle (issue #1): set if the grade is inverted (battery charge/discharge
-            # reversed, e.g. signed Shelly/Emaldo) – swaps the currents on upload instead of
-            # requiring the user to change their HA sensors.
+        def _opt(key: str, selector: Any) -> tuple[Any, Any]:
+            """vol.Optional med suggested_value (INTE default) för rensningsbara fält –
+            en default reinjiceras av voluptuous när fältet töms och rensningen skulle
+            aldrig gå att skilja från orört (v0.3.0-buggen)."""
+            cur = srv.get(key)
+            marker = vol.Optional(
+                key,
+                description={"suggested_value": cur} if cur is not None else None,
+            )
+            return marker, selector
+
+        battery_schema = vol.Schema(dict([
+            (vol.Required(CONF_BATTERY_KWH, default=srv.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH)),
+             _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
+            (vol.Required(CONF_BATTERY_KW, default=srv.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW)),
+             _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")),
+            (vol.Required(CONF_EFF, default=srv.get(CONF_EFF, DEFAULT_EFF)),
+             _number_selector(min_val=0.5, max_val=1.0, step=0.01)),
+            _opt(CONF_RESERVE_PCT, _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
+        ]))
+        economy_schema = vol.Schema(dict([
+            _opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr")),
+            _opt(CONF_PURCHASE_DATE, _date_selector()),
+        ]))
+        tariffs_schema = vol.Schema(dict([
+            _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
+            _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
+            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
+        ]))
+
+        schema = vol.Schema({
+            vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),
+            vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
+            vol.Required(_SEC_TARIFFS): section(tariffs_schema, {"collapsed": True}),
             vol.Required(
                 CONF_INVERT_BATTERY,
                 default=bool(entry.data.get(CONF_INVERT_BATTERY, False)),
             ): BooleanSelector(BooleanSelectorConfig()),
-        }
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(schema_dict),
-            errors=errors,
-        )
+        })
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
