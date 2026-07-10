@@ -109,17 +109,17 @@ async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
         assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "user"
+        assert result["step_id"] == "plant"
 
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_USER_DATA
-        )
-        assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "entities"
-
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "privacy"
@@ -168,10 +168,13 @@ async def test_full_flow_unique_id_is_sha256_prefix(hass: HomeAssistant) -> None
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -206,10 +209,13 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_NO_SOLAR
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -255,10 +261,13 @@ async def test_full_flow_with_tariff_fields_sent_to_create_profile(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_tariff
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_tariff
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -300,10 +309,13 @@ async def test_full_flow_without_tariff_fields_not_sent(hass: HomeAssistant) -> 
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -353,10 +365,13 @@ async def test_full_flow_with_reserve_pct_sent_to_create_profile(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_reserve
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_reserve
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -394,10 +409,13 @@ async def test_full_flow_without_reserve_pct_not_sent(hass: HomeAssistant) -> No
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -437,10 +455,13 @@ async def test_full_flow_with_reserve_pct_zero_is_sent(hass: HomeAssistant) -> N
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_zero_reserve
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_zero_reserve
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -604,10 +625,13 @@ async def test_api_error_shows_cannot_connect(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         # Privacy step with API failure
         result = await hass.config_entries.flow.async_configure(
@@ -681,10 +705,13 @@ async def test_422_shows_invalid_input(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -722,10 +749,13 @@ async def test_non422_api_error_shows_cannot_connect(hass: HomeAssistant) -> Non
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -840,10 +870,13 @@ async def test_full_flow_two_solar_sensors(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=two_solar_entities
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -888,7 +921,7 @@ async def test_required_stream_empty_list_shows_error(hass: HomeAssistant) -> No
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=bad_entities
@@ -974,10 +1007,13 @@ async def test_full_flow_with_cost_and_date(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_cost
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_cost
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -1017,10 +1053,13 @@ async def test_full_flow_without_cost_and_date(hass: HomeAssistant) -> None:
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA  # no cost/date
+            result["flow_id"], user_input={"next_step_id": "create"}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA  # no cost/date
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_PRIVACY_DATA
@@ -1715,3 +1754,203 @@ async def test_options_flow_get_failure_aborts(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "cannot_connect"
+
+
+# ---------------------------------------------------------------------------
+# Delad profil-sync (B6): meny, koppla befintlig profil, flödesomordning,
+# auto-prefill (zon/eff/datum/invert)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+from custom_components.wolta.const import CONF_CREATED_BY_HA  # noqa: E402
+
+LINK_TOKEN = "tok-linked-xyz"
+LINK_PROFILE = {
+    "zone": "SE4", "battery_kwh": 15.0, "battery_kw": 8.0, "eff": 0.92,
+    "reserve_pct": None, "cost_sek": 80000.0, "purchase_date": "2024-03-01",
+    "grid_var_ore": 30.0, "surcharge_ore": None, "export_extra_ore": None,
+}
+
+
+def _patch_flow_env(mock_client):
+    """Patcha klient/session/energiprefill/statistik för flödestester."""
+    async def _no_lifetime(hass_, in_ids, out_ids):
+        return 0.0, 0.0, None
+
+    return (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
+        patch("custom_components.wolta.stats.async_fetch_lifetime", side_effect=_no_lifetime),
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_step_shows_menu(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER})
+    assert result["type"] == FlowResultType.MENU
+    assert set(result["menu_options"]) == {"create", "link"}
+
+
+def test_extract_token_accepts_url_and_raw() -> None:
+    from custom_components.wolta.config_flow import extract_token
+    assert extract_token("abc123") == "abc123"
+    assert extract_token("https://wolta.se/optimeringsbetyg?profile=abc%2B123") == "abc+123"
+    assert extract_token("  abc123  ") == "abc123"
+    assert extract_token("https://wolta.se/kalkylator/lonar-det-sig?profile=tok1&x=1") == "tok1"
+
+
+@pytest.mark.asyncio
+async def test_link_flow_creates_entry_with_server_profile(hass: HomeAssistant) -> None:
+    """Koppla-spåret: token ur Besök-länk → entities → entry utan ny profil (POST)."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        assert result["step_id"] == "link"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"profile_input": f"https://wolta.se/optimeringsbetyg?profile={LINK_TOKEN}"})
+        assert result["step_id"] == "entities"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Wolta (SE4)"
+    data = result["data"]
+    assert data[CONF_TOKEN] == LINK_TOKEN
+    assert data[CONF_CREATED_BY_HA] is False
+    assert data[CONF_BATTERY_KWH] == 15.0
+    assert data[CONF_GRID_VAR_ORE] == 30.0
+    assert CONF_SURCHARGE_ORE not in data  # None-fält cache:as inte
+    mock_client.create_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_link_flow_invalid_token_shows_error(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaAuthError
+
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(side_effect=WoltaAuthError("404"))
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "dead"})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "link"
+    assert result["errors"] == {"profile_input": "invalid_token"}
+
+
+async def _drive_create_to_plant(hass):
+    """Hjälpare: meny → create → entities (giltigt val) → returnera plant-stegets result."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "create"})
+    assert result["step_id"] == "entities"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], STEP_ENTITIES_DATA)
+    assert result["step_id"] == "plant"
+    return result
+
+
+def _plant_schema_default(result, field):
+    marker = next(k for k in result["data_schema"].schema
+                  if (k.schema if hasattr(k, "schema") else str(k)) == field)
+    return marker.default()
+
+
+@pytest.mark.asyncio
+async def test_create_flow_order_entities_then_plant(hass: HomeAssistant) -> None:
+    """Ny ordning: meny → entities → plant → privacy; POST /profile först i privacy."""
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_USER_DATA)
+        assert result["step_id"] == "privacy"
+        mock_client.create_profile.assert_not_awaited()  # POST först i privacy-steget
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_PRIVACY_DATA)
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_CREATED_BY_HA] is True
+    mock_client.create_profile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_flow_zone_prefill_from_ha_config(hass: HomeAssistant) -> None:
+    hass.config.country = "SE"
+    hass.config.latitude = 59.33
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, CONF_ZONE) == "SE3"
+
+
+@pytest.mark.asyncio
+async def test_create_flow_invert_detection_prefills_toggle(hass: HomeAssistant) -> None:
+    """Ur > in i historiken → invert-togglen förvald + eff-förslag = speglad kvot."""
+    mock_client = _mock_client()
+    first = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(880.0, 1000.0, first))):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, CONF_INVERT_BATTERY) is True
+    assert _plant_schema_default(result, CONF_EFF) == 0.88
+
+
+@pytest.mark.asyncio
+async def test_link_flow_invert_suspected_shows_check_step(hass: HomeAssistant) -> None:
+    """Koppla-spåret saknar plant-steg → misstänkt inversion ger eget kontrollsteg."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    first = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(880.0, 1000.0, first))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+        assert result["step_id"] == "invert_check"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_INVERT_BATTERY: True})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INVERT_BATTERY] is True
+    assert result["data"][CONF_CREATED_BY_HA] is False

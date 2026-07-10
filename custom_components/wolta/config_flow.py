@@ -31,9 +31,13 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .api import WoltaApiClient, WoltaApiError, WoltaRateLimitError
+from homeassistant.util import dt as dt_util
+
+from . import stats
+from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .const import (
     CONF_BATT_IN,
+    CONF_CREATED_BY_HA,
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
@@ -186,6 +190,19 @@ def _date_selector() -> DateSelector:
     return DateSelector(DateSelectorConfig())
 
 
+def extract_token(value: str) -> str:
+    """Accept a raw profile token OR a full wolta.se link with ?profile=."""
+    value = value.strip()
+    if "profile=" in value:
+        from urllib.parse import parse_qs, urlparse  # noqa: PLC0415
+
+        qs = parse_qs(urlparse(value).query)
+        candidates = qs.get("profile")
+        if candidates:
+            return candidates[0].strip()
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Config flow
 # ---------------------------------------------------------------------------
@@ -203,33 +220,94 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialise the flow."""
-        self._user_data: dict[str, Any] = {}
+        self._plant_data: dict[str, Any] = {}
         self._entities_data: dict[str, Any] = {}
+        self._link_token: str | None = None
+        self._link_profile: dict[str, Any] | None = None
+        self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
 
     # ------------------------------------------------------------------
-    # Step 1: zone + battery parameters
+    # Step 1: menu – create a new profile or link an existing one
     # ------------------------------------------------------------------
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle the zone and battery configuration step."""
-        errors: dict[str, str] = {}
+        """Entry point: choose create-new or link-existing."""
+        return self.async_show_menu(step_id="user", menu_options=["create", "link"])
 
+    async def async_step_create(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create-new path: start with the entity selectors."""
+        return await self.async_step_entities()
+
+    async def async_step_link(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Link an existing wolta.se profile (token or Besök link)."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._user_data = user_input
-            return await self.async_step_entities()
+            token = extract_token(user_input["profile_input"])
+            session = async_get_clientsession(self.hass)
+            client = WoltaApiClient(session)
+            try:
+                self._link_profile = await client.get_profile(token)
+            except WoltaAuthError:
+                errors["profile_input"] = "invalid_token"
+            except WoltaApiError:
+                errors["base"] = "cannot_connect"
+            else:
+                unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
+                await self.async_set_unique_id(unique_id)
+                self._abort_if_unique_id_configured()
+                self._link_token = token
+                return await self.async_step_entities()
+        return self.async_show_form(
+            step_id="link",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("profile_input"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ------------------------------------------------------------------
+    # Plant parameters (create path) – prefilled from HA config + history
+    # ------------------------------------------------------------------
+
+    async def async_step_plant(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Plant parameters, prefilled from HA location and battery history."""
+        if user_input is not None:
+            self._plant_data = user_input
+            return await self.async_step_privacy()
+
+        from .zone_prefill import suggest_zone  # noqa: PLC0415
+
+        supported = {z for z, _ in SUPPORTED_ZONES}
+        guess = suggest_zone(self.hass.config.country, self.hass.config.latitude)
+        zone_default = guess if guess in supported else DEFAULT_ZONE
+        eff_suggested = self._prefill.get("eff")
+        date_suggested = self._prefill.get("purchase_date")
+        invert_default = bool(self._prefill.get("invert_suspected"))
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_ZONE, default=DEFAULT_ZONE): _zone_selector(),
+                vol.Required(CONF_ZONE, default=zone_default): _zone_selector(),
                 vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
                     min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
                 ),
                 vol.Required(CONF_BATTERY_KW, default=DEFAULT_BATTERY_KW): _number_selector(
                     min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"
                 ),
-                vol.Required(CONF_EFF, default=DEFAULT_EFF): _number_selector(
+                # Uppmätt AC-round-trip ur användarens egen historik när underlaget
+                # räcker (stats.analyze_battery_history) – bättre än databladsgissning.
+                vol.Required(CONF_EFF, default=eff_suggested or DEFAULT_EFF): _number_selector(
                     min_val=0.5, max_val=1.0, step=0.01
                 ),
                 vol.Optional(CONF_RESERVE_PCT): _number_selector(
@@ -238,7 +316,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_COST_SEK): _number_selector(
                     min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"
                 ),
-                vol.Optional(CONF_PURCHASE_DATE): _date_selector(),
+                vol.Optional(
+                    CONF_PURCHASE_DATE,
+                    description={"suggested_value": date_suggested} if date_suggested else None,
+                ): _date_selector(),
                 vol.Optional(CONF_GRID_VAR_ORE): _number_selector(
                     min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
@@ -248,14 +329,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_EXPORT_EXTRA_ORE): _number_selector(
                     min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
+                # Förvald när historiken visar stadigt ur > in (omkastade sensorer)
+                vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
+                    BooleanSelectorConfig()
+                ),
             }
         )
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="plant", data_schema=schema)
 
     # ------------------------------------------------------------------
     # Step 2: entity selectors (with energy-dashboard prefill)
@@ -277,7 +358,24 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
             if not errors:
                 self._entities_data = user_input
-                return await self.async_step_privacy()
+                # Auto-prefill ur användarens egen historik (eff/datum/invert-detektion).
+                try:
+                    charged, discharged, first_ts = await stats.async_fetch_lifetime(
+                        self.hass,
+                        user_input[CONF_BATT_IN],
+                        user_input[CONF_BATT_OUT],
+                    )
+                    self._prefill = stats.analyze_battery_history(
+                        charged, discharged, first_ts, dt_util.utcnow()
+                    )
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.debug("Prefill analysis failed; using defaults", exc_info=True)
+                    self._prefill = {}
+                if self._link_token is not None:
+                    if self._prefill.get("invert_suspected"):
+                        return await self.async_step_invert_check()
+                    return self._create_linked_entry(invert=False)
+                return await self.async_step_plant()
 
         # Prefill from HA energy dashboard if configured (returns lists)
         # When re-showing after errors, use submitted values as defaults
@@ -329,28 +427,28 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             share = user_input.get(CONF_SHARE, DEFAULT_SHARE)
-            zone = self._user_data[CONF_ZONE]
+            zone = self._plant_data[CONF_ZONE]
             solar = self._entities_data.get(CONF_SOLAR)
-            cost_sek: float | None = self._user_data.get(CONF_COST_SEK) or None
-            purchase_date: str | None = self._user_data.get(CONF_PURCHASE_DATE) or None
+            cost_sek: float | None = self._plant_data.get(CONF_COST_SEK) or None
+            purchase_date: str | None = self._plant_data.get(CONF_PURCHASE_DATE) or None
             # Tariff fields (and reserve_pct) use a plain .get() (NOT `.get() or None`
             # like cost_sek): 0.0 is a MEANINGFUL value here (a user whose grid fee or
             # export premium is genuinely zero, or whose control system keeps zero
             # reserve floor), so it must reach the backend, not be swallowed as "unset".
             # Do not "consistency-refactor" these to `or None`.
-            grid_var_ore: float | None = self._user_data.get(CONF_GRID_VAR_ORE)
-            surcharge_ore: float | None = self._user_data.get(CONF_SURCHARGE_ORE)
-            export_extra_ore: float | None = self._user_data.get(CONF_EXPORT_EXTRA_ORE)
-            reserve_pct: float | None = self._user_data.get(CONF_RESERVE_PCT)
+            grid_var_ore: float | None = self._plant_data.get(CONF_GRID_VAR_ORE)
+            surcharge_ore: float | None = self._plant_data.get(CONF_SURCHARGE_ORE)
+            export_extra_ore: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_ORE)
+            reserve_pct: float | None = self._plant_data.get(CONF_RESERVE_PCT)
 
             try:
                 session = async_get_clientsession(self.hass)
                 client = WoltaApiClient(session)
                 token = await client.create_profile(
                     zone=zone,
-                    battery_kwh=self._user_data[CONF_BATTERY_KWH],
-                    battery_kw=self._user_data[CONF_BATTERY_KW],
-                    eff=self._user_data[CONF_EFF],
+                    battery_kwh=self._plant_data[CONF_BATTERY_KWH],
+                    battery_kw=self._plant_data[CONF_BATTERY_KW],
+                    eff=self._plant_data[CONF_EFF],
                     has_solar=bool(solar),
                     share_profile=share,
                     cost_sek=cost_sek,
@@ -378,9 +476,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
                     CONF_GRID_IN: self._entities_data[CONF_GRID_IN],
                     CONF_GRID_OUT: self._entities_data[CONF_GRID_OUT],
-                    CONF_BATTERY_KWH: self._user_data[CONF_BATTERY_KWH],
-                    CONF_BATTERY_KW: self._user_data[CONF_BATTERY_KW],
-                    CONF_EFF: self._user_data[CONF_EFF],
+                    CONF_BATTERY_KWH: self._plant_data[CONF_BATTERY_KWH],
+                    CONF_BATTERY_KW: self._plant_data[CONF_BATTERY_KW],
+                    CONF_EFF: self._plant_data[CONF_EFF],
                     CONF_SHARE: share,
                 }
                 if solar:
@@ -397,6 +495,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
                 if reserve_pct is not None:
                     entry_data[CONF_RESERVE_PCT] = reserve_pct
+                entry_data[CONF_CREATED_BY_HA] = True
+                entry_data[CONF_INVERT_BATTERY] = bool(
+                    self._plant_data.get(CONF_INVERT_BATTERY, False)
+                )
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",
@@ -416,6 +518,58 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
             description_placeholders={},
+        )
+
+    # ------------------------------------------------------------------
+    # Linked-profile entry creation (+ invert check when stats suggest swap)
+    # ------------------------------------------------------------------
+
+    def _create_linked_entry(self, *, invert: bool) -> ConfigFlowResult:
+        """Create the entry for a linked (web-created) profile.
+
+        Profile fields are cached from the GET snapshot; the coordinator keeps
+        them in sync from here on. created_by_ha=False → removal never deletes
+        the profile server-side.
+        """
+        prof = self._link_profile or {}
+        entry_data: dict[str, Any] = {
+            CONF_TOKEN: self._link_token,
+            CONF_CREATED_BY_HA: False,
+            CONF_INVERT_BATTERY: invert,
+            CONF_BATT_IN: self._entities_data[CONF_BATT_IN],
+            CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
+            CONF_GRID_IN: self._entities_data[CONF_GRID_IN],
+            CONF_GRID_OUT: self._entities_data[CONF_GRID_OUT],
+        }
+        if self._entities_data.get(CONF_SOLAR):
+            entry_data[CONF_SOLAR] = self._entities_data[CONF_SOLAR]
+        for key in (
+            CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF,
+            CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
+            CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+        ):
+            if prof.get(key) is not None:
+                entry_data[key] = prof[key]
+        zone = entry_data.get(CONF_ZONE, DEFAULT_ZONE)
+        return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
+
+    async def async_step_invert_check(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Shown only when linked-profile stats suggest swapped battery sensors."""
+        if user_input is not None:
+            return self._create_linked_entry(
+                invert=bool(user_input.get(CONF_INVERT_BATTERY, True))
+            )
+        return self.async_show_form(
+            step_id="invert_check",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_INVERT_BATTERY, default=True): BooleanSelector(
+                        BooleanSelectorConfig()
+                    ),
+                }
+            ),
         )
 
     # ------------------------------------------------------------------
