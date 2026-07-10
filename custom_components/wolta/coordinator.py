@@ -514,17 +514,33 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             except (ValueError, AttributeError):
                 pass  # malformed date → fall through to recompute
 
+        # 429-backoff: the server's 24h cooldown rejected our last attempt – retrying
+        # every poll is futile and noisy (~20 requests/day per user seen in prod logs).
+        # Honor the Retry-After we were given and stay quiet until it has passed.
+        # Applies to the forced path too: the server rejects regardless, and the
+        # pending_invert_recompute flag survives until a recompute actually succeeds.
+        blocked_until_str = self._state.get("recompute_blocked_until")
+        if blocked_until_str:
+            try:
+                if now < datetime.fromisoformat(blocked_until_str):
+                    return
+            except (ValueError, TypeError):
+                pass  # malformed timestamp → drop it and retry
+            self._state.pop("recompute_blocked_until", None)
+
         # Trigger recompute
         try:
             await self.client.recompute(self.token)
             self._state["last_recompute"] = period_end_str
             self._state.pop("pending_invert_recompute", None)  # corrected – clear the force flag
+            self._state.pop("recompute_blocked_until", None)
             await self._store.async_save(self._state)
             _LOGGER.debug("Recompute triggered; last_recompute updated to %s", period_end_str)
-        except WoltaRateLimitError:
-            _LOGGER.debug(
-                "Recompute rate-limited (retry_after); skipping last_recompute update"
-            )
+        except WoltaRateLimitError as err:
+            blocked_until = now + timedelta(seconds=err.retry_after)
+            self._state["recompute_blocked_until"] = blocked_until.isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.debug("Recompute rate-limited; backing off until %s", blocked_until)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Recompute failed; will retry next cycle", exc_info=True)
 
@@ -567,12 +583,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         raises before the stamp, so last_recompute is left untouched (retryable next cycle).
         """
         await self.client.recompute(self.token)
+        # Success clears any cadence backoff (a PATCH may just have reset the
+        # server-side cooldown, so the stored block is stale).
+        self._state.pop("recompute_blocked_until", None)
         period_end = None
         if self.data is not None:
             period_end = (self.data.results.get("period") or {}).get("end")
         if period_end:
             self._state["last_recompute"] = period_end
-            await self._store.async_save(self._state)
+        await self._store.async_save(self._state)
 
     # ------------------------------------------------------------------
     # Utilities

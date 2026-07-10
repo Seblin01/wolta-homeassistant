@@ -1253,3 +1253,76 @@ async def test_side_poll_swallows_errors(hass: HomeAssistant, mock_entry):
     coordinator = await _side_poll_coordinator(hass, mock_entry, client)
     await coordinator.async_check_profile_sync()  # får inte kasta
     coordinator.async_request_refresh.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# v0.11.1: 429-backoff – respektera Retry-After istället för försök varje poll
+# ---------------------------------------------------------------------------
+
+
+async def _cadence_refresh(hass, mock_entry, client, extra_state=None):
+    """Refresh på incremental-vägen med 8 nya dygn sedan last_recompute (kadens-träff)."""
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    state = {"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+             "applied_entities": None, "last_recompute": "2025-05-23"}
+    if extra_state:
+        state.update(extra_state)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state=state)
+        await coordinator._async_update_data()
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_recompute_429_sets_backoff(hass: HomeAssistant, mock_entry):
+    """429 på recompute → recompute_blocked_until = nu + Retry-After sparas i staten."""
+    client = _mock_client(raise_on_recompute=WoltaRateLimitError(retry_after=7200))
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _cadence_refresh(hass, mock_entry, client)
+    client.recompute.assert_awaited_once()
+    blocked = datetime.fromisoformat(coordinator._state["recompute_blocked_until"])
+    assert blocked == NOW + timedelta(seconds=7200)
+
+
+@pytest.mark.asyncio
+async def test_recompute_skipped_while_backoff_active(hass: HomeAssistant, mock_entry):
+    """Aktiv backoff → inget recompute-försök alls (bruset borta)."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _cadence_refresh(
+        hass, mock_entry, client,
+        extra_state={"recompute_blocked_until": (NOW + timedelta(hours=3)).isoformat()})
+    client.recompute.assert_not_awaited()
+    assert "recompute_blocked_until" in coordinator._state  # kvar tills den passerats
+
+
+@pytest.mark.asyncio
+async def test_recompute_resumes_after_backoff_expired(hass: HomeAssistant, mock_entry):
+    """Passerad backoff → nyckeln rensas och recompute försöker igen."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _cadence_refresh(
+        hass, mock_entry, client,
+        extra_state={"recompute_blocked_until": (NOW - timedelta(minutes=1)).isoformat()})
+    client.recompute.assert_awaited_once()
+    assert "recompute_blocked_until" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_trigger_recompute_success_clears_backoff(hass: HomeAssistant, mock_entry):
+    """Användarinitierad recompute (options/knapp) som lyckas rensar backoffen."""
+    client = _mock_client()
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client,
+        store_state={"recompute_blocked_until": (NOW + timedelta(hours=3)).isoformat()})
+    coordinator.data = MagicMock(results={"period": {"end": "2025-05-31"}})
+    await coordinator.async_trigger_recompute()
+    assert "recompute_blocked_until" not in coordinator._state
