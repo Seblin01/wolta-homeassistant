@@ -153,6 +153,14 @@ class WoltaApiClient:
         """
         return await self._request("PATCH", f"/profile/{token}", json=fields)
 
+    async def get_profile(self, token: str) -> dict:
+        """Fetch the stored profile parameters (server is source of truth).
+
+        GET /api/v1/profile/{token} → 200 JSON with zone/battery/eff/economy/tariff
+        fields. Raises WoltaAuthError on 404 (purged/unknown token).
+        """
+        return await self._request("GET", f"/profile/{token}")
+
     async def put_data(self, token: str, rows: list[dict]) -> dict:
         """Upload energy rows for the given profile.
 

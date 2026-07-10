@@ -339,3 +339,29 @@ async def test_patch_profile_429_raises_rate_limit_error(aioclient_mock: Aiohttp
     with pytest.raises(WoltaRateLimitError) as exc_info:
         await client.patch_profile(TOKEN, purchase_date="2024-01-01")
     assert exc_info.value.retry_after == 7200
+
+
+# ---------------------------------------------------------------------------
+# get_profile (delad profil-sync)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_profile_returns_profile_dict(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.get(
+        f"{BASE_URL}/api/v1/profile/{TOKEN}",
+        json={"zone": "SE3", "battery_kwh": 22.0, "grid_var_ore": 25.5,
+              "share_profile": True},
+    )
+    client = _client(aioclient_mock)
+    prof = await client.get_profile(TOKEN)
+    assert prof["battery_kwh"] == 22.0
+    assert prof["grid_var_ore"] == 25.5
+
+
+@pytest.mark.asyncio
+async def test_get_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.get(f"{BASE_URL}/api/v1/profile/dead", status=404)
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.get_profile("dead")
