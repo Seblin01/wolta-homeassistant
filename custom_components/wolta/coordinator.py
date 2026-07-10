@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -215,6 +216,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 # 7-day cadence in _maybe_recompute) so the corrected grade shows up without a ~24h delay.
                 self._state.pop("last_uploaded_ts", None)
                 self._state["applied_invert"] = invert_now
+                self._state["pending_invert_recompute"] = True
+                await self._store.async_save(self._state)
+
+            # Entity selections changed (reconfigure flow) → full re-backfill so the
+            # server-side history is rebuilt from the new sensors. Same self-heal
+            # pattern as applied_invert above; first-time recording (upgrade) leaves
+            # the bookmark untouched.
+            entities_now = json.dumps(self._entity_map, sort_keys=True)
+            applied_entities = self._state.get("applied_entities")
+            if applied_entities is None:
+                self._state["applied_entities"] = entities_now
+                await self._store.async_save(self._state)
+            elif applied_entities != entities_now:
+                self._state.pop("last_uploaded_ts", None)
+                self._state["applied_entities"] = entities_now
                 self._state["pending_invert_recompute"] = True
                 await self._store.async_save(self._state)
 

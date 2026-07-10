@@ -521,6 +521,52 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
+    # Reconfigure: change entity selections without delete + re-add
+    # (removal would delete an HA-created profile server-side)
+    # ------------------------------------------------------------------
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change the energy entity selections on an existing entry."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
+                if not user_input.get(key):
+                    errors[key] = "required_sensor"
+            if not errors:
+                await self.async_set_unique_id(entry.unique_id)
+                self._abort_if_unique_id_mismatch()
+                data_updates: dict[str, Any] = {
+                    CONF_BATT_IN: user_input[CONF_BATT_IN],
+                    CONF_BATT_OUT: user_input[CONF_BATT_OUT],
+                    CONF_GRID_IN: user_input[CONF_GRID_IN],
+                    CONF_GRID_OUT: user_input[CONF_GRID_OUT],
+                    CONF_SOLAR: user_input.get(CONF_SOLAR) or [],
+                }
+                # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
+                # full re-backfill skriver över historiken från de nya sensorerna.
+                return self.async_update_reload_and_abort(entry, data_updates=data_updates)
+
+        defaults = {
+            k: entry.data.get(k)
+            for k in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR)
+        }
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_BATT_IN, default=defaults[CONF_BATT_IN]): _energy_entity_selector(),
+                vol.Required(CONF_BATT_OUT, default=defaults[CONF_BATT_OUT]): _energy_entity_selector(),
+                vol.Required(CONF_GRID_IN, default=defaults[CONF_GRID_IN]): _energy_entity_selector(),
+                vol.Required(CONF_GRID_OUT, default=defaults[CONF_GRID_OUT]): _energy_entity_selector(),
+                vol.Optional(
+                    CONF_SOLAR, default=defaults[CONF_SOLAR] or vol.UNDEFINED
+                ): _energy_entity_selector(),
+            }
+        )
+        return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
+
+    # ------------------------------------------------------------------
     # Linked-profile entry creation (+ invert check when stats suggest swap)
     # ------------------------------------------------------------------
 

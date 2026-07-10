@@ -1109,3 +1109,59 @@ async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_e
     assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK  # ej avancerad
     issue = ir.async_get(hass).async_get_issue(DOMAIN, "profile_full")
     assert issue is not None
+
+
+@pytest.mark.asyncio
+async def test_entity_change_resets_bookmark(hass: HomeAssistant, mock_entry):
+    """Ändrade sensorval (reconfigure) → bookmark nollas → full re-backfill,
+    samma självläkningsmönster som invert-togglen."""
+    import json as _json
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": "OLD-FINGERPRINT"})
+        await coordinator._async_update_data()
+
+    assert "last_uploaded_ts" not in coordinator._state
+    assert coordinator._state["applied_entities"] == _json.dumps(
+        coordinator._entity_map, sort_keys=True)
+    # pending-flaggan sätts och konsumeras i samma tick → recompute triggad direkt
+    client.recompute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entity_fingerprint_first_recording_keeps_bookmark(hass, mock_entry):
+    """Befintlig installation som uppgraderar: fingerprint initieras utan bookmark-reset."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False})
+        await coordinator._async_update_data()
+
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert "applied_entities" in coordinator._state

@@ -1954,3 +1954,52 @@ async def test_link_flow_invert_suspected_shows_check_step(hass: HomeAssistant) 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INVERT_BATTERY] is True
     assert result["data"][CONF_CREATED_BY_HA] is False
+
+
+# ---------------------------------------------------------------------------
+# B7: reconfigure-flow för sensorval (utan ta bort + lägg till)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_updates_entities_no_new_entry(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reconfigure"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: ["sensor.new_batt_in"],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+                CONF_SOLAR: ["sensor.solar"],
+            },
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATT_IN] == ["sensor.new_batt_in"]
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_requires_mandatory_streams(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: [],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+            },
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"].get(CONF_BATT_IN) == "required_sensor"
