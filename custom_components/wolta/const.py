@@ -24,6 +24,10 @@ CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
 # (Emaldo, signed Shelly) map the directions the wrong way → inverted grade. The flag swaps
 # batt_in/batt_out in the upload path so the user doesn't have to change their HA sensors.
 CONF_INVERT_BATTERY = "invert_battery"
+# False for profiles adopted via the link-existing flow: the web profile (incl. CSV
+# history) is not ours to delete when the integration is removed. Missing key = True
+# (every pre-v0.10.0 entry was created by HA → documented delete-on-remove kept).
+CONF_CREATED_BY_HA = "created_by_ha"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

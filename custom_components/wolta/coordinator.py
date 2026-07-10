@@ -21,10 +21,19 @@ from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitEr
 from .const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
+    CONF_BATTERY_KW,
+    CONF_BATTERY_KWH,
+    CONF_COST_SEK,
+    CONF_EFF,
+    CONF_EXPORT_EXTRA_ORE,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_VAR_ORE,
     CONF_INVERT_BATTERY,
+    CONF_PURCHASE_DATE,
+    CONF_RESERVE_PCT,
     CONF_SOLAR,
+    CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
     DOMAIN,
@@ -63,6 +72,15 @@ _STORE_KEY = "wolta_coordinator"
 
 # Issue IDs
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
+_ISSUE_PROFILE_FULL = "profile_full"
+
+# Profile fields mirrored from the server into entry.data (cache only – the server
+# is the source of truth; entry.data is never used as a diff base since v0.10.0).
+_PROFILE_SYNC_KEYS: tuple[str, ...] = (
+    CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
+    CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
+    CONF_EXPORT_EXTRA_ORE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +155,49 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Main update
     # ------------------------------------------------------------------
 
+    def _apply_profile_sync(self, profile: dict) -> None:
+        """Mirror server-side profile fields into entry.data (write only on change).
+
+        entry.data is a CACHE of the shared profile – the server is the source of
+        truth. No update listener is registered, so async_update_entry does not
+        trigger a reload; we only write when something actually changed to avoid
+        a disk write per poll tick.
+        """
+        entry = self.config_entry
+        new_data = dict(entry.data)
+        changed = False
+        for key in _PROFILE_SYNC_KEYS:
+            server_val = profile.get(key)
+            if server_val is None:
+                if key in new_data:
+                    new_data.pop(key)
+                    changed = True
+            elif new_data.get(key) != server_val:
+                new_data[key] = server_val
+                changed = True
+        if not changed:
+            return
+        zone = new_data.get(CONF_ZONE, self._zone)
+        self._zone = zone
+        self.hass.config_entries.async_update_entry(
+            entry, data=new_data, title=f"Wolta ({zone})"
+        )
+
     async def _async_update_data(self) -> WoltaData:
         """Fetch statistics, upload to Wolta, trigger recompute, return results."""
         try:
             now = dt_util.utcnow()
+            # Profile sync (server = source of truth): mirror web-side changes into
+            # entry.data. Network errors are non-fatal – the cache just stays stale.
+            try:
+                profile = await self.client.get_profile(self.token)
+            except WoltaAuthError:
+                raise  # purged profile → same reauth path as results()
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
+            else:
+                self._apply_profile_sync(profile)
+
             # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
             # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
             # the corrected battery direction. applied_invert is recorded in state so this only happens
@@ -173,12 +230,31 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     rows = await self._incremental_rows(start, now)
 
             if rows:
-                await self.client.put_data(self.token, rows)
-                self._state["last_uploaded_ts"] = rows[-1]["ts"]
-                await self._store.async_save(self._state)
-                # Clear failure counter on success
-                self._state.pop("consecutive_failure_days", None)
-                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+                try:
+                    await self.client.put_data(self.token, rows)
+                except WoltaApiError as err:
+                    if err.status == 413:
+                        # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
+                        # reachable for linked profiles with web CSV + HA backfill).
+                        # Surface via repairs and skip the upload – results still work.
+                        # Bookmark is NOT advanced (nothing was persisted server-side).
+                        ir.async_create_issue(
+                            self.hass,
+                            DOMAIN,
+                            _ISSUE_PROFILE_FULL,
+                            is_fixable=False,
+                            severity=ir.IssueSeverity.WARNING,
+                            translation_key=_ISSUE_PROFILE_FULL,
+                        )
+                    else:
+                        raise
+                else:
+                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                    self._state["last_uploaded_ts"] = rows[-1]["ts"]
+                    await self._store.async_save(self._state)
+                    # Clear failure counter on success
+                    self._state.pop("consecutive_failure_days", None)
+                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
 
             await self._maybe_recompute(now)
 

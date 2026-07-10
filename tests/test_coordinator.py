@@ -1010,3 +1010,102 @@ async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, moc
     assert client.recompute.called
     assert coordinator._state.get("pending_invert_recompute") is True, \
         "the force flag should survive a 429 so the next tick retries"
+
+
+# ---------------------------------------------------------------------------
+# Delad profil-sync: GET /profile speglas in i entry.data (cache) + 413-repair
+# ---------------------------------------------------------------------------
+
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
+
+from custom_components.wolta.api import WoltaApiError  # noqa: E402
+
+# Serverprofil som exakt matchar ENTRY_DATA (inga profilfält satta) → ingen ändring.
+BASE_PROFILE = {
+    "zone": ZONE, "battery_kwh": None, "battery_kw": None, "eff": None,
+    "reserve_pct": None, "cost_sek": None, "purchase_date": None,
+    "grid_var_ore": None, "surcharge_ore": None, "export_extra_ore": None,
+}
+
+_RECENT_BOOKMARK = (NOW - timedelta(hours=1)).isoformat()
+
+
+async def _sync_refresh(hass, mock_entry, client, rows=None):
+    """Kör en refresh på incremental-vägen med kontrollerade rows."""
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": None})
+        if rows is not None:
+            coordinator._incremental_rows = AsyncMock(return_value=rows)
+        result = await coordinator._async_update_data()
+    return coordinator, result
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_updates_entry_data(hass: HomeAssistant, mock_entry):
+    """Webbändring (battery_kwh satt på servern) ska uppdatera entry.data-cachen."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    assert mock_upd.called
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["battery_kwh"] == 25.0
+    assert kwargs["title"] == f"Wolta ({ZONE})"
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_zone_change_updates_title(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "zone": "SE4"})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["zone"] == "SE4"
+    assert kwargs["title"] == "Wolta (SE4)"
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_no_write_when_unchanged(hass: HomeAssistant, mock_entry):
+    """Oförändrad profil får inte trigga async_update_entry (diskskrivning per tick)."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    mock_upd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_fetch_error_keeps_cache(hass: HomeAssistant, mock_entry):
+    """GET-fel (nät/5xx) → behåll cachen, refreshen lyckas ändå."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(side_effect=WoltaApiError("boom", status=500))
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        _, result = await _sync_refresh(hass, mock_entry, client)
+    mock_upd.assert_not_called()
+    assert result.n_days == 150
+
+
+@pytest.mark.asyncio
+async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_entry):
+    """413 på PUT /data → repair-issue profile_full; bookmark orörd; results hämtas."""
+    client = _mock_client(raise_on_put=WoltaApiError("full", status=413))
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, result = await _sync_refresh(
+        hass, mock_entry, client, rows=_make_rows(NOW))
+    assert result.n_days == 150
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK  # ej avancerad
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "profile_full")
+    assert issue is not None
