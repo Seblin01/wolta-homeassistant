@@ -80,18 +80,22 @@ _PROFILE_SYNC_INTERVAL = timedelta(minutes=5)
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
 _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
+_ISSUE_POWER = "measured_power"
+_ISSUE_EFFICIENCY = "measured_efficiency"
 
-# Measured-capacity adopt gate (conservative: the backend's observed_capacity is an all-time
-# LOWER bound, so we only propose adopting it when we're confident the entered value is wrong).
-#   MATURE_DAYS   – enough history that the plateau is trustworthy (not one lucky summer week)
-#   PLATEAU_DAYS  – the observed ceiling recurred on this many days (real cap, not a one-off)
-#   GAP           – ignore differences smaller than this vs the configured effective window
-# All-time monotonicity + the GAP threshold give natural hysteresis: after adopting, the
-# effective window == measured, the gap collapses, and it can only re-fire on a genuine
-# upward ratchet (never ping-pong down).
+# Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
+# from the meter, so we only propose adopting when we're confident the entered value is wrong).
+#   MATURE_DAYS   – enough history that the reconstruction is trustworthy
+#   PLATEAU_DAYS  – (capacity) the observed ceiling recurred on this many days (real cap)
+#   GAP           – ignore differences smaller than this vs the configured value
+# For capacity, all-time monotonicity + the GAP give natural hysteresis: after adopting, the
+# effective window == measured, the gap collapses, and it can only re-fire on a genuine upward
+# ratchet (never ping-pong down).
 _CAP_MATURE_DAYS = 60
 _CAP_PLATEAU_DAYS = 10
 _CAP_GAP = 0.15
+_POWER_GAP = 0.15          # relative gap vs configured kW (observed peak is a lower bound)
+_EFF_ABS_GAP = 0.08        # absolute round-trip gap (eff is 0.5–1.0; a true measurement)
 
 # Profile fields mirrored from the server into entry.data (cache only – the server
 # is the source of truth; entry.data is never used as a diff base since v0.10.0).
@@ -324,7 +328,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
-            self._evaluate_capacity_issue(results)
+            self._evaluate_measured_params(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
                 datetime.fromisoformat(last_uploaded_str)
@@ -584,35 +588,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             except (ValueError, AttributeError):
                 pass
 
-    def _evaluate_capacity_issue(self, results: dict) -> None:
-        """Raise (or clear) a fixable repair when the backend's measured usable capacity
-        clearly disagrees with the configured battery capacity.
-
-        The server exposes observed_capacity = the all-time DISPATCHABLE window measured at
-        the meter (what the battery has demonstrably moved). We compare it against the
-        configured EFFECTIVE window (battery_kwh reduced by any reserve), and only surface a
-        proposal when it's mature and the gap is real (see the _CAP_* gate). The fix flow
-        adopts it as battery_kwh with reserve cleared, since the measurement already excludes
-        the reserve — so the reserve must NOT be applied on top again (repairs.py)."""
-        # Per-entry issue id so multiple Wolta profiles don't collide (the fix flow must
-        # PATCH the right profile).
-        issue_id = f"{_ISSUE_CAPACITY}_{self.config_entry.entry_id}"
-        betyg = results.get("betyg")
-        oc = betyg.get("observed_capacity") if isinstance(betyg, dict) else None
-        if not oc or not oc.get("kwh"):
-            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
-            return
-        configured = self.config_entry.data.get(CONF_BATTERY_KWH)
-        reserve = self.config_entry.data.get(CONF_RESERVE_PCT) or 0.0
-        effective = configured * (1.0 - reserve / 100.0) if configured else None
-        measured = float(oc["kwh"])
-        fire = (
-            effective
-            and effective > 0
-            and oc.get("n_days", 0) >= _CAP_MATURE_DAYS
-            and oc.get("plateau_days", 0) >= _CAP_PLATEAU_DAYS
-            and abs(measured - effective) / effective >= _CAP_GAP
-        )
+    def _set_measured_issue(
+        self, key: str, *, fire, translation_key: str, placeholders: dict, data: dict
+    ) -> None:
+        """Create or clear a per-entry fixable repair (shared boilerplate for the measured
+        parameter adopt flows). Per-entry issue id so multiple profiles don't collide."""
+        issue_id = f"{key}_{self.config_entry.entry_id}"
         if fire:
             ir.async_create_issue(
                 self.hass,
@@ -620,16 +601,109 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 issue_id,
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
-                translation_key=_ISSUE_CAPACITY,
-                translation_placeholders={
-                    "measured": f"{measured:.1f}",
-                    "configured": f"{effective:.1f}",
-                    "days": str(oc.get("n_days", 0)),
-                },
-                data={"measured_kwh": measured, "entry_id": self.config_entry.entry_id},
+                translation_key=translation_key,
+                translation_placeholders=placeholders,
+                data={**data, "entry_id": self.config_entry.entry_id},
             )
         else:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    def _evaluate_measured_params(self, results: dict) -> None:
+        """Evaluate all measured-parameter adopt repairs (capacity, power, efficiency).
+
+        The backend measures these from the actual meter flows (observed_* in the grade
+        payload); we compare against the configured values and raise a fixable repair when
+        they clearly disagree. Auto-measuring the grade-affecting inputs keeps the grade fair
+        without the user having to know nameplate-vs-usable, AC-vs-DC, etc."""
+        betyg = results.get("betyg")
+        betyg = betyg if isinstance(betyg, dict) else {}
+        self._evaluate_capacity_issue(betyg)
+        self._evaluate_power_issue(betyg)
+        self._evaluate_efficiency_issue(betyg)
+
+    def _evaluate_capacity_issue(self, betyg: dict) -> None:
+        """Adopt the measured usable capacity. observed_capacity is the all-time DISPATCHABLE
+        window at the meter (what the battery has demonstrably moved). Compared against the
+        configured EFFECTIVE window (battery_kwh minus any reserve). The fix flow adopts it as
+        battery_kwh with the reserve cleared — the measurement already excludes the reserve, so
+        it must NOT be reduced again (repairs.py)."""
+        oc = betyg.get("observed_capacity") if isinstance(betyg, dict) else None
+        configured = self.config_entry.data.get(CONF_BATTERY_KWH)
+        reserve = self.config_entry.data.get(CONF_RESERVE_PCT) or 0.0
+        effective = configured * (1.0 - reserve / 100.0) if configured else None
+        measured = float(oc["kwh"]) if oc and oc.get("kwh") else None
+        fire = (
+            measured is not None
+            and effective
+            and effective > 0
+            and oc.get("n_days", 0) >= _CAP_MATURE_DAYS
+            and oc.get("plateau_days", 0) >= _CAP_PLATEAU_DAYS
+            and abs(measured - effective) / effective >= _CAP_GAP
+        )
+        self._set_measured_issue(
+            _ISSUE_CAPACITY,
+            fire=fire,
+            translation_key=_ISSUE_CAPACITY,
+            placeholders={
+                "measured": f"{measured:.1f}" if measured is not None else "",
+                "configured": f"{effective:.1f}" if effective else "",
+                "days": str(oc.get("n_days", 0)) if oc else "0",
+            },
+            data={"measured_kwh": measured} if measured is not None else {},
+        )
+
+    def _evaluate_power_issue(self, betyg: dict) -> None:
+        """Adopt the measured peak power. observed_power is the all-time max charge/discharge
+        power at the meter — a LOWER bound (the controller may never have demanded full power),
+        so unlike capacity a too-low value can FLATTER the grade. The fix flow therefore uses an
+        editable field pre-filled with the measured value and tells the user to set the real
+        maximum: it's likely the measured figure, but higher if the battery can do more."""
+        op = betyg.get("observed_power") if isinstance(betyg, dict) else None
+        configured = self.config_entry.data.get(CONF_BATTERY_KW)
+        measured = float(op["kw"]) if op and op.get("kw") else None
+        fire = (
+            measured is not None
+            and configured
+            and configured > 0
+            and op.get("n_days", 0) >= _CAP_MATURE_DAYS
+            and abs(measured - configured) / configured >= _POWER_GAP
+        )
+        self._set_measured_issue(
+            _ISSUE_POWER,
+            fire=fire,
+            translation_key=_ISSUE_POWER,
+            placeholders={
+                "measured": f"{measured:.1f}" if measured is not None else "",
+                "configured": f"{configured:.1f}" if configured else "",
+                "days": str(op.get("n_days", 0)) if op else "0",
+            },
+            data={"measured_kw": measured} if measured is not None else {},
+        )
+
+    def _evaluate_efficiency_issue(self, betyg: dict) -> None:
+        """Adopt the measured round-trip efficiency. observed_eff is the lifetime AC round-trip
+        (energy out / energy in) — a true measurement, not a lower bound — so a one-click adopt
+        is fine. This corrects a stale DEFAULT_EFF from a setup done with thin history."""
+        oe = betyg.get("observed_eff") if isinstance(betyg, dict) else None
+        configured = self.config_entry.data.get(CONF_EFF)
+        measured = float(oe["eff"]) if oe and oe.get("eff") else None
+        fire = (
+            measured is not None
+            and configured
+            and oe.get("n_days", 0) >= _CAP_MATURE_DAYS
+            and abs(measured - float(configured)) >= _EFF_ABS_GAP
+        )
+        self._set_measured_issue(
+            _ISSUE_EFFICIENCY,
+            fire=fire,
+            translation_key=_ISSUE_EFFICIENCY,
+            placeholders={
+                "measured": f"{measured:.2f}" if measured is not None else "",
+                "configured": f"{float(configured):.2f}" if configured else "",
+                "days": str(oe.get("n_days", 0)) if oe else "0",
+            },
+            data={"measured_eff": measured} if measured is not None else {},
+        )
 
     # ------------------------------------------------------------------
     # Button helper

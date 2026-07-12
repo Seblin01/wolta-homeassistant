@@ -18,6 +18,34 @@
           }
         }
       }
+    },
+    "measured_power": {
+      "title": "Kontrollera batteriets maxeffekt",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Ange batteriets maxeffekt",
+            "description": "Under {days} dygn är den högsta effekt batteriet laddat eller laddat ur vid mätaren ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra — om din styrning aldrig bad om full effekt kan det verkliga maxvärdet vara högre. Ange batteriets verkliga maxeffekt (växelriktarens gräns). En perfekt styrning skulle utnyttja hela, så ett för lågt värde smickrar betyget och ett för högt sänker det orättvist. Det ligger troligen runt {measured} kW — höj om batteriet klarar mer.",
+            "data": {
+              "battery_kw": "Maxeffekt (kW)"
+            },
+            "data_description": {
+              "battery_kw": "Batteriets verkliga max ladd-/urladdningseffekt vid mätaren (växelriktargränsen). Förifylld med den uppmätta toppen — justera om du vet att batteriet klarar mer."
+            }
+          }
+        }
+      }
+    },
+    "measured_efficiency": {
+      "title": "Wolta mätte en annan verkningsgrad",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Använd den uppmätta verkningsgraden?",
+            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nBetyget jämför dig med en perfekt styrning på din hårdvara, så verkningsgraden bör motsvara batteriets verkliga AC-round-trip. Den kan bli fel om den sattes utifrån tunn historik vid installationen. Använd {measured}?"
+          }
+        }
+      }
     }
   },
   "config": {

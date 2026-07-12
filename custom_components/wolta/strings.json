@@ -18,6 +18,34 @@
           }
         }
       }
+    },
+    "measured_power": {
+      "title": "Check your battery's maximum power",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Set the battery's maximum power",
+            "description": "Over {days} days, the most power your battery has charged or discharged at the meter is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing — if your control never demanded full power, the real maximum may be higher. Enter your battery's true maximum power (its inverter limit). A perfect controller would use all of it, so a value set too low would flatter your grade and one set too high would unfairly lower it. It's probably around {measured} kW — raise it if your battery can do more.",
+            "data": {
+              "battery_kw": "Maximum power (kW)"
+            },
+            "data_description": {
+              "battery_kw": "The battery's real maximum charge/discharge power at the meter (inverter limit). Pre-filled with the measured peak — adjust it if you know the battery can do more."
+            }
+          }
+        }
+      }
+    },
+    "measured_efficiency": {
+      "title": "Wolta measured a different round-trip efficiency",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Adopt the measured efficiency?",
+            "description": "Over {days} days, Wolta measured your battery's round-trip efficiency at the meter (energy out ÷ energy in) as about {measured}, but you configured {configured}.\n\nThe grade compares you against a perfect controller on your hardware, so the efficiency should match your battery's real AC round-trip. This can drift when it was set from thin history at setup. Adopt {measured}?"
+          }
+        }
+      }
     }
   },
   "config": {

@@ -1,36 +1,41 @@
-# v0.12.0 – Wolta measures your usable battery capacity and offers to adopt it
+# v0.12.0 – Wolta measures your grade-affecting battery parameters and offers to adopt them
 
 The optimisation grade compares your operation against a perfect controller **on your own
-hardware**, so the battery capacity you enter has to match what the battery really does.
-The single most common mistake is entering the nameplate/rated figure — or the energy the
-battery app shows at 100 % state of charge — instead of the *usable* capacity delivered at
-the meter. Both are higher than the truth, because the inverter loses energy converting to
-and from the battery, and that inflated capacity unfairly lowers the grade.
+hardware**, so the battery parameters you enter have to match what the battery really does.
+Getting them wrong — usually by entering nameplate figures instead of what the battery
+actually delivers at the meter — quietly makes the grade unfair. This release measures those
+parameters from your real data and offers to fix them, so you don't have to know
+nameplate-vs-usable or AC-vs-DC in advance.
 
-This release stops that from being something you have to know in advance.
+Three grade-affecting inputs are now measured from the meter flows and surfaced as optional,
+fixable **repairs** when they clearly disagree with what you configured:
 
-**Wolta now measures it for you.** After a couple of months of history, the backend
-reconstructs your battery's usable, dispatchable window from the energy that actually flows
-in and out at the meter (the AC side). When that measured value clearly disagrees with what
-you configured, a fixable **repair** appears — "Wolta measured a different battery
-capacity" — showing the measured figure and offering to adopt it in one click.
+**Usable capacity.** The all-time dispatchable window measured at the meter (what the battery
+has demonstrably moved). Adopting it sets the battery capacity and **clears any reserve
+floor** — the measurement already reflects only the window you actually cycle, so re-applying
+a reserve would reduce it twice. One-click adopt.
 
-Confirming it sets the battery capacity to the measured value and **clears any reserve
-floor**: the measurement already reflects only the window you actually cycle, so re-applying
-a reserve on top would reduce it twice. The grade and economy are then recomputed on the
-corrected, fair basis.
+**Peak power.** The most power the battery has charged or discharged at the meter. This one is
+a *lower bound* — if your control never demanded full power, the real maximum may be higher —
+so unlike the others it opens an **editable field pre-filled with the measured value** and
+asks you to set the battery's true maximum (its inverter limit). A perfect controller would
+use all of it, so a value set too low would flatter your grade and one set too high would
+unfairly lower it: you'll probably want to confirm or raise the suggested figure.
 
-The repair is deliberately conservative — it only appears once the measurement is mature
-and confident (at least 60 days of history, a ceiling that recurs across many days, and a
-gap larger than ~15 %). The measured value is an all-time figure, so it's stable across
-seasons and won't flip-flop as more data arrives. If you simply haven't fully charged or
-discharged in the period, ignore and dismiss it.
+**Round-trip efficiency.** The lifetime energy-out ÷ energy-in at the meter — a true
+measurement, not a bound — so it's a one-click adopt. This corrects a stale default that could
+otherwise linger if the integration was set up before there was enough history to measure the
+efficiency.
 
-**Clearer field help.** The battery-capacity field now explains, in both English and
-Swedish, exactly what to enter and why: the usable capacity measured at your meter — not
-the nameplate rating and not the DC/cell figure your battery app shows — so the comparison
-stays fair. This mirrors the existing round-trip-efficiency guidance (AC side, not the
-DC/cell number).
+All three are deliberately conservative: they only appear once there's enough history (at
+least 60 days) and the gap is real (capacity/power over ~15 %, efficiency over ~0.08). The
+measured values are all-time figures, so they're stable across seasons and won't flip-flop as
+more data arrives.
 
-No action needed. If a repair appears, it's optional; your existing configuration keeps
-working exactly as before until you choose to adopt the measured value.
+**Clearer field help.** The battery-capacity field now explains, in English and Swedish,
+exactly what to enter and why: the usable capacity measured at your meter — not the nameplate
+rating and not the DC/cell figure your battery app shows — so the comparison stays fair. This
+matches the existing round-trip-efficiency guidance (AC side, not the DC/cell number).
+
+No action needed. Any repair that appears is optional; your existing configuration keeps
+working exactly as before until you choose to adopt a measured value.

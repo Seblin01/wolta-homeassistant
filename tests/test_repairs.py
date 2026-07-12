@@ -87,3 +87,61 @@ async def test_create_fix_flow_resolves_entry_and_value(hass: HomeAssistant):
     assert isinstance(flow, MeasuredCapacityRepairFlow)
     assert flow._measured_kwh == 11.5
     assert flow._entry is entry
+
+
+from custom_components.wolta.const import CONF_BATTERY_KW, CONF_EFF  # noqa: E402
+from custom_components.wolta.repairs import (  # noqa: E402
+    MeasuredEfficiencyRepairFlow,
+    MeasuredPowerRepairFlow,
+)
+
+
+@pytest.mark.asyncio
+async def test_power_repair_uses_editable_field(hass: HomeAssistant):
+    """Power flow shows a field pre-filled with the measured peak; the user can raise it,
+    and the submitted value (not the measured one) is what gets PATCHed."""
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_BATTERY_KW: 10.0}
+    hass.config_entries.async_update_entry = MagicMock()
+
+    flow = MeasuredPowerRepairFlow(entry, 3.6)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] == "form"
+    assert form["description_placeholders"]["measured"] == "3.6"
+
+    # User raises it to the real inverter limit (5 kW) rather than accepting 3.6.
+    result = await flow.async_step_confirm({CONF_BATTERY_KW: 5.0})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", battery_kw=5.0)
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_BATTERY_KW] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_efficiency_repair_adopts_measured(hass: HomeAssistant):
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_EFF: 0.9}
+    hass.config_entries.async_update_entry = MagicMock()
+
+    flow = MeasuredEfficiencyRepairFlow(entry, 0.72)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["step_id"] == "confirm"
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", eff=0.72)
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_EFF] == 0.72
+
+
+@pytest.mark.asyncio
+async def test_create_fix_flow_dispatches_by_issue_prefix(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    p = await async_create_fix_flow(hass, "measured_power_e1", {"entry_id": "e1", "measured_kw": 3.6})
+    assert isinstance(p, MeasuredPowerRepairFlow)
+    e = await async_create_fix_flow(hass, "measured_efficiency_e1", {"entry_id": "e1", "measured_eff": 0.72})
+    assert isinstance(e, MeasuredEfficiencyRepairFlow)
+    c = await async_create_fix_flow(hass, "measured_capacity_e1", {"entry_id": "e1", "measured_kwh": 11.0})
+    assert isinstance(c, MeasuredCapacityRepairFlow)
