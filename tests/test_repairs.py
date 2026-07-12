@@ -145,3 +145,13 @@ async def test_create_fix_flow_dispatches_by_issue_prefix(hass: HomeAssistant):
     assert isinstance(e, MeasuredEfficiencyRepairFlow)
     c = await async_create_fix_flow(hass, "measured_capacity_e1", {"entry_id": "e1", "measured_kwh": 11.0})
     assert isinstance(c, MeasuredCapacityRepairFlow)
+
+
+@pytest.mark.asyncio
+async def test_repair_aborts_when_entry_missing(hass: HomeAssistant):
+    """Review #2: entry borttagen mellan issue och fix → abort, ingen krasch."""
+    flow = MeasuredCapacityRepairFlow(None, 11.0)
+    flow.hass = hass
+    result = await flow.async_step_init()
+    assert result["type"] == "abort"
+    assert result["reason"] == "entry_not_found"

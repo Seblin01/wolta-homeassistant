@@ -16,6 +16,9 @@
             "title": "Använd den uppmätta batterikapaciteten?",
             "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan) — inte märkt kapacitet eller cell-talet din batteri-app kan visa vid 100 %, som är högre eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på din hårdvara, så värdet bör motsvara vad batteriet verkligen flyttar.\n\nAnvänd {measured} kWh? Det sätter batterikapaciteten och nollar eventuell reserv (det uppmätta värdet exkluderar den redan). Har du bara inte fulladdat eller urladdat helt under perioden kan du strunta i detta och avfärda ärendet."
           }
+        },
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
     },
@@ -33,6 +36,9 @@
               "battery_kw": "Batteriets verkliga max ladd-/urladdningseffekt vid mätaren (växelriktargränsen). Förifylld med den uppmätta toppen — justera om du vet att batteriet klarar mer."
             }
           }
+        },
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
     },
@@ -44,6 +50,9 @@
             "title": "Använd den uppmätta verkningsgraden?",
             "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nBetyget jämför dig med en perfekt styrning på din hårdvara, så verkningsgraden bör motsvara batteriets verkliga AC-round-trip. Den kan bli fel om den sattes utifrån tunn historik vid installationen. Använd {measured}?"
           }
+        },
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
     }

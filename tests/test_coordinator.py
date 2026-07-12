@@ -1458,3 +1458,29 @@ async def test_efficiency_issue_not_fired_within_tolerance(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.9})
     c._evaluate_measured_params(_oe_results(0.88))           # gap 0.02 < 0.08
     assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_not_fired_at_implausible_ceiling(hass, mock_entry):
+    """Review #3: en uppmätt eff ≥ 0.98 är en clamp-/randartefakt, inte ett riktigt
+    round-trip – ska inte erbjudas för adoption."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.85})
+    c._evaluate_measured_params(_oe_results(1.0))          # gap 0.15 men 1.0 ≥ 0.98
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_power_issue_shrink_needs_larger_gap(hass, mock_entry):
+    """Review #4: krymp-riktningen (uppmätt < inmatat) kräver större gap – ett korrekt satt
+    men snällt använt batteri (5 kW, topp 3.6 → 28 %) ska INTE nudgas ned."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 5.0})
+    c._evaluate_measured_params(_op_results(3.6))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_power_issue_raise_fires_on_small_gap(hass, mock_entry):
+    """Höj-riktningen (uppmätt > inmatat) är högkonfident → mindre gap räcker (3.0 → 3.6 = 20 %)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 3.0})
+    c._evaluate_measured_params(_op_results(3.6))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is not None

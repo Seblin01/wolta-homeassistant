@@ -16,6 +16,9 @@
             "title": "Adopt the measured battery capacity?",
             "description": "Over {days} days, Wolta measured your battery's usable capacity at the meter as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measured value is what your battery actually delivers to the house (AC side) — not the rated/nameplate or the cell figure your battery app may show at 100 %, which is higher because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on your hardware, so this value should match what the battery really moves.\n\nAdopt {measured} kWh? This sets the battery capacity and clears any reserve (the measured value already excludes it). If you simply haven't fully charged or discharged in this period, you can ignore this and dismiss the issue."
           }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
     },
@@ -33,6 +36,9 @@
               "battery_kw": "The battery's real maximum charge/discharge power at the meter (inverter limit). Pre-filled with the measured peak — adjust it if you know the battery can do more."
             }
           }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
     },
@@ -44,6 +50,9 @@
             "title": "Adopt the measured efficiency?",
             "description": "Over {days} days, Wolta measured your battery's round-trip efficiency at the meter (energy out ÷ energy in) as about {measured}, but you configured {configured}.\n\nThe grade compares you against a perfect controller on your hardware, so the efficiency should match your battery's real AC round-trip. This can drift when it was set from thin history at setup. Adopt {measured}?"
           }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
     }

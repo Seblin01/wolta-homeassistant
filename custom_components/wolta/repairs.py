@@ -31,8 +31,16 @@ from .const import CONF_BATTERY_KW, CONF_BATTERY_KWH, CONF_EFF, CONF_RESERVE_PCT
 class _AdoptRepairFlow(RepairsFlow):
     """Shared finish sequence: PATCH the server profile, mirror into entry.data, recompute."""
 
-    def __init__(self, entry: ConfigEntry) -> None:
+    def __init__(self, entry: ConfigEntry | None) -> None:
         self._entry = entry
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # The config entry can be removed between the repair being raised and the user opening
+        # it (async_create_fix_flow then hands us entry=None). Abort cleanly instead of
+        # crashing on self._entry.runtime_data in _finish.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return await self.async_step_confirm()
 
     async def _finish(self, *, patch: dict, new_data: dict) -> data_entry_flow.FlowResult:
         coordinator = self._entry.runtime_data
@@ -54,9 +62,6 @@ class MeasuredCapacityRepairFlow(_AdoptRepairFlow):
     def __init__(self, entry: ConfigEntry, measured_kwh: float) -> None:
         super().__init__(entry)
         self._measured_kwh = measured_kwh
-
-    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
-        return await self.async_step_confirm()
 
     async def async_step_confirm(self, user_input=None) -> data_entry_flow.FlowResult:
         if user_input is not None:
@@ -82,9 +87,6 @@ class MeasuredEfficiencyRepairFlow(_AdoptRepairFlow):
         super().__init__(entry)
         self._measured_eff = measured_eff
 
-    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
-        return await self.async_step_confirm()
-
     async def async_step_confirm(self, user_input=None) -> data_entry_flow.FlowResult:
         if user_input is not None:
             new_data = {**self._entry.data, CONF_EFF: self._measured_eff}
@@ -106,9 +108,6 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
     def __init__(self, entry: ConfigEntry, measured_kw: float) -> None:
         super().__init__(entry)
         self._measured_kw = measured_kw
-
-    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
-        return await self.async_step_confirm()
 
     async def async_step_confirm(self, user_input=None) -> data_entry_flow.FlowResult:
         if user_input is not None:

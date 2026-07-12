@@ -94,8 +94,13 @@ _ISSUE_EFFICIENCY = "measured_efficiency"
 _CAP_MATURE_DAYS = 60
 _CAP_PLATEAU_DAYS = 10
 _CAP_GAP = 0.15
-_POWER_GAP = 0.15          # relative gap vs configured kW (observed peak is a lower bound)
+# Power: observed peak is a LOWER bound. Raising (observed > configured) is high-confidence, so
+# a smaller gap suffices; lowering (observed < configured) risks nudging a correct-but-gently-used
+# value down (flattering the grade), so demand a bigger gap.
+_POWER_GAP = 0.15
+_POWER_GAP_SHRINK = 0.30
 _EFF_ABS_GAP = 0.08        # absolute round-trip gap (eff is 0.5–1.0; a true measurement)
+_EFF_MAX_PLAUSIBLE = 0.98  # don't adopt an implausibly high round-trip (clamp/boundary artefact)
 
 # Profile fields mirrored from the server into entry.data (cache only – the server
 # is the source of truth; entry.data is never used as a diff base since v0.10.0).
@@ -645,11 +650,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             fire=fire,
             translation_key=_ISSUE_CAPACITY,
             placeholders={
-                "measured": f"{measured:.1f}" if measured is not None else "",
-                "configured": f"{effective:.1f}" if effective else "",
-                "days": str(oc.get("n_days", 0)) if oc else "0",
-            },
-            data={"measured_kwh": measured} if measured is not None else {},
+                "measured": f"{measured:.1f}",
+                "configured": f"{effective:.1f}",
+                "days": str(oc.get("n_days", 0)),
+            } if fire else {},
+            data={"measured_kwh": measured} if fire else {},
         )
 
     def _evaluate_power_issue(self, betyg: dict) -> None:
@@ -661,23 +666,26 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         op = betyg.get("observed_power") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_BATTERY_KW)
         measured = float(op["kw"]) if op and op.get("kw") else None
-        fire = (
+        fire = False
+        if (
             measured is not None
             and configured
             and configured > 0
             and op.get("n_days", 0) >= _CAP_MATURE_DAYS
-            and abs(measured - configured) / configured >= _POWER_GAP
-        )
+        ):
+            gap = abs(measured - configured) / configured
+            # Raise = high-confidence (small gap); lower = risky (needs a bigger gap).
+            fire = gap >= (_POWER_GAP if measured > configured else _POWER_GAP_SHRINK)
         self._set_measured_issue(
             _ISSUE_POWER,
             fire=fire,
             translation_key=_ISSUE_POWER,
             placeholders={
-                "measured": f"{measured:.1f}" if measured is not None else "",
-                "configured": f"{configured:.1f}" if configured else "",
-                "days": str(op.get("n_days", 0)) if op else "0",
-            },
-            data={"measured_kw": measured} if measured is not None else {},
+                "measured": f"{measured:.1f}",
+                "configured": f"{configured:.1f}",
+                "days": str(op.get("n_days", 0)),
+            } if fire else {},
+            data={"measured_kw": measured} if fire else {},
         )
 
     def _evaluate_efficiency_issue(self, betyg: dict) -> None:
@@ -691,6 +699,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             measured is not None
             and configured
             and oe.get("n_days", 0) >= _CAP_MATURE_DAYS
+            # A home-battery AC round-trip can't realistically reach ~1.0; a measured value that
+            # high is a clamp/window-boundary artefact, so don't offer to adopt it.
+            and measured < _EFF_MAX_PLAUSIBLE
             and abs(measured - float(configured)) >= _EFF_ABS_GAP
         )
         self._set_measured_issue(
@@ -698,11 +709,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             fire=fire,
             translation_key=_ISSUE_EFFICIENCY,
             placeholders={
-                "measured": f"{measured:.2f}" if measured is not None else "",
-                "configured": f"{float(configured):.2f}" if configured else "",
-                "days": str(oe.get("n_days", 0)) if oe else "0",
-            },
-            data={"measured_eff": measured} if measured is not None else {},
+                "measured": f"{measured:.2f}",
+                "configured": f"{float(configured):.2f}",
+                "days": str(oe.get("n_days", 0)),
+            } if fire else {},
+            data={"measured_eff": measured} if fire else {},
         )
 
     # ------------------------------------------------------------------
