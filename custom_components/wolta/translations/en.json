@@ -7,6 +7,17 @@
     "profile_full": {
       "title": "Wolta profile is full",
       "description": "Your Wolta profile has reached its storage limit (about 2.3 years of 15-minute data), so new energy data can no longer be uploaded. Your grade and economy figures keep working on the stored history. To start fresh, remove the integration and set it up again."
+    },
+    "measured_capacity": {
+      "title": "Wolta measured a different battery capacity",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Adopt the measured battery capacity?",
+            "description": "Over {days} days, Wolta measured your battery's usable capacity at the meter as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measured value is what your battery actually delivers to the house (AC side) — not the rated/nameplate or the cell figure your battery app may show at 100 %, which is higher because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on your hardware, so this value should match what the battery really moves.\n\nAdopt {measured} kWh? This sets the battery capacity and clears any reserve (the measured value already excludes it). If you simply haven't fully charged or discharged in this period, you can ignore this and dismiss the issue."
+          }
+        }
+      }
     }
   },
   "config": {
@@ -63,7 +74,7 @@
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
-          "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
+          "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side). This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
           "battery_kw": "Maximum battery charge/discharge power.",
           "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
           "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
@@ -132,7 +143,7 @@
               "reserve_pct": "Reserve floor (%)"
             },
             "data_description": {
-              "battery_kwh": "Usable battery capacity — the energy the battery can actually store and discharge. Not the rated/nameplate capacity: batteries with a SoC floor or reserve (e.g. Emaldo) have less usable than rated.",
+              "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side). This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
               "battery_kw": "Maximum charge/discharge power in kW.",
               "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."

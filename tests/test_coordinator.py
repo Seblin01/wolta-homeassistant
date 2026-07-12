@@ -1326,3 +1326,75 @@ async def test_trigger_recompute_success_clears_backoff(hass: HomeAssistant, moc
     coordinator.data = MagicMock(results={"period": {"end": "2025-05-31"}})
     await coordinator.async_trigger_recompute()
     assert "recompute_blocked_until" not in coordinator._state
+
+
+# ---------------------------------------------------------------------------
+# Measured-capacity adopt gate (_evaluate_capacity_issue)
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_BATTERY_KWH as _CBK,
+    CONF_RESERVE_PCT as _CRP,
+)
+
+_CAP_ISSUE_ID = "measured_capacity_test_entry_id"
+
+
+def _oc_results(kwh, *, n_days=90, plateau=20):
+    return {"betyg": {"observed_capacity": {
+        "kwh": kwh, "n_days": n_days, "plateau_days": plateau}}}
+
+
+async def _cap_coordinator(hass, mock_entry, **entry_over):
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    mock_entry.data = {**ENTRY_DATA, **entry_over}
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_fires_on_mature_gap(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0})
+    c._evaluate_capacity_issue(_oc_results(11.0))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID)
+    assert issue is not None
+    assert issue.data["measured_kwh"] == 11.0
+    assert issue.data["entry_id"] == "test_entry_id"
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_not_fired_when_immature(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0})
+    c._evaluate_capacity_issue(_oc_results(11.0, n_days=40))   # < 60 dygn
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_not_fired_weak_plateau(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0})
+    c._evaluate_capacity_issue(_oc_results(11.0, plateau=5))   # < 10 platå-dygn
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_not_fired_within_tolerance(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 11.5})
+    c._evaluate_capacity_issue(_oc_results(11.0))              # gap ~4 % < 15 %
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_accounts_for_reserve(hass, mock_entry):
+    """Reserv-bryggan: 13 kWh full + 10 % reserv → effektivt 11,7; uppmätt 11,7 → matchar,
+    ingen issue (bevisar att reserven vägs in, inte dubbelräknas)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 13.0, _CRP: 10.0})
+    c._evaluate_capacity_issue(_oc_results(11.7))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_cleared_when_no_observed(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0})
+    c._evaluate_capacity_issue(_oc_results(11.0))             # skapa
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is not None
+    c._evaluate_capacity_issue({"betyg": None})              # ingen oc → rensa
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None

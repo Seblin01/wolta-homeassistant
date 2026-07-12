@@ -79,6 +79,19 @@ _PROFILE_SYNC_INTERVAL = timedelta(minutes=5)
 # Issue IDs
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
 _ISSUE_PROFILE_FULL = "profile_full"
+_ISSUE_CAPACITY = "measured_capacity"
+
+# Measured-capacity adopt gate (conservative: the backend's observed_capacity is an all-time
+# LOWER bound, so we only propose adopting it when we're confident the entered value is wrong).
+#   MATURE_DAYS   – enough history that the plateau is trustworthy (not one lucky summer week)
+#   PLATEAU_DAYS  – the observed ceiling recurred on this many days (real cap, not a one-off)
+#   GAP           – ignore differences smaller than this vs the configured effective window
+# All-time monotonicity + the GAP threshold give natural hysteresis: after adopting, the
+# effective window == measured, the gap collapses, and it can only re-fire on a genuine
+# upward ratchet (never ping-pong down).
+_CAP_MATURE_DAYS = 60
+_CAP_PLATEAU_DAYS = 10
+_CAP_GAP = 0.15
 
 # Profile fields mirrored from the server into entry.data (cache only – the server
 # is the source of truth; entry.data is never used as a diff base since v0.10.0).
@@ -311,6 +324,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
+            self._evaluate_capacity_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
                 datetime.fromisoformat(last_uploaded_str)
@@ -569,6 +583,53 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     )
             except (ValueError, AttributeError):
                 pass
+
+    def _evaluate_capacity_issue(self, results: dict) -> None:
+        """Raise (or clear) a fixable repair when the backend's measured usable capacity
+        clearly disagrees with the configured battery capacity.
+
+        The server exposes observed_capacity = the all-time DISPATCHABLE window measured at
+        the meter (what the battery has demonstrably moved). We compare it against the
+        configured EFFECTIVE window (battery_kwh reduced by any reserve), and only surface a
+        proposal when it's mature and the gap is real (see the _CAP_* gate). The fix flow
+        adopts it as battery_kwh with reserve cleared, since the measurement already excludes
+        the reserve — so the reserve must NOT be applied on top again (repairs.py)."""
+        # Per-entry issue id so multiple Wolta profiles don't collide (the fix flow must
+        # PATCH the right profile).
+        issue_id = f"{_ISSUE_CAPACITY}_{self.config_entry.entry_id}"
+        betyg = results.get("betyg")
+        oc = betyg.get("observed_capacity") if isinstance(betyg, dict) else None
+        if not oc or not oc.get("kwh"):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        configured = self.config_entry.data.get(CONF_BATTERY_KWH)
+        reserve = self.config_entry.data.get(CONF_RESERVE_PCT) or 0.0
+        effective = configured * (1.0 - reserve / 100.0) if configured else None
+        measured = float(oc["kwh"])
+        fire = (
+            effective
+            and effective > 0
+            and oc.get("n_days", 0) >= _CAP_MATURE_DAYS
+            and oc.get("plateau_days", 0) >= _CAP_PLATEAU_DAYS
+            and abs(measured - effective) / effective >= _CAP_GAP
+        )
+        if fire:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=_ISSUE_CAPACITY,
+                translation_placeholders={
+                    "measured": f"{measured:.1f}",
+                    "configured": f"{effective:.1f}",
+                    "days": str(oc.get("n_days", 0)),
+                },
+                data={"measured_kwh": measured, "entry_id": self.config_entry.entry_id},
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
     # ------------------------------------------------------------------
     # Button helper

@@ -7,6 +7,17 @@
     "profile_full": {
       "title": "Wolta-profilen är full",
       "description": "Din Wolta-profil har nått sin lagringsgräns (cirka 2,3 år av 15-minutersdata), så ny energidata kan inte längre laddas upp. Betyg och ekonomi fortsätter fungera på den lagrade historiken. För att börja om: ta bort integrationen och lägg till den igen."
+    },
+    "measured_capacity": {
+      "title": "Wolta mätte en annan batterikapacitet",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Använd den uppmätta batterikapaciteten?",
+            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan) — inte märkt kapacitet eller cell-talet din batteri-app kan visa vid 100 %, som är högre eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på din hårdvara, så värdet bör motsvara vad batteriet verkligen flyttar.\n\nAnvänd {measured} kWh? Det sätter batterikapaciteten och nollar eventuell reserv (det uppmätta värdet exkluderar den redan). Har du bara inte fulladdat eller urladdat helt under perioden kan du strunta i detta och avfärda ärendet."
+          }
+        }
+      }
     }
   },
   "config": {
@@ -63,7 +74,7 @@
           "invert_battery": "Batteriladdning/urladdning omvänd"
         },
         "data_description": {
-          "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. Batterier med SoC-golv eller reserv (t.ex. Emaldo) har mindre användbart än märkt. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
+          "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan). Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
           "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt.",
           "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
           "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger.",
@@ -132,7 +143,7 @@
               "reserve_pct": "Reservgolv (%)"
             },
             "data_description": {
-              "battery_kwh": "Användbar batterikapacitet – den energi batteriet faktiskt kan lagra och ladda ur, inte märkt/nominell kapacitet. Batterier med SoC-golv eller reserv (t.ex. Emaldo) har mindre användbart än märkt. (T.ex. Sonnen visar användbar kapacitet i sin app.)",
+              "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan). Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
               "battery_kw": "Maximal ladd-/urladdningseffekt i kW.",
               "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
