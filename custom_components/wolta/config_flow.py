@@ -48,6 +48,7 @@ from .const import (
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
     CONF_INVERT_BATTERY,
+    CONF_NAMEPLATE_KWH,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
@@ -327,6 +328,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
                     min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
                 ),
+                vol.Optional(CONF_NAMEPLATE_KWH): _number_selector(
+                    min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
+                ),
                 vol.Required(CONF_BATTERY_KW, default=DEFAULT_BATTERY_KW): _number_selector(
                     min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"
                 ),
@@ -465,6 +469,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             surcharge_ore: float | None = self._plant_data.get(CONF_SURCHARGE_ORE)
             export_extra_ore: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_ORE)
             reserve_pct: float | None = self._plant_data.get(CONF_RESERVE_PCT)
+            nameplate_kwh: float | None = self._plant_data.get(CONF_NAMEPLATE_KWH)
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -482,6 +487,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     surcharge_ore=surcharge_ore,
                     export_extra_ore=export_extra_ore,
                     reserve_pct=reserve_pct,
+                    nameplate_kwh=nameplate_kwh,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -520,6 +526,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
                 if reserve_pct is not None:
                     entry_data[CONF_RESERVE_PCT] = reserve_pct
+                if nameplate_kwh is not None:
+                    entry_data[CONF_NAMEPLATE_KWH] = nameplate_kwh
                 entry_data[CONF_CREATED_BY_HA] = True
                 entry_data[CONF_INVERT_BATTERY] = bool(
                     self._plant_data.get(CONF_INVERT_BATTERY, False)
@@ -615,7 +623,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._entities_data.get(CONF_SOLAR):
             entry_data[CONF_SOLAR] = self._entities_data[CONF_SOLAR]
         for key in (
-            CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF,
+            CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW, CONF_EFF,
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
         ):
@@ -710,7 +718,7 @@ _SEC_BATTERY = "battery"
 _SEC_ECONOMY = "economy"
 _SEC_TARIFFS = "tariffs"
 _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
-    _SEC_BATTERY: (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT),
+    _SEC_BATTERY: (CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
     _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE),
 }
@@ -851,6 +859,7 @@ class WoltaOptionsFlow(OptionsFlow):
         battery_schema = vol.Schema(dict([
             (vol.Required(CONF_BATTERY_KWH, default=srv.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH)),
              _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
+            _opt(CONF_NAMEPLATE_KWH, _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
             (vol.Required(CONF_BATTERY_KW, default=srv.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW)),
              _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")),
             (vol.Required(CONF_EFF, default=srv.get(CONF_EFF, DEFAULT_EFF)),

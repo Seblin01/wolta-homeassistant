@@ -11,6 +11,9 @@ CONF_GRID_IN = "grid_in"
 CONF_GRID_OUT = "grid_out"
 CONF_SOLAR = "solar"
 CONF_BATTERY_KWH = "battery_kwh"
+# Nameplate (manufacturer-rated) capacity; battery_kwh above is the USABLE capacity.
+# Backend spec 2026-07-14: the ratio usable/nameplate feeds the sizing sweep.
+CONF_NAMEPLATE_KWH = "nameplate_kwh"
 CONF_BATTERY_KW = "battery_kw"
 CONF_EFF = "eff"
 CONF_RESERVE_PCT = "reserve_pct"
