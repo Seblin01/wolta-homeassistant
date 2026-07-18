@@ -2204,3 +2204,52 @@ async def test_full_flow_without_nameplate_kwh_not_sent(hass: HomeAssistant) -> 
     _, kwargs = mock_client.create_profile.call_args
     assert kwargs["nameplate_kwh"] is None
     assert CONF_NAMEPLATE_KWH not in result["data"]
+
+
+@pytest.mark.asyncio
+async def test_options_flow_hides_cost_for_plant_scoped_profile(hass: HomeAssistant) -> None:
+    """cost_scope='plant' (adopted wolta.se guide profile whose scalar price covers the
+    whole plant): the battery-only cost field is hidden AND skipped in the diff – an
+    absent optional field otherwise means 'actively cleared' and a PATCH null would
+    wipe the plant price on every save."""
+    entry = _make_mock_entry(hass, extra_data={CONF_COST_SEK: 250000.0})
+
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"profile_token": TOKEN})
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, cost_scope="plant", cost_sek=250000.0)
+    )
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == FlowResultType.FORM
+
+        # Ändra ett tariff-fält (tvingar en PATCH); cost-fältet finns inte i formuläret.
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_ORE: 30.0,
+            }),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    kwargs = mock_client.patch_profile.call_args.kwargs
+    assert kwargs == {"grid_var_ore": 30.0}, (
+        "plant-scoped cost_sek must be neither patched nor nulled"
+    )

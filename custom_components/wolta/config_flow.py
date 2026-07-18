@@ -764,10 +764,21 @@ class WoltaOptionsFlow(OptionsFlow):
                     if key in sec_input:
                         flat[key] = sec_input[key]
 
+            # cost_scope (backend 2026-07-18): "plant" = the scalar price covers the
+            # WHOLE plant (solar + battery; wolta.se guide profiles adopted into HA).
+            # Our field is explicitly battery-only, so it is hidden from the form for
+            # those profiles (the price is edited on wolta.se where the labels match) –
+            # and must be skipped in the diff too: an absent optional field otherwise
+            # means "actively cleared" → PATCH null would wipe the plant price on
+            # every save. Older backends never send cost_scope → False → unchanged.
+            plant_scoped_cost = self._server.get("cost_scope") == "plant"
+
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
             for sec, fields in _SECTION_FIELDS.items():
                 for key in fields:
+                    if key == CONF_COST_SEK and plant_scoped_cost:
+                        continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
                     if key in _REQUIRED_FIELDS:
@@ -866,10 +877,13 @@ class WoltaOptionsFlow(OptionsFlow):
              _number_selector(min_val=0.5, max_val=1.0, step=0.01)),
             _opt(CONF_RESERVE_PCT, _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
         ]))
-        economy_schema = vol.Schema(dict([
-            _opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr")),
-            _opt(CONF_PURCHASE_DATE, _date_selector()),
-        ]))
+        # Se plant_scoped_cost-kommentaren i diff-grenen ovan: fältet döljs helt för
+        # plant-scopade profiler (redigeras på wolta.se där etiketterna stämmer).
+        economy_schema = vol.Schema(dict(
+            ([] if srv.get("cost_scope") == "plant"
+             else [_opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"))])
+            + [_opt(CONF_PURCHASE_DATE, _date_selector())]
+        ))
         tariffs_schema = vol.Schema(dict([
             _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),

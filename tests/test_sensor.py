@@ -714,3 +714,21 @@ def test_optimeringsbetyg_applied_reserve_absent_when_missing():
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     attrs = s.extra_state_attributes
     assert "applied_reserve" not in attrs
+
+
+# ---------------------------------------------------------------------------
+# capex_scope attribute (backend 2026-07-18)
+# ---------------------------------------------------------------------------
+
+
+def test_irr_payback_capex_scope_attribute_present():
+    results = {**RESULTS_FULL, "decision": {**RESULTS_FULL["decision"], "capex_scope": "plant"}}
+    for key in ("irr", "payback"):
+        s = _sensor(key, results)
+        assert s.extra_state_attributes.get("capex_scope") == "plant"
+
+
+def test_irr_payback_capex_scope_attribute_absent_on_older_api():
+    for key in ("irr", "payback"):
+        s = _sensor(key, RESULTS_FULL)  # ingen capex_scope i svaret (äldre backend)
+        assert "capex_scope" not in s.extra_state_attributes

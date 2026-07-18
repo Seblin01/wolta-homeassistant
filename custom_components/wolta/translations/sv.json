@@ -192,6 +192,7 @@
           },
           "economy": {
             "name": "Ekonomi",
+            "description": "Angav du ett samlat pris för hela anläggningen (sol + batteri) på wolta.se? Då hanteras inköpspriset där, och prisfältet döljs här.",
             "data": {
               "cost_sek": "Inköpspris batteri (kr) – endast batteriet",
               "purchase_date": "Inköpsdatum"

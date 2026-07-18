@@ -192,6 +192,7 @@
           },
           "economy": {
             "name": "Economy",
+            "description": "Entered a combined price for the whole plant (solar + battery) on wolta.se? Then the purchase price is managed there, and the price field is hidden here.",
             "data": {
               "cost_sek": "Battery purchase price (kr) – battery only",
               "purchase_date": "Purchase date"

@@ -117,6 +117,18 @@ def _applied_tariff_attr(results: dict) -> dict[str, Any]:
     return {"applied_tariff": applied}
 
 
+def _capex_scope_attr(results: dict) -> dict[str, Any]:
+    """capex_scope (backend 2026-07-18): whether the decision block's irr/payback are
+    attributed to the battery alone ("battery", plan 33 – native HA profiles) or to the
+    whole plant ("plant" – profiles whose scalar purchase price covers solar + battery,
+    e.g. wolta.se guide profiles adopted into HA). Omitted entirely when the backend
+    hasn't sent it (older API), so cached responses stay clean."""
+    scope = (results.get("decision") or {}).get("capex_scope")
+    if scope is None:
+        return {}
+    return {"capex_scope": scope}
+
+
 def _applied_reserve_attr(results: dict) -> dict[str, Any]:
     """applied_reserve (plan 38 / issue #1): the SoC reserve floor the grade
     calculation actually used, when one is configured. Top-level key on /results —
@@ -246,7 +258,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         ),
         available_fn=_decision_available,
         attr_fn=lambda data: (
-            {}
+            _capex_scope_attr(data.results)
             if _decision_available(data.results)
             else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
@@ -258,7 +270,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         value_fn=lambda r: (r.get("decision") or {}).get("payback_years"),
         available_fn=_decision_available,
         attr_fn=lambda data: (
-            {}
+            _capex_scope_attr(data.results)
             if _decision_available(data.results)
             else {"reason": "economy calculations are only available for Swedish price zones"}
         ),
