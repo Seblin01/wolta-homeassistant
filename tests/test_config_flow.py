@@ -2236,6 +2236,14 @@ async def test_options_flow_hides_cost_for_plant_scoped_profile(hass: HomeAssist
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] == FlowResultType.FORM
 
+        # Formuläret ska SAKNA cost-fältet (inte bara diffen skippa det) – annars vore
+        # en redigering en tyst no-op i st f dolt fält (max-review-fynd 2026-07-18).
+        schema_dict = result["data_schema"].schema
+        econ_section = next(v for k, v in schema_dict.items() if str(k) == "economy")
+        econ_keys = {str(k) for k in econ_section.schema.schema}
+        assert CONF_COST_SEK not in econ_keys
+        assert CONF_PURCHASE_DATE in econ_keys
+
         # Ändra ett tariff-fält (tvingar en PATCH); cost-fältet finns inte i formuläret.
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
