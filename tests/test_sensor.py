@@ -472,17 +472,18 @@ def test_unique_id_format():
 
 
 def test_device_info_configuration_url():
-    """The device's configuration_url points to the token-mode page (?profile=) on wolta.se."""
+    """The device's configuration_url points to the plant hub /anlaggning (token mode:
+    ?profile=) – /optimeringsbetyg is the public surface since the 2026-07-15 IA."""
     sensor = _sensor("optimeringsbetyg", RESULTS_FULL)
     url = sensor._attr_device_info["configuration_url"]
-    assert url == "https://wolta.se/optimeringsbetyg?profile=tok-test"
+    assert url == "https://wolta.se/anlaggning?profile=tok-test"
 
 
 def test_profile_url_quotes_token():
     """Token is URL-encoded (future-proofing in case the token format changes)."""
     from custom_components.wolta.const import profile_url
 
-    assert profile_url("a/b+c") == "https://wolta.se/optimeringsbetyg?profile=a%2Fb%2Bc"
+    assert profile_url("a/b+c") == "https://wolta.se/anlaggning?profile=a%2Fb%2Bc"
 
 
 # ---------------------------------------------------------------------------

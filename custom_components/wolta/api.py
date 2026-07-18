@@ -115,6 +115,7 @@ class WoltaApiClient:
         export_extra_ore: float | None = None,
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
+        nameplate_kw: float | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -145,6 +146,8 @@ class WoltaApiClient:
             payload["reserve_pct"] = reserve_pct
         if nameplate_kwh is not None:
             payload["nameplate_kwh"] = nameplate_kwh
+        if nameplate_kw is not None:
+            payload["nameplate_kw"] = nameplate_kw
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
 

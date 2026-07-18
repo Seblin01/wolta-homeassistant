@@ -1131,6 +1131,10 @@ def _server_profile(entry, **overrides):
 _OPT_SECTION_OF = {
     CONF_BATTERY_KWH: "battery", CONF_BATTERY_KW: "battery", CONF_EFF: "battery",
     CONF_RESERVE_PCT: "battery",
+    # Strängnycklar (inte CONF_-konstanter): nameplate-fälten testas med lokala
+    # importer i sina testfall, så en saknad konstant fäller bara de testen –
+    # inte hela filens collection.
+    "nameplate_kwh": "battery", "nameplate_kw": "battery",
     CONF_COST_SEK: "economy", CONF_PURCHASE_DATE: "economy",
     CONF_GRID_VAR_ORE: "tariffs", CONF_SURCHARGE_ORE: "tariffs",
     CONF_EXPORT_EXTRA_ORE: "tariffs",
@@ -2204,6 +2208,162 @@ async def test_full_flow_without_nameplate_kwh_not_sent(hass: HomeAssistant) -> 
     _, kwargs = mock_client.create_profile.call_args
     assert kwargs["nameplate_kwh"] is None
     assert CONF_NAMEPLATE_KWH not in result["data"]
+
+
+# ---------------------------------------------------------------------------
+# nameplate_kw field (v0.15.0 – parity with nameplate_kwh, backend spec 2026-07-15)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_nameplate_kw_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """nameplate_kw filled in the plant step is passed to create_profile and cached."""
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW
+
+    mock_client = _mock_client()
+    step_user_with_nameplate = {**STEP_USER_DATA, CONF_NAMEPLATE_KW: 8.0}
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_nameplate
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.create_profile.assert_awaited_once()
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["nameplate_kw"] == 8.0
+    assert result["data"][CONF_NAMEPLATE_KW] == 8.0
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_nameplate_kw_not_sent(hass: HomeAssistant) -> None:
+    """Leaving nameplate_kw blank means None is sent and nothing is cached."""
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW
+
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["nameplate_kw"] is None
+    assert CONF_NAMEPLATE_KW not in result["data"]
+
+
+@pytest.mark.asyncio
+async def test_options_flow_changes_nameplate_kw(hass: HomeAssistant) -> None:
+    """Changing nameplate_kw in the options flow → patch_profile gets the new value."""
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW
+
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, nameplate_kw=6.0)
+    )
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_NAMEPLATE_KW: 8.0,  # changed (server has 6.0)
+            }),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"nameplate_kw": 8.0}
+    mock_coordinator.async_trigger_recompute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_nameplate_kw(hass: HomeAssistant) -> None:
+    """Clearing a prefilled nameplate_kw → PATCH null (the clearable-field pattern)."""
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW  # noqa: F401
+
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, nameplate_kw=6.0)
+    )
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # nameplate_kw absent = actively cleared
+            }),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"nameplate_kw": None}
 
 
 @pytest.mark.asyncio

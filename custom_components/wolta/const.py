@@ -15,6 +15,9 @@ CONF_BATTERY_KWH = "battery_kwh"
 # Backend spec 2026-07-14: the ratio usable/nameplate feeds the sizing sweep.
 CONF_NAMEPLATE_KWH = "nameplate_kwh"
 CONF_BATTERY_KW = "battery_kw"
+# Nameplate (manufacturer-rated) power; battery_kw above is the DELIVERABLE AC power.
+# Backend spec 2026-07-15: shown as a note on the grade ("we measured X kW usable").
+CONF_NAMEPLATE_KW = "nameplate_kw"
 CONF_EFF = "eff"
 CONF_RESERVE_PCT = "reserve_pct"
 CONF_SHARE = "share"
@@ -47,9 +50,13 @@ WOLTA_API_BASE = "https://wolta.se"
 
 
 def profile_url(token: str) -> str:
-    """Link to the profile's full results on wolta.se (token mode: ?profile=)."""
+    """Link to the profile's plant hub on wolta.se (token mode: ?profile=).
+
+    /anlaggning since the 2026-07-15 IA split (the hub owns all stored-profile
+    views + editing; /optimeringsbetyg is the public surface with smart landing).
+    """
     from urllib.parse import quote
-    return f"{WOLTA_API_BASE}/optimeringsbetyg?profile={quote(token, safe='')}"
+    return f"{WOLTA_API_BASE}/anlaggning?profile={quote(token, safe='')}"
 
 # Supported price zones for the zone selector (SP3 multi-land requirement).
 # Covers all 26 countries in the Wolta backend; labels are shown in the UI.

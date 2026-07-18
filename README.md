@@ -107,6 +107,7 @@ Because a linked profile belongs to your wolta.se usage, **removing the integrat
 Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration. The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
+- Nameplate capacity (kWh) and nameplate power (kW) — optional manufacturer-rated figures. The grade itself always uses the usable/deliverable values above; the rated figures let wolta.se compare per-kWh prices fairly in the expansion calculator and explain measured-vs-rated differences. Clearing a field removes the value.
 - Battery purchase price and purchase date — used for IRR, payback and this year's actual savings. Clearing a field removes the value.
 - Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Clearing a field reverts it to your country's standard tariff.
 - Reserve floor (%) — the share of usable capacity your control system never discharges below. Clearing the field removes the reserve.
