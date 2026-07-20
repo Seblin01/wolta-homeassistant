@@ -77,14 +77,25 @@ def _decision_available(results: dict) -> bool:
     return results.get("decision") is not None
 
 
+def _measured_battery_value(results: dict) -> float | None:
+    """betyg.holistic.measured_total_sek, but ONLY from a MATURE grade (score_on set -
+    same maturity gate as the grade sensor). A fallback-mode grade (< 30 days of data)
+    still carries measured_total_sek, ANNUALIZED with 365/n_days - e.g. three summer
+    days x 122 presented as a yearly figure (found on Sebastian's 3-day plant,
+    2026-07-20). That number must never surface as "battery value per year"."""
+    holistic = (results.get("betyg") or {}).get("holistic") or {}
+    if holistic.get("score_on") is None:
+        return None
+    return holistic.get("measured_total_sek")
+
+
 def _battery_value(results: dict) -> float | None:
-    """Battery value per year – MEASURED from the grade calculation when available
+    """Battery value per year – MEASURED from a mature grade when available
     (betyg.holistic.measured_total_sek, the same figure wolta.se shows),
     otherwise the decision engine's modeled battery share (avg_battery_sek).
     NEVER decision.avg_annual_sek – that's the whole plant's savings
     including the solar value (plan 33)."""
-    holistic = (results.get("betyg") or {}).get("holistic") or {}
-    measured = holistic.get("measured_total_sek")
+    measured = _measured_battery_value(results)
     if measured is not None:
         return measured
     return (results.get("decision") or {}).get("avg_battery_sek")
@@ -212,10 +223,11 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_battery_value_available,
         attr_fn=lambda data: (
             {
+                # Samma mognadsgrind som value_fn: ett omoget betyg får inte stämpla
+                # modellvärdet som "measured".
                 "source": (
                     "measured"
-                    if ((data.results.get("betyg") or {}).get("holistic") or {})
-                    .get("measured_total_sek") is not None
+                    if _measured_battery_value(data.results) is not None
                     else "modelled"
                 ),
                 "plant_total_sek": (data.results.get("decision") or {}).get(
