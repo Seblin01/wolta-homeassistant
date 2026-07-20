@@ -238,6 +238,6 @@ class WoltaApiClient:
     async def delete(self, token: str) -> None:
         """Right-to-erasure: delete the profile and all associated data.
 
-        DELETE /api/v1/calibration/{token}
+        DELETE /api/v1/calibration (token in the Authorization: Bearer header).
         """
-        await self._request("DELETE", f"/calibration/{token}")
+        await self._request("DELETE", "/calibration", headers=self._auth(token))

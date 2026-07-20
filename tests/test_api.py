@@ -86,6 +86,28 @@ async def test_429_raises_rate_limit_error_with_retry_after(
     assert exc_info.value.retry_after == 3600
 
 
+@pytest.mark.asyncio
+async def test_recompute_sends_bearer_header(aioclient_mock: AiohttpClientMocker):
+    """recompute carries the token in the Authorization header, not the URL."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/recompute", status=202, json={})
+    client = _client(aioclient_mock)
+    await client.recompute(TOKEN)
+    assert aioclient_mock.mock_calls[-1][3]["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_delete_sends_bearer_header(aioclient_mock: AiohttpClientMocker):
+    """delete (right-to-erasure) hits the segment-less path with the token in the
+    Authorization header - the token no longer appears in the URL."""
+    aioclient_mock.delete(f"{BASE_URL}/api/v1/calibration", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.delete(TOKEN)
+    call = aioclient_mock.mock_calls[-1]
+    assert call[0].lower() == "delete"
+    assert str(call[1]).endswith("/api/v1/calibration")  # ingen token i URL:en
+    assert call[3]["Authorization"] == f"Bearer {TOKEN}"
+
+
 # ---------------------------------------------------------------------------
 # put_data chunking
 # ---------------------------------------------------------------------------
