@@ -733,3 +733,30 @@ def test_irr_payback_capex_scope_attribute_absent_on_older_api():
     for key in ("irr", "payback"):
         s = _sensor(key, RESULTS_FULL)  # ingen capex_scope i svaret (äldre backend)
         assert "capex_scope" not in s.extra_state_attributes
+
+
+def test_batterivarde_ar_fallback_grade_never_shows_annualized_scrap():
+    """Sebastians 3-dygnsanläggning (2026-07-20): ett OMOGET betyg (fallback-läge,
+    score_on=None) bär ändå measured_total_sek - UPPRÄKNAT med 365/n_days, dvs. tre
+    sommardagar x 122 presenterade som årsvärde. Mognadsgrinden är score_on (samma som
+    betygssensorn): utan score → aldrig measured; utan decision → otillgänglig."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {"holistic": {"score_on": None, "measured_total_sek": 2566.0}},
+        "decision": None,
+    }
+    s = _sensor("batterivarde_ar", results)
+    assert s.native_value is None
+    assert s.available is False
+
+
+def test_batterivarde_ar_fallback_grade_with_decision_says_modelled():
+    """Omoget betyg MEN varm decision → modellvärdet används, och source-attributet måste
+    säga 'modelled' (inte 'measured' bara för att measured_total_sek råkar finnas)."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {"holistic": {"score_on": None, "measured_total_sek": 2566.0}},
+    }
+    s = _sensor("batterivarde_ar", results)
+    assert s.native_value == pytest.approx(2900.0)
+    assert s.extra_state_attributes.get("source") == "modelled"
