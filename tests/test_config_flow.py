@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import string
+
 import hashlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1767,7 +1769,7 @@ async def test_options_flow_get_failure_aborts(hass: HomeAssistant) -> None:
 
 from datetime import datetime, timezone  # noqa: E402
 
-from custom_components.wolta.const import CONF_CREATED_BY_HA  # noqa: E402
+from custom_components.wolta.const import CONF_CREATED_BY_HA, CONF_PLANT_ID  # noqa: E402
 
 LINK_TOKEN = "tok-linked-xyz"
 LINK_PROFILE = {
@@ -2040,7 +2042,38 @@ async def test_link_flow_adopts_web_profile(hass: HomeAssistant) -> None:
             result["flow_id"], STEP_ENTITIES_DATA)
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    mock_client.adopt_profile.assert_awaited_once_with(LINK_TOKEN)
+    # The adopt call also stamps this entry's stable plant identity on the adopted row.
+    plant_id = result["data"][CONF_PLANT_ID]
+    mock_client.adopt_profile.assert_awaited_once_with(LINK_TOKEN, client_plant_id=plant_id)
+
+
+@pytest.mark.asyncio
+async def test_link_flow_stores_plant_id(hass: HomeAssistant) -> None:
+    """A linked entry carries the same plant id it stamped during adopt (128-bit hex)."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    # Det som betyder något är att id:t vi SKICKADE är id:t vi LAGRAR – divergerar de blir
+    # dedupen tyst verkningslös vid nästa reauth.
+    plant_id = result["data"][CONF_PLANT_ID]
+    sent = mock_client.adopt_profile.await_args.kwargs["client_plant_id"]
+    assert sent == plant_id, "skickat och lagrat id måste vara samma"
+    assert len(plant_id) == 32 and all(c in string.hexdigits for c in plant_id)
 
 
 @pytest.mark.asyncio
@@ -2421,3 +2454,100 @@ async def test_options_flow_hides_cost_for_plant_scoped_profile(hass: HomeAssist
     assert kwargs == {"grid_var_ore": 30.0}, (
         "plant-scoped cost_sek must be neither patched nor nulled"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stable plant identity (backend plant_fingerprint) — v0.16.0
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_flow_sends_and_stores_plant_id(hass: HomeAssistant) -> None:
+    """The create path mints a 128-bit id, sends it as client_plant_id and stores it.
+
+    Without it a re-onboarded plant gets a brand new backend row: the corpus counts one
+    plant twice and the old row is orphaned with its streamed history.
+    """
+    mock_client = _mock_client()
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "create"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_USER_DATA)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_PRIVACY_DATA)
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    sent = mock_client.create_profile.await_args.kwargs["client_plant_id"]
+    stored = result["data"][CONF_PLANT_ID]
+    assert sent == stored, "the id we sent must be the id we persist"
+    assert len(stored) == 32 and all(c in string.hexdigits for c in stored)
+
+
+@pytest.mark.asyncio
+async def test_reauth_reuses_stored_plant_id(hass: HomeAssistant) -> None:
+    """Reauth must send the ENTRY's id, not the fresh flow object's minted one.
+
+    Reauth runs in a new flow instance; sending its minted id would present the plant as a
+    new one and abandon whatever history survived the purge.
+    """
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    data: dict[str, Any] = {
+        CONF_TOKEN: "old-token", CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"],
+        CONF_GRID_IN: ["sensor.c"], CONF_GRID_OUT: ["sensor.d"],
+        CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9, CONF_SHARE: False,
+        CONF_PLANT_ID: "a" * 32,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="uid-1")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client("new-token")
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    assert mock_client.create_profile.await_args.kwargs["client_plant_id"] == "a" * 32
+
+
+@pytest.mark.asyncio
+async def test_reauth_backfills_plant_id_from_entry_id(hass: HomeAssistant) -> None:
+    """Pre-v0.16.0 entries have no stored id → fall back to entry_id and persist it, so a
+    later reauth lands on the same plant row."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    data: dict[str, Any] = {
+        CONF_TOKEN: "old-token", CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"],
+        CONF_GRID_IN: ["sensor.c"], CONF_GRID_OUT: ["sensor.d"],
+        CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9, CONF_SHARE: False,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="uid-2")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client("new-token")
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+    assert mock_client.create_profile.await_args.kwargs["client_plant_id"] == entry.entry_id
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PLANT_ID] == entry.entry_id

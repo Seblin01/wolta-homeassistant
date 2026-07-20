@@ -383,3 +383,32 @@ async def test_adopt_profile_404_raises_auth_error(aioclient_mock: AiohttpClient
     client = _client(aioclient_mock)
     with pytest.raises(WoltaAuthError):
         await client.adopt_profile("dead")
+
+
+@pytest.mark.asyncio
+async def test_adopt_profile_sends_client_plant_id(aioclient_mock: AiohttpClientMocker):
+    """adopt carries the stable plant identity so the adopted row can be recognised later."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/{TOKEN}/adopt", json={"adopted": True})
+    client = _client(aioclient_mock)
+    await client.adopt_profile(TOKEN, client_plant_id="deadbeef" * 4)
+    assert aioclient_mock.mock_calls[-1][2] == {"client_plant_id": "deadbeef" * 4}
+
+
+@pytest.mark.asyncio
+async def test_create_profile_sends_client_plant_id(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=10, battery_kw=5, eff=0.9, has_solar=False,
+        share_profile=False, client_plant_id="abc123")
+    assert aioclient_mock.mock_calls[-1][2]["client_plant_id"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_plant_id_when_unset(aioclient_mock: AiohttpClientMocker):
+    """Older call sites (and any path without an id) must not send a null identity."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=10, battery_kw=5, eff=0.9, has_solar=False, share_profile=False)
+    assert "client_plant_id" not in aioclient_mock.mock_calls[-1][2]

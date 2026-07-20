@@ -34,6 +34,19 @@ CONF_INVERT_BATTERY = "invert_battery"
 # history) is not ours to delete when the integration is removed. Missing key = True
 # (every pre-v0.10.0 entry was created by HA → documented delete-on-remove kept).
 CONF_CREATED_BY_HA = "created_by_ha"
+# Stable per-plant identifier sent to the backend as `client_plant_id`, which salts and hashes
+# it into a plant_fingerprint so a re-onboarded plant reuses its existing row instead of
+# creating a duplicate (and orphaning its streamed history).
+#
+# A freshly minted 128-bit random value, NOT the config entry_id: `entry_id` does not exist
+# yet while the user flow is running (HA core builds the ConfigEntry in async_finish_flow,
+# after the step returns CREATE_ENTRY), and it is re-minted on remove+re-add. High entropy is
+# also a security property here — the server hashes the plaintext we send, so the salt protects
+# nothing against someone who can guess the value; only the value's own entropy does.
+# Entries created before v0.16.0 have no stored value; the only path that needs one is reauth,
+# which falls back to the entry_id (available there, since a reauth flow carries the entry) and
+# persists it. No setup-time backfill — nothing else reads the key.
+CONF_PLANT_ID = "plant_id"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

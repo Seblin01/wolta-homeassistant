@@ -116,6 +116,7 @@ class WoltaApiClient:
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
+        client_plant_id: str | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -148,6 +149,10 @@ class WoltaApiClient:
             payload["nameplate_kwh"] = nameplate_kwh
         if nameplate_kw is not None:
             payload["nameplate_kw"] = nameplate_kw
+        # Stable plant identity (see const.CONF_PLANT_ID). Lets the backend recognise a
+        # re-onboarded plant and keep its streamed history instead of starting a new row.
+        if client_plant_id is not None:
+            payload["client_plant_id"] = client_plant_id
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
 
@@ -167,15 +172,25 @@ class WoltaApiClient:
         """
         return await self._request("GET", f"/profile/{token}")
 
-    async def adopt_profile(self, token: str) -> dict:
+    async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.
 
         POST /api/v1/profile/{token}/adopt → 200 {"adopted": bool}. Without this,
         the backend's kind-gate 404s PUT/recompute/results for linked web profiles.
         Raises WoltaAuthError on 404, WoltaApiError(status=422) for battery-less
         profiles.
+
+        client_plant_id stamps this entry's stable plant identity on the adopted row so a
+        later re-onboard finds it. The backend rebinds the row to the id we send, including
+        when the row already carries a different one — that is the normal case when a linked
+        profile is re-linked from a new entry. It refuses (409) only when the id already
+        belongs to a *different* row, so it never takes an identity away from another plant.
+
+        The response carries `plant_id_set`: false means either "already had this id" (a repeat
+        link, the common case) or "no id was sent" — not a failure.
         """
-        return await self._request("POST", f"/profile/{token}/adopt")
+        payload = {} if client_plant_id is None else {"client_plant_id": client_plant_id}
+        return await self._request("POST", f"/profile/{token}/adopt", json=payload)
 
     async def put_data(self, token: str, rows: list[dict]) -> dict:
         """Upload energy rows for the given profile.
