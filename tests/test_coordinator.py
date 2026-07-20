@@ -1484,3 +1484,34 @@ async def test_power_issue_raise_fires_on_small_gap(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 3.0})
     c._evaluate_measured_params(_op_results(3.6))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is not None
+
+
+# ---------------------------------------------------------------------------
+# View-only entries (bound plants): never upload, never recompute
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_view_only_never_uploads(hass: HomeAssistant, mock_entry):
+    """A view-only entry polls results but must never touch the streaming machinery:
+    no stats read, no PUT /data (the server 409s it for bound plants - but the client
+    must not even try), no recompute cadence. The plant's own binding (Sonnen webhook /
+    Reduxi) owns the data."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    mock_entry.data = {CONF_TOKEN: TOKEN, CONF_ZONE: ZONE, CONF_VIEW_ONLY: True}
+    client = _mock_client(results=RESULTS_DONE_JOB_SETTLED)
+    client.get_profile = AsyncMock(side_effect=Exception("sync skipped in test"))
+    coordinator = await _make_coordinator(hass, mock_entry, client)
+
+    with patch(
+        "custom_components.wolta.stats.async_fetch_change",
+        new=AsyncMock(side_effect=AssertionError("view-only far inte lasa statistik")),
+    ):
+        data = await coordinator._async_update_data()
+
+    client.put_data.assert_not_awaited()
+    client.recompute.assert_not_awaited()
+    client.results.assert_awaited_once()
+    assert data.results == RESULTS_DONE_JOB_SETTLED
+    assert data.last_uploaded is None

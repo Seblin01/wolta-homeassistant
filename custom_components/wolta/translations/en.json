@@ -152,6 +152,17 @@
           "solar": "Solar production energy (optional)"
         },
         "data_description": {}
+      },
+      "view_only": {
+        "title": "Add in view-only mode",
+        "description": "This plant already streams its data to wolta.se through its own connection (Sonnen webhook or Reduxi), so Home Assistant will not upload anything to it. You get the Wolta sensors — grade, battery value, savings, IRR, payback — and the recompute button. Everything else is managed on wolta.se. Submit to add the plant in view-only mode."
+      },
+      "reauth_view_only": {
+        "title": "New token for view-only plant",
+        "description": "The saved token no longer works — it was probably renewed on wolta.se. Paste a fresh profile link or token for the plant (log in on wolta.se and create one on the plant page). Nothing is created or changed on wolta.se.",
+        "data": {
+          "profile_input": "Profile link or token"
+        }
       }
     },
     "error": {
@@ -162,8 +173,7 @@
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
-      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
-      "already_streaming": "This plant already streams its data to wolta.se through another connection (Sonnen webhook or Reduxi). Linking it here would make two sources write the same hours. Disconnect that connection on wolta.se first if you want Home Assistant to stream instead."
+      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
