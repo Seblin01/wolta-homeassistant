@@ -273,6 +273,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # semantiken + reauth läser battery_kwh/kw ur entry.data).
                     errors["profile_input"] = "profile_no_battery"
                     return self._show_link_form(errors)
+                # Anläggning som redan strömmas via en bindning (Sonnen-webhook/Reduxi):
+                # stoppa FÖRE adopt. Fullföljd länkning hade gett två skrivare mot samma
+                # timrader (sist vinner per timme, olika mätare) → betyget räknas på en
+                # blandning. Backend vägrar också (409 på adopt + PUT /data), men den här
+                # kollen ger användaren den riktiga förklaringen. 'ha'/saknat fält (äldre
+                # server) blockerar inte - om-länkning av egen HA-profil är normalfallet.
+                transport = (prof.get("derived") or {}).get("transport")
+                if transport in ("sonnen_webhook", "reduxi_mqtt"):
+                    errors["profile_input"] = "already_streaming"
+                    return self._show_link_form(errors)
                 unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
