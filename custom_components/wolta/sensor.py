@@ -78,13 +78,15 @@ def _decision_available(results: dict) -> bool:
 
 
 def _measured_battery_value(results: dict) -> float | None:
-    """betyg.holistic.measured_total_sek, but ONLY from a MATURE grade (score_on set -
-    same maturity gate as the grade sensor). A fallback-mode grade (< 30 days of data)
-    still carries measured_total_sek, ANNUALIZED with 365/n_days - e.g. three summer
-    days x 122 presented as a yearly figure (found on Sebastian's 3-day plant,
-    2026-07-20). That number must never surface as "battery value per year"."""
-    holistic = (results.get("betyg") or {}).get("holistic") or {}
-    if holistic.get("score_on") is None:
+    """betyg.holistic.measured_total_sek, but ONLY from a MATURE grade: score_on set AND
+    not preliminary. A fallback-mode grade (< 7 days) still carries measured_total_sek,
+    ANNUALIZED with 365/n_days - e.g. three summer days x 122 presented as a yearly
+    figure (found on Sebastian's 3-day plant, 2026-07-20) - and a PRELIMINARY grade
+    (7-29 days, backend api 0.43.0) has a real score but the same annualization problem.
+    Neither may surface as "battery value per year"."""
+    betyg = results.get("betyg") or {}
+    holistic = betyg.get("holistic") or {}
+    if holistic.get("score_on") is None or betyg.get("preliminary"):
         return None
     return holistic.get("measured_total_sek")
 
@@ -206,6 +208,11 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "gap_sek": (data.results.get("betyg") or {}).get("gap_sek"),
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
                 "components": (data.results.get("betyg") or {}).get("components"),
+                # Preliminärt betyg (backend api 0.43.0): score från 7 dygn, flaggat tills
+                # 30. Attribut (inte egen sensor) - dashboards/automationer kan märka
+                # osäkerheten utan att betygsentiteten byter identitet.
+                "preliminary": (data.results.get("betyg") or {}).get("preliminary"),
+                "n_days": (data.results.get("betyg") or {}).get("n_days"),
                 **_applied_tariff_attr(data.results),
                 **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),

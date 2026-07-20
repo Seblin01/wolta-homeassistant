@@ -645,6 +645,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         without the user having to know nameplate-vs-usable, AC-vs-DC, etc."""
         betyg = results.get("betyg")
         betyg = betyg if isinstance(betyg, dict) else {}
+        # Preliminärt betyg (backend api 0.43.0): < 30 dygns data. Mätningen av kapacitet/
+        # effekt/verkningsgrad är då systematiskt UNDERSKATTAD (batteriet har inte hunnit
+        # visa hela sitt fönster) → adopt-förslagen vore falska. Vänta tills betyget mognar.
+        if betyg.get("preliminary"):
+            return
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)

@@ -1538,3 +1538,15 @@ async def test_view_only_network_failure_skips_upload_repair_tracking(hass: Home
 
     assert "failure_since" not in coordinator._state, \
         "view-only ska inte räkna mot upload-failure-repairen"
+
+
+@pytest.mark.asyncio
+async def test_measured_params_skipped_for_preliminary_grade(hass, mock_entry):
+    """Ett preliminärt betyg (< 30 dygns data, backend api 0.43.0) får inte driva
+    measured-params-repairs: 7 dygns observerad kapacitet är systematiskt UNDERSKATTAD
+    (batteriet har inte hunnit visa hela sitt fönster) → falska adopt-förslag."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0})
+    results = _oc_results(11.0)
+    results["betyg"]["preliminary"] = True
+    c._evaluate_measured_params(results)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None

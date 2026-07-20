@@ -760,3 +760,36 @@ def test_batterivarde_ar_fallback_grade_with_decision_says_modelled():
     s = _sensor("batterivarde_ar", results)
     assert s.native_value == pytest.approx(2900.0)
     assert s.extra_state_attributes.get("source") == "modelled"
+
+
+def test_optimeringsbetyg_exposes_preliminary_attrs():
+    """v0.19.0: preliminära betyg (backend 7-29 dygn) visas MED score men attributen
+    preliminary + n_days låter dashboards/automationer märka osäkerheten."""
+    results = {**RESULTS_FULL,
+               "betyg": {**RESULTS_FULL["betyg"], "preliminary": True, "n_days": 10}}
+    s = _sensor("optimeringsbetyg", results)
+    assert s.native_value is not None
+    attrs = s.extra_state_attributes
+    assert attrs.get("preliminary") is True
+    assert attrs.get("n_days") == 10
+
+
+def test_optimeringsbetyg_mature_attrs_say_not_preliminary():
+    results = {**RESULTS_FULL,
+               "betyg": {**RESULTS_FULL["betyg"], "preliminary": False, "n_days": 150}}
+    s = _sensor("optimeringsbetyg", results)
+    assert s.extra_state_attributes.get("preliminary") is False
+
+
+def test_batterivarde_ar_preliminary_measured_never_used():
+    """Skärpning av v0.18.1-grinden: ett PRELIMINÄRT betyg har nu ett score, men dess
+    measured_total_sek är fortfarande en ×365/n-uppräkning av ett kort fönster - den får
+    inte visas som årsvärde. Kravet är MOGET betyg (score + inte preliminary)."""
+    base = {"preliminary": True,
+            "holistic": {"score_on": 0.5, "measured_total_sek": 2566.0}}
+    s = _sensor("batterivarde_ar", {**RESULTS_FULL, "betyg": base, "decision": None})
+    assert s.native_value is None and s.available is False
+    # Med varm decision → modellvärdet, ärligt källmärkt.
+    s2 = _sensor("batterivarde_ar", {**RESULTS_FULL, "betyg": base})
+    assert s2.native_value == pytest.approx(2900.0)
+    assert s2.extra_state_attributes.get("source") == "modelled"
