@@ -162,7 +162,8 @@
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
-      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil."
+      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
+      "already_streaming": "Anläggningen strömmar redan sin data till wolta.se via en annan koppling (Sonnen-webhook eller Reduxi). Att länka den här skulle ge två källor som skriver samma timmar. Koppla först loss den kopplingen på wolta.se om du vill strömma via Home Assistant i stället."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",

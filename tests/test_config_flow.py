@@ -2577,3 +2577,53 @@ async def test_link_flow_409_shows_identity_conflict(hass: HomeAssistant) -> Non
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"profile_input": "identity_conflict"}
+
+
+@pytest.mark.asyncio
+async def test_link_flow_blocks_already_streaming_plant(hass: HomeAssistant) -> None:
+    """A plant fed by a streaming binding (Sonnen webhook / Reduxi) must be stopped at the
+    token step, BEFORE adopt and before the entities form. Completing the flow would make
+    two writers upsert the same hourly rows (last writer wins per hour, different meters)
+    — the grade would then be computed on a mixture. The backend refuses adopt/PUT too;
+    this check gives the user the real explanation instead of a generic 409."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(
+        return_value={**LINK_PROFILE, "derived": {"transport": "sonnen_webhook"}})
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": False})
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "already_streaming"}
+    mock_client.adopt_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_link_flow_allows_plain_ha_transport(hass: HomeAssistant) -> None:
+    """transport 'ha' (or a missing derived block from an older server) must NOT block —
+    re-linking one's own HA-streamed or web-created profile is the normal case."""
+    for derived in ({"transport": "ha"}, {}):
+        mock_client = _mock_client()
+        mock_client.get_profile = AsyncMock(return_value={**LINK_PROFILE, "derived": derived})
+        mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+        with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+             patch("custom_components.wolta.config_flow.async_get_clientsession"):
+            result = await hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": config_entries.SOURCE_USER})
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], {"next_step_id": "link"})
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], {"profile_input": LINK_TOKEN})
+
+        assert result["step_id"] == "entities", f"blocked with derived={derived}"
+        mock_client.adopt_profile.assert_awaited_once()
+        # unique_id städas mellan varven (dinglande flow avbryts, inget entry skapades)
+        hass.config_entries.flow.async_abort(result["flow_id"])

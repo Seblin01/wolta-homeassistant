@@ -162,7 +162,8 @@
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
-      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile."
+      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
+      "already_streaming": "This plant already streams its data to wolta.se through another connection (Sonnen webhook or Reduxi). Linking it here would make two sources write the same hours. Disconnect that connection on wolta.se first if you want Home Assistant to stream instead."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
