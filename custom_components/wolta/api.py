@@ -95,6 +95,13 @@ class WoltaApiClient:
             except Exception:
                 return None
 
+    @staticmethod
+    def _auth(token: str) -> dict[str, str]:
+        """Bearer transport (server >= 0.44.0): profile token travels in the
+        Authorization header instead of the URL path, so it never lands in server
+        access logs or browser history."""
+        return {"Authorization": f"Bearer {token}"}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -159,24 +166,27 @@ class WoltaApiClient:
     async def patch_profile(self, token: str, **fields: Any) -> dict:
         """Update profile fields (cost_sek, purchase_date, …).
 
-        PATCH /api/v1/profile/{token} with the given JSON fields.
+        PATCH /api/v1/profile with the given JSON fields; the profile token travels
+        in the Authorization header (see _auth).
         Returns the response dict.
         """
-        return await self._request("PATCH", f"/profile/{token}", json=fields)
+        return await self._request("PATCH", "/profile", json=fields, headers=self._auth(token))
 
     async def get_profile(self, token: str) -> dict:
         """Fetch the stored profile parameters (server is source of truth).
 
-        GET /api/v1/profile/{token} → 200 JSON with zone/battery/eff/economy/tariff
-        fields. Raises WoltaAuthError on 404 (purged/unknown token).
+        GET /api/v1/profile (Authorization: Bearer <token>) → 200 JSON with
+        zone/battery/eff/economy/tariff fields. Raises WoltaAuthError on 404
+        (purged/unknown token).
         """
-        return await self._request("GET", f"/profile/{token}")
+        return await self._request("GET", "/profile", headers=self._auth(token))
 
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.
 
-        POST /api/v1/profile/{token}/adopt → 200 {"adopted": bool}. Without this,
-        the backend's kind-gate 404s PUT/recompute/results for linked web profiles.
+        POST /api/v1/profile/adopt (Authorization: Bearer <token>) → 200
+        {"adopted": bool}. Without this, the backend's kind-gate 404s
+        PUT/recompute/results for linked web profiles.
         Raises WoltaAuthError on 404, WoltaApiError(status=422) for battery-less
         profiles.
 
@@ -190,12 +200,12 @@ class WoltaApiClient:
         link, the common case) or "no id was sent" — not a failure.
         """
         payload = {} if client_plant_id is None else {"client_plant_id": client_plant_id}
-        return await self._request("POST", f"/profile/{token}/adopt", json=payload)
+        return await self._request("POST", "/profile/adopt", json=payload, headers=self._auth(token))
 
     async def put_data(self, token: str, rows: list[dict]) -> dict:
         """Upload energy rows for the given profile.
 
-        PUT /api/v1/profile/{token}/data with {"rows": [...]}
+        PUT /api/v1/profile/data (Authorization: Bearer <token>) with {"rows": [...]}
         Automatically chunks if len(rows) > MAX_ROWS_PER_PUT.
         Returns the last chunk's response dict.
         """
@@ -204,25 +214,26 @@ class WoltaApiClient:
             chunk = rows[start : start + MAX_ROWS_PER_PUT]
             last_response = await self._request(
                 "PUT",
-                f"/profile/{token}/data",
+                "/profile/data",
                 json={"rows": chunk},
+                headers=self._auth(token),
             )
         return last_response
 
     async def recompute(self, token: str) -> None:
         """Trigger a server-side recomputation for the profile.
 
-        POST /api/v1/profile/{token}/recompute → 202
+        POST /api/v1/profile/recompute (Authorization: Bearer <token>) → 202
         Raises WoltaRateLimitError on 429.
         """
-        await self._request("POST", f"/profile/{token}/recompute")
+        await self._request("POST", "/profile/recompute", headers=self._auth(token))
 
     async def results(self, token: str) -> dict:
         """Fetch grading results for the profile.
 
-        GET /api/v1/profile/{token}/results → 200 JSON
+        GET /api/v1/profile/results (Authorization: Bearer <token>) → 200 JSON
         """
-        return await self._request("GET", f"/profile/{token}/results")
+        return await self._request("GET", "/profile/results", headers=self._auth(token))
 
     async def delete(self, token: str) -> None:
         """Right-to-erasure: delete the profile and all associated data.

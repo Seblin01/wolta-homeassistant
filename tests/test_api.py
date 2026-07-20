@@ -60,7 +60,7 @@ async def test_create_profile_returns_token(aioclient_mock: AiohttpClientMocker)
 async def test_404_raises_wolta_auth_error(aioclient_mock: AiohttpClientMocker):
     """404 on any request maps to WoltaAuthError (token purged / unknown)."""
     aioclient_mock.get(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}/results",
+        f"{BASE_URL}/api/v1/profile/results",
         status=404,
         json={"detail": "not found"},
     )
@@ -75,7 +75,7 @@ async def test_429_raises_rate_limit_error_with_retry_after(
 ):
     """429 with Retry-After header raises WoltaRateLimitError carrying retry_after."""
     aioclient_mock.post(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}/recompute",
+        f"{BASE_URL}/api/v1/profile/recompute",
         status=429,
         headers={"Retry-After": "3600"},
         json={"detail": "rate limit"},
@@ -111,7 +111,7 @@ async def test_put_data_chunks_over_limit(aioclient_mock: AiohttpClientMocker):
     """
     from custom_components.wolta.api import MAX_ROWS_PER_PUT
 
-    url = f"{BASE_URL}/api/v1/profile/{TOKEN}/data"
+    url = f"{BASE_URL}/api/v1/profile/data"
     aioclient_mock.put(
         url,
         status=200,
@@ -129,6 +129,9 @@ async def test_put_data_chunks_over_limit(aioclient_mock: AiohttpClientMocker):
     # Each chunk must be <= MAX_ROWS_PER_PUT so bodies stay under the proxy limit.
     assert MAX_ROWS_PER_PUT <= 5_000, "chunk must stay small enough for a 1 MB proxy limit"
     assert result is not None
+    # Token travels in the Authorization header, not the URL, on every chunk.
+    for call in put_calls:
+        assert call[3]["Authorization"] == f"Bearer {TOKEN}"
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +151,7 @@ async def test_results_returns_parsed_dict(aioclient_mock: AiohttpClientMocker):
         "history": [],
     }
     aioclient_mock.get(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}/results",
+        f"{BASE_URL}/api/v1/profile/results",
         status=200,
         json=payload,
     )
@@ -156,6 +159,8 @@ async def test_results_returns_parsed_dict(aioclient_mock: AiohttpClientMocker):
     result = await client.results(TOKEN)
     assert result == payload
     assert result["betyg"] == "A"
+    get_calls = [c for c in aioclient_mock.mock_calls if c[0].lower() == "get"]
+    assert get_calls[-1][3]["Authorization"] == f"Bearer {TOKEN}"
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +302,10 @@ async def test_create_profile_reserve_pct_zero_is_included(aioclient_mock: Aioht
 
 @pytest.mark.asyncio
 async def test_patch_profile_issues_patch_request(aioclient_mock: AiohttpClientMocker):
-    """patch_profile issues PATCH to /api/v1/profile/{token} with provided fields."""
+    """patch_profile issues PATCH to /api/v1/profile with provided fields, token in
+    the Authorization header."""
     aioclient_mock.patch(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}",
+        f"{BASE_URL}/api/v1/profile",
         status=200,
         json={"profile_token": TOKEN},
     )
@@ -311,13 +317,14 @@ async def test_patch_profile_issues_patch_request(aioclient_mock: AiohttpClientM
     body = patch_calls[0][2]
     assert body["cost_sek"] == 95000.0
     assert body["purchase_date"] == "2023-03-01"
+    assert patch_calls[0][3]["Authorization"] == f"Bearer {TOKEN}"
 
 
 @pytest.mark.asyncio
 async def test_patch_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMocker):
     """patch_profile on 404 raises WoltaAuthError."""
     aioclient_mock.patch(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}",
+        f"{BASE_URL}/api/v1/profile",
         status=404,
         json={"detail": "not found"},
     )
@@ -330,7 +337,7 @@ async def test_patch_profile_404_raises_auth_error(aioclient_mock: AiohttpClient
 async def test_patch_profile_429_raises_rate_limit_error(aioclient_mock: AiohttpClientMocker):
     """patch_profile on 429 raises WoltaRateLimitError with retry_after."""
     aioclient_mock.patch(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}",
+        f"{BASE_URL}/api/v1/profile",
         status=429,
         headers={"Retry-After": "7200"},
         json={"detail": "rate limit"},
@@ -349,7 +356,7 @@ async def test_patch_profile_429_raises_rate_limit_error(aioclient_mock: Aiohttp
 @pytest.mark.asyncio
 async def test_get_profile_returns_profile_dict(aioclient_mock: AiohttpClientMocker):
     aioclient_mock.get(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}",
+        f"{BASE_URL}/api/v1/profile",
         json={"zone": "SE3", "battery_kwh": 22.0, "grid_var_ore": 25.5,
               "share_profile": True},
     )
@@ -357,11 +364,12 @@ async def test_get_profile_returns_profile_dict(aioclient_mock: AiohttpClientMoc
     prof = await client.get_profile(TOKEN)
     assert prof["battery_kwh"] == 22.0
     assert prof["grid_var_ore"] == 25.5
+    assert aioclient_mock.mock_calls[-1][3]["Authorization"] == f"Bearer {TOKEN}"
 
 
 @pytest.mark.asyncio
 async def test_get_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMocker):
-    aioclient_mock.get(f"{BASE_URL}/api/v1/profile/dead", status=404)
+    aioclient_mock.get(f"{BASE_URL}/api/v1/profile", status=404)
     client = _client(aioclient_mock)
     with pytest.raises(WoltaAuthError):
         await client.get_profile("dead")
@@ -370,16 +378,17 @@ async def test_get_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMo
 @pytest.mark.asyncio
 async def test_adopt_profile_posts(aioclient_mock: AiohttpClientMocker):
     aioclient_mock.post(
-        f"{BASE_URL}/api/v1/profile/{TOKEN}/adopt", json={"adopted": True}
+        f"{BASE_URL}/api/v1/profile/adopt", json={"adopted": True}
     )
     client = _client(aioclient_mock)
     resp = await client.adopt_profile(TOKEN)
     assert resp["adopted"] is True
+    assert aioclient_mock.mock_calls[-1][3]["Authorization"] == f"Bearer {TOKEN}"
 
 
 @pytest.mark.asyncio
 async def test_adopt_profile_404_raises_auth_error(aioclient_mock: AiohttpClientMocker):
-    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/dead/adopt", status=404)
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/adopt", status=404)
     client = _client(aioclient_mock)
     with pytest.raises(WoltaAuthError):
         await client.adopt_profile("dead")
@@ -388,7 +397,7 @@ async def test_adopt_profile_404_raises_auth_error(aioclient_mock: AiohttpClient
 @pytest.mark.asyncio
 async def test_adopt_profile_sends_client_plant_id(aioclient_mock: AiohttpClientMocker):
     """adopt carries the stable plant identity so the adopted row can be recognised later."""
-    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/{TOKEN}/adopt", json={"adopted": True})
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/adopt", json={"adopted": True})
     client = _client(aioclient_mock)
     await client.adopt_profile(TOKEN, client_plant_id="deadbeef" * 4)
     assert aioclient_mock.mock_calls[-1][2] == {"client_plant_id": "deadbeef" * 4}
