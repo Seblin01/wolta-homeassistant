@@ -161,7 +161,8 @@
       "required_sensor": "Minst en sensor krävs för detta flöde.",
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
-      "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte."
+      "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
+      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",

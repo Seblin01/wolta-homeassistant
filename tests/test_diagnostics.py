@@ -49,3 +49,24 @@ async def test_diagnostics_survives_missing_coordinator(hass: HomeAssistant):
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["entry_data"][CONF_TOKEN] == "**REDACTED**"
     assert diag["results"] is None
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_redacts_plant_id(hass: HomeAssistant):
+    """The plant id is a takeover key, not a label — it must not survive into a shared dump.
+
+    Anyone holding it can re-onboard as this plant and take over its backend row, and users
+    routinely attach diagnostics dumps to GitHub issues and forum posts.
+    """
+    from custom_components.wolta.const import CONF_PLANT_ID
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: "super-secret", CONF_ZONE: "SE3",
+                  CONF_PLANT_ID: "a1b2c3d4" * 4}
+    entry.runtime_data = None
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert "a1b2c3d4" not in str(diag)
+    assert diag["entry_data"][CONF_PLANT_ID] == "**REDACTED**"

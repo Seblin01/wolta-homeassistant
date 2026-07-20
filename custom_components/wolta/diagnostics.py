@@ -1,4 +1,4 @@
-"""Diagnostics support for Wolta (profile token redacted)."""
+"""Diagnostics support for Wolta (profile token and plant id redacted)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,12 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_TOKEN
+from .const import CONF_PLANT_ID, CONF_TOKEN
 
-TO_REDACT = [CONF_TOKEN]
+# CONF_PLANT_ID is redacted alongside the token: it is the key the backend uses to recognise
+# this plant, so anyone holding it can re-onboard as this plant and take over its row. Users
+# routinely attach diagnostics dumps to GitHub issues and forum posts.
+TO_REDACT = [CONF_TOKEN, CONF_PLANT_ID]
 
 
 async def async_get_config_entry_diagnostics(

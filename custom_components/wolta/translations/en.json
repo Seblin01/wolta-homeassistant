@@ -161,7 +161,8 @@
       "required_sensor": "At least one sensor is required for this stream.",
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
-      "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported."
+      "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
+      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile."
     },
     "abort": {
       "already_configured": "Wolta is already configured",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import secrets
 from typing import Any
 
 import voluptuous as vol
@@ -50,6 +51,7 @@ from .const import (
     CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
+    CONF_PLANT_ID,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
@@ -227,6 +229,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         self._link_token: str | None = None
         self._link_profile: dict[str, Any] | None = None
         self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
+        # Stable plant identity for this entry, minted once here and persisted in entry.data.
+        # Minted at flow start (not at entry creation) because BOTH the create path and the
+        # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
+        # this is not the config entry_id.
+        self._plant_id: str = secrets.token_hex(16)
 
     # ------------------------------------------------------------------
     # Step 1: menu – create a new profile or link an existing one
@@ -274,13 +281,18 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # webbskapade profiler → reauth skulle tyst ersätta användarens token
                 # med en ny tom profil. Idempotent för redan-integrationsprofiler.
                 try:
-                    await client.adopt_profile(token)
+                    await client.adopt_profile(token, client_plant_id=self._plant_id)
                 except WoltaAuthError:
                     errors["profile_input"] = "invalid_token"
                     return self._show_link_form(errors)
                 except WoltaApiError as err:
                     if getattr(err, "status", None) == 422:
                         errors["profile_input"] = "profile_no_battery"
+                    elif getattr(err, "status", None) == 409:
+                        # Identiteten (client_plant_id) är redan knuten till en ANNAN rad.
+                        # Onåbart i praktiken (id:t mintas färskt, 128 bit) men får inte
+                        # maskeras som "cannot connect" - anslutningen fungerade ju.
+                        errors["profile_input"] = "identity_conflict"
                     else:
                         errors["base"] = "cannot_connect"
                     return self._show_link_form(errors)
@@ -494,6 +506,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     reserve_pct=reserve_pct,
                     nameplate_kwh=nameplate_kwh,
                     nameplate_kw=nameplate_kw,
+                    client_plant_id=self._plant_id,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -508,6 +521,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 entry_data: dict[str, Any] = {
                     CONF_TOKEN: token,
+                    CONF_PLANT_ID: self._plant_id,
                     CONF_ZONE: zone,
                     CONF_BATT_IN: self._entities_data[CONF_BATT_IN],
                     CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
@@ -621,6 +635,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         prof = self._link_profile or {}
         entry_data: dict[str, Any] = {
             CONF_TOKEN: self._link_token,
+            CONF_PLANT_ID: self._plant_id,
             CONF_CREATED_BY_HA: False,
             CONF_INVERT_BATTERY: invert,
             CONF_BATT_IN: self._entities_data[CONF_BATT_IN],
@@ -687,6 +702,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 session = async_get_clientsession(self.hass)
                 client = WoltaApiClient(session)
+                # Send the entry's existing plant id (not self._plant_id — reauth runs in a
+                # fresh flow object, whose minted id would be a NEW identity). With it the
+                # backend recognises the plant and keeps whatever history survived, instead
+                # of silently starting an empty profile. Entries created before v0.16.0 have
+                # no stored id; they fall back to entry_id, which IS available here (a reauth
+                # flow carries the entry) and is stable and unique to this plant.
                 new_token = await client.create_profile(
                     zone=entry_data[CONF_ZONE],
                     battery_kwh=entry_data[CONF_BATTERY_KWH],
@@ -694,6 +715,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     eff=entry_data[CONF_EFF],
                     has_solar=bool(entry_data.get(CONF_SOLAR)),
                     share_profile=entry_data.get(CONF_SHARE, DEFAULT_SHARE),
+                    client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Reauth failed – could not create Wolta profile: %s", err)
@@ -704,7 +726,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 return self.async_update_reload_and_abort(
                     reauth_entry,
-                    data_updates={CONF_TOKEN: new_token},
+                    # Persist the id too: on a pre-v0.16.0 entry it was just derived from
+                    # entry_id, and a later reauth must send the SAME value to land on the
+                    # same plant row.
+                    data_updates={
+                        CONF_TOKEN: new_token,
+                        CONF_PLANT_ID: entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
+                    },
                 )
 
         return self.async_show_form(
