@@ -21,8 +21,8 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 
 | Entity | Unit | Description |
 |--------|------|-------------|
-| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100): the share of the battery's theoretically perfect total value your actual operation captured. All price zones. |
-| `sensor.wolta_battery_value_per_year` | SEK / EUR | The battery's **own** annual value — the incremental saving vs. the same plant without a battery. Measured from your actual flows (the same number wolta.se shows as "You captured"); falls back to the modelled battery share when no grade exists yet. Attribute `source` tells you which (`measured`/`modelled`); `plant_total_sek` carries the plant total. All price zones. Solar's value is **not** included — it belongs to the solar investment. |
+| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100): the share of the battery's theoretically perfect total value your actual operation captured. Appears as a **preliminary** score after about 7 days of data (server v0.43.0+) and matures at 30 days — the attributes `preliminary` and `n_days` tell you which; a preliminary score can swing from day to day. All price zones. |
+| `sensor.wolta_battery_value_per_year` | SEK / EUR | The battery's **own** annual value — the incremental saving vs. the same plant without a battery. Measured from your actual flows (the same number wolta.se shows as "You captured") once the grade is **mature** (30 days); before that it falls back to the modelled battery share — a short window multiplied up to a year is not an honest measured figure. Attribute `source` tells you which (`measured`/`modelled`); `plant_total_sek` carries the plant total. All price zones. Solar's value is **not** included — it belongs to the solar investment. |
 | `sensor.wolta_plant_savings_per_year` | SEK / EUR | Total annual saving of the whole plant (solar + battery), i.e. what a combined solar-plus-battery investment earns. Attributes `battery_sek`/`solar_sek` give the split. SE zones only. |
 | `sensor.wolta_internal_rate_of_return_irr` | % | IRR of the **battery investment**: the battery-only savings stream against the battery's purchase price (incremental cash-flow principle). Can be negative — that means the battery alone does not carry its cost. SE zones only. |
 | `sensor.wolta_payback_time` | yr | Payback of the battery investment from the battery-only savings stream. `unknown` when the stream never repays the cost within the projection horizon. SE zones only. |
@@ -78,6 +78,13 @@ No account or API token is required. Setup starts with a choice:
 
 - **Create a new profile** — Home Assistant provisions a Wolta profile automatically (the flow below).
 - **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server, the profile is adopted for integration use (backend v0.19.0+), and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data). The profile must include a battery — solar-only profiles are rejected.
+
+  If the plant already streams its data to wolta.se through another connection (the Sonnen
+  webhook or a Reduxi bridge), the flow offers **view-only mode** instead: you get all the
+  sensors and the recompute button, but no sensor selection and no uploads — the plant's own
+  connection keeps owning the data, and removing the entry never deletes anything on
+  wolta.se. If the saved token ever stops working, re-authentication simply asks for a fresh
+  token (create one on the plant page on wolta.se while signed in).
 
 **Step 1 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
