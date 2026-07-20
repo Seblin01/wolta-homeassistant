@@ -1515,3 +1515,26 @@ async def test_view_only_never_uploads(hass: HomeAssistant, mock_entry):
     client.results.assert_awaited_once()
     assert data.results == RESULTS_DONE_JOB_SETTLED
     assert data.last_uploaded is None
+
+
+@pytest.mark.asyncio
+async def test_view_only_network_failure_skips_upload_repair_tracking(hass: HomeAssistant,
+                                                                      mock_entry):
+    """Nätfel i visningsläge får inte mata upload-failure-repairen: dess text lovar
+    "unable to upload energy data" och en view-only-entry laddar aldrig upp. Felet syns
+    ändå (UpdateFailed → entiteterna unavailable)."""
+    import aiohttp
+
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    mock_entry.data = {CONF_TOKEN: TOKEN, CONF_ZONE: ZONE, CONF_VIEW_ONLY: True}
+    client = _mock_client()
+    client.get_profile = AsyncMock(side_effect=Exception("sync skipped in test"))
+    client.results = AsyncMock(side_effect=aiohttp.ClientError("boom"))
+    coordinator = await _make_coordinator(hass, mock_entry, client)
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+    assert "failure_since" not in coordinator._state, \
+        "view-only ska inte räkna mot upload-failure-repairen"

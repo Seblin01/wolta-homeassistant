@@ -178,7 +178,8 @@
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
       "reauth_successful": "Återautentiseringen lyckades",
-      "reconfigure_successful": "Sensorerna uppdaterade. Historiken laddas upp på nytt i bakgrunden."
+      "reconfigure_successful": "Sensorerna uppdaterade. Historiken laddas upp på nytt i bakgrunden.",
+      "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen."
     }
   },
   "options": {

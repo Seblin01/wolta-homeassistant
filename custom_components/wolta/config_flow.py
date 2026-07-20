@@ -601,6 +601,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Change the energy entity selections on an existing entry."""
         entry = self._get_reconfigure_entry()
+        # Visningsläge har inga sensorval: formulärets stream-fält är Required med tomma
+        # defaults (återvändsgränd), och ifyllda sensorer hade lagrats men IGNORERATS av
+        # coordinatorns view-only-gren - det ser ut som strömning utan att något strömmar.
+        # Vill man börja strömma: ta bort entryn och länka om profilen.
+        if entry.data.get(CONF_VIEW_ONLY):
+            return self.async_abort(reason="view_only_no_reconfigure")
         errors: dict[str, str] = {}
         if user_input is not None:
             for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
