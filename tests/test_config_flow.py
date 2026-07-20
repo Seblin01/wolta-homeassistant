@@ -2551,3 +2551,29 @@ async def test_reauth_backfills_plant_id_from_entry_id(hass: HomeAssistant) -> N
 
     assert mock_client.create_profile.await_args.kwargs["client_plant_id"] == entry.entry_id
     assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PLANT_ID] == entry.entry_id
+
+
+@pytest.mark.asyncio
+async def test_link_flow_409_shows_identity_conflict(hass: HomeAssistant) -> None:
+    """A 409 from adopt (plant identity bound to another row) must not masquerade as
+    "cannot connect" – the connection worked fine; the identity is taken. Practically
+    unreachable with our freshly minted 128-bit ids, but if it ever fires the message
+    must point at the actual conflict."""
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(
+        side_effect=WoltaApiError("HTTP 409 from .../adopt", status=409))
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "identity_conflict"}

@@ -288,6 +288,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 except WoltaApiError as err:
                     if getattr(err, "status", None) == 422:
                         errors["profile_input"] = "profile_no_battery"
+                    elif getattr(err, "status", None) == 409:
+                        # Identiteten (client_plant_id) är redan knuten till en ANNAN rad.
+                        # Onåbart i praktiken (id:t mintas färskt, 128 bit) men får inte
+                        # maskeras som "cannot connect" - anslutningen fungerade ju.
+                        errors["profile_input"] = "identity_conflict"
                     else:
                         errors["base"] = "cannot_connect"
                     return self._show_link_form(errors)
