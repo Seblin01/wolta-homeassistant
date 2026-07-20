@@ -178,7 +178,8 @@
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful",
-      "reconfigure_successful": "Sensors updated. Your history is being re-uploaded in the background."
+      "reconfigure_successful": "Sensors updated. Your history is being re-uploaded in the background.",
+      "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again."
     }
   },
   "options": {

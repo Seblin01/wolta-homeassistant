@@ -207,3 +207,74 @@ async def test_async_remove_entry_legacy_entry_still_deletes(hass: HomeAssistant
         await async_remove_entry(hass, mock_entry)
 
     mock_client.delete.assert_awaited_once_with(TOKEN)
+
+
+# ---------------------------------------------------------------------------
+# View-only smoke: real coordinator + real platform setup over an entry
+# without any stream/entity fields
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_view_only_entry_platforms_smoke(hass: HomeAssistant):
+    """Real WoltaCoordinator + real sensor/button setup over a view-only entry.
+
+    A view-only entry has NO stream fields (batt_in/out, grid_in/out, solar) - this pins
+    that neither the coordinator constructor nor the platform setups assume them.
+    (Coverage pin: green from day one; guards future platform code against reading
+    entry.data streaming keys unconditionally.)
+    """
+    from homeassistant.config_entries import ConfigEntry
+
+    from custom_components.wolta import button as button_mod
+    from custom_components.wolta import sensor as sensor_mod
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    results = {
+        "status": "done",
+        "currency": "SEK",
+        "period": {"start": "2025-01-01", "end": "2025-05-31", "n_days": 150},
+        "job": {"status": "done", "step": None},
+        "betyg": {"holistic": {"score_on": 0.67}},
+        "decision": {"irr": 0.1},
+        "history": {"yearly": []},
+    }
+
+    entry = MagicMock(spec=ConfigEntry)
+    entry.entry_id = "view_only_smoke"
+    entry.domain = DOMAIN
+    entry.data = {CONF_TOKEN: TOKEN, CONF_ZONE: ZONE, CONF_VIEW_ONLY: True}
+    entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    entry.unique_id = "uid-view-smoke"
+
+    coordinator = WoltaCoordinator(hass, entry)
+    client = MagicMock()
+    client.results = AsyncMock(return_value=results)
+    client.get_profile = AsyncMock(side_effect=Exception("sync skipped in test"))
+    coordinator.client = client
+    coordinator._state = {}
+    coordinator._store = MagicMock()
+    coordinator._store.async_save = AsyncMock()
+
+    data = await coordinator._async_update_data()
+    coordinator.async_set_updated_data(data)
+    client.put_data.assert_not_called()
+
+    entry.runtime_data = coordinator
+
+    async def _run_platform(mod):
+        entities: list = []
+        await mod.async_setup_entry(hass, entry, lambda new: entities.extend(new))
+        return entities
+
+    sensors = await _run_platform(sensor_mod)
+    buttons = await _run_platform(button_mod)
+    assert len(sensors) == len(sensor_mod.SENSOR_DESCRIPTIONS)
+    assert len(buttons) >= 1
+
+    # Varje entitets värde/attribut ska gå att läsa utan att kasta.
+    for ent in sensors:
+        _ = ent.native_value
+        _ = ent.extra_state_attributes
+        _ = ent.available

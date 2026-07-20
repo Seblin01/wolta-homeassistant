@@ -2666,3 +2666,26 @@ async def test_link_flow_allows_plain_ha_transport(hass: HomeAssistant) -> None:
         mock_client.adopt_profile.assert_awaited_once()
         # unique_id städas mellan varven (dinglande flow avbryts, inget entry skapades)
         hass.config_entries.flow.async_abort(result["flow_id"])
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_aborts_for_view_only(hass: HomeAssistant) -> None:
+    """Reconfigure on a view-only entry must abort, not show the entity form.
+
+    The form's stream fields are Required with empty defaults (no entities exist on the
+    entry) - a dead end - and had the user filled them in, the selections would be stored
+    but IGNORED by the coordinator's view-only branch: it would look like streaming was
+    enabled without anything streaming."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_TOKEN: "tok-view", CONF_ZONE: ZONE, CONF_VIEW_ONLY: True,
+              CONF_CREATED_BY_HA: False},
+        source=config_entries.SOURCE_USER, unique_id="uid-view-reconf")
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "view_only_no_reconfigure"

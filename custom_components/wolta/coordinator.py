@@ -265,21 +265,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # entitets-självläkning, bookmark, statistikläsning, PUT /data, recompute-
             # kadens, measured-params-repairs) förutsätter att VI äger datan - här ägs
             # den av anläggningens bindning (Sonnen-webhook/Reduxi), och servern 409:ar
-            # dessutom varje skrivförsök. pending/fast-poll-logiken speglar sluttampen.
+            # dessutom varje skrivförsök.
             if self._view_only:
                 results = await self.client.results(self.token)
-                job = results.get("job") or {}
-                data = WoltaData(
-                    results=results,
-                    last_uploaded=None,
-                    n_days=results["period"]["n_days"],
-                    pending=(
-                        results.get("status") in ("pending", "running")
-                        or job.get("status") in ("pending", "running")
-                    ),
-                )
-                self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
-                return data
+                return self._build_data(results, last_uploaded=None)
 
             # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
             # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
@@ -364,26 +353,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 if last_uploaded_str
                 else None
             )
-            # `pending` = a server-side computation is in progress. Top-level `status` is NOT ENOUGH
-            # ALONE: the backend forces status="done" as soon as a grade is cached (profile.py),
-            # even while the economy recompute (decision/history) is still running. In that case `job`
-            # is the only reliable in-flight signal. Without this, the economy sensors go blank
-            # (they only keep their previous value when pending=True) and polling falls back to 6h
-            # → a finished decision doesn't show up until the next slow poll (up to 6h).
-            job = results.get("job") or {}
-            data = WoltaData(
-                results=results,
-                last_uploaded=last_uploaded,
-                n_days=results["period"]["n_days"],
-                pending=(
-                    results.get("status") in ("pending", "running")
-                    or job.get("status") in ("pending", "running")
-                ),
-            )
-            # Poll fast while a server-side computation is in progress so the grade shows up within ~one
-            # minute instead of up to 6h; back to the slow rate once it's done.
-            self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
-            return data
+            return self._build_data(results, last_uploaded=last_uploaded)
 
         except WoltaAuthError as err:
             raise ConfigEntryAuthFailed from err
@@ -397,8 +367,37 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             ) from err
 
         except (aiohttp.ClientError, TimeoutError) as err:
-            self._track_failure(err)
+            # Visningsläge räknar inte mot upload-failure-repairen: dess text lovar
+            # "unable to upload energy data" och en view-only-entry laddar aldrig upp.
+            # Felet syns ändå - UpdateFailed gör entiteterna unavailable.
+            if not self._view_only:
+                self._track_failure(err)
             raise UpdateFailed(f"wolta.se unreachable: {err}") from err
+
+    def _build_data(self, results: dict, *, last_uploaded: datetime | None) -> WoltaData:
+        """WoltaData + polltakt ur ett /results-svar. EN sanning för pending-tolkningen,
+        delad av strömningsvägen och view-only-grenen.
+
+        `pending` = a server-side computation is in progress. Top-level `status` is NOT
+        ENOUGH ALONE: the backend forces status="done" as soon as a grade is cached
+        (profile.py), even while the economy recompute (decision/history) is still
+        running. In that case `job` is the only reliable in-flight signal. Without this,
+        the economy sensors go blank (they only keep their previous value when
+        pending=True) and polling falls back to 6h → a finished decision doesn't show up
+        until the next slow poll (up to 6h). Poll fast while pending so the grade shows
+        up within ~one minute; back to the slow rate once it's done."""
+        job = results.get("job") or {}
+        data = WoltaData(
+            results=results,
+            last_uploaded=last_uploaded,
+            n_days=results["period"]["n_days"],
+            pending=(
+                results.get("status") in ("pending", "running")
+                or job.get("status") in ("pending", "running")
+            ),
+        )
+        self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
+        return data
 
     # ------------------------------------------------------------------
     # Row-fetching helpers
