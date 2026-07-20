@@ -58,6 +58,7 @@ from .const import (
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
+    CONF_VIEW_ONLY,
     CONF_ZONE,
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
@@ -274,15 +275,20 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["profile_input"] = "profile_no_battery"
                     return self._show_link_form(errors)
                 # Anläggning som redan strömmas via en bindning (Sonnen-webhook/Reduxi):
-                # stoppa FÖRE adopt. Fullföljd länkning hade gett två skrivare mot samma
-                # timrader (sist vinner per timme, olika mätare) → betyget räknas på en
-                # blandning. Backend vägrar också (409 på adopt + PUT /data), men den här
-                # kollen ger användaren den riktiga förklaringen. 'ha'/saknat fält (äldre
-                # server) blockerar inte - om-länkning av egen HA-profil är normalfallet.
+                # erbjud VISNINGSLÄGE i stället för entitetssteget (v0.18.0; v0.17.0
+                # stoppade hårt här). Ingen adopt - backend 409:ar den för bundna rader,
+                # och ingen HA-identitet ska stämplas på en anläggning vi inte strömmar.
+                # Fullföljd strömmande länkning hade gett två skrivare mot samma timrader
+                # (sist vinner per timme, olika mätare) → betyget räknas på en blandning.
+                # 'ha'/saknat fält (äldre server) tar strömningsvägen som vanligt -
+                # om-länkning av egen HA-profil är normalfallet.
                 transport = (prof.get("derived") or {}).get("transport")
                 if transport in ("sonnen_webhook", "reduxi_mqtt"):
-                    errors["profile_input"] = "already_streaming"
-                    return self._show_link_form(errors)
+                    unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
+                    await self.async_set_unique_id(unique_id)
+                    self._abort_if_unique_id_configured()
+                    self._link_token = token
+                    return await self.async_step_view_only()
                 unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
@@ -670,6 +676,36 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         zone = entry_data[CONF_ZONE]
         return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
 
+    async def async_step_view_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm view-only linking of a streaming-bound plant (Sonnen webhook/Reduxi).
+
+        The entry only POLLS results: sensors and the recompute button work, but no
+        entities are selected, nothing is uploaded and no adopt runs. created_by_ha is
+        False so removing the entry never deletes the plant server-side - the binding
+        owns it. Profile fields are cached like the linked path; the coordinator's
+        profile sync keeps them fresh."""
+        if user_input is not None:
+            prof = self._link_profile or {}
+            entry_data: dict[str, Any] = {
+                CONF_TOKEN: self._link_token,
+                CONF_VIEW_ONLY: True,
+                CONF_CREATED_BY_HA: False,
+            }
+            for key in (
+                CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW,
+                CONF_NAMEPLATE_KW, CONF_EFF,
+                CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
+                CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+            ):
+                if prof.get(key) is not None:
+                    entry_data[key] = prof[key]
+            entry_data.setdefault(CONF_ZONE, DEFAULT_ZONE)
+            zone = entry_data[CONF_ZONE]
+            return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
+        return self.async_show_form(step_id="view_only", data_schema=vol.Schema({}))
+
     async def async_step_invert_check(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -704,6 +740,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the reauth confirmation step."""
         errors: dict[str, str] = {}
+
+        # View-only entries får ALDRIG skapa en ny profil (default-reauthen nedan gör det,
+        # avsiktligt, för strömmande entries): anläggningen ägs av sin bindning och en ny
+        # tom profil vore fel rad. Be om en färsk token i stället - ägaren mintar en på
+        # anläggningssidan (inloggad) på wolta.se.
+        if self._get_reauth_entry().data.get(CONF_VIEW_ONLY):
+            return await self.async_step_reauth_view_only(user_input)
 
         if user_input is not None:
             reauth_entry = self._get_reauth_entry()
@@ -748,6 +791,41 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema({}),
+            errors=errors,
+        )
+
+    async def async_step_reauth_view_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Reauth for a view-only entry: swap in a fresh token, create nothing.
+
+        The token died because it was rotated web-side (the owner minted a new one) or
+        the profile was purged. Any valid profile token is accepted - the entry never
+        writes, so a non-bound token is harmless too."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            token = extract_token(user_input["profile_input"])
+            try:
+                session = async_get_clientsession(self.hass)
+                client = WoltaApiClient(session)
+                await client.get_profile(token)
+            except WoltaAuthError:
+                errors["profile_input"] = "invalid_token"
+            except WoltaApiError:
+                errors["base"] = "cannot_connect"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(), data_updates={CONF_TOKEN: token}
+                )
+        return self.async_show_form(
+            step_id="reauth_view_only",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("profile_input"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    )
+                }
+            ),
             errors=errors,
         )
 

@@ -2580,12 +2580,12 @@ async def test_link_flow_409_shows_identity_conflict(hass: HomeAssistant) -> Non
 
 
 @pytest.mark.asyncio
-async def test_link_flow_blocks_already_streaming_plant(hass: HomeAssistant) -> None:
-    """A plant fed by a streaming binding (Sonnen webhook / Reduxi) must be stopped at the
-    token step, BEFORE adopt and before the entities form. Completing the flow would make
-    two writers upsert the same hourly rows (last writer wins per hour, different meters)
-    — the grade would then be computed on a mixture. The backend refuses adopt/PUT too;
-    this check gives the user the real explanation instead of a generic 409."""
+async def test_link_flow_offers_view_only_for_bound_plant(hass: HomeAssistant) -> None:
+    """A streaming-bound plant (Sonnen webhook / Reduxi) is offered VIEW-ONLY linking:
+    a confirm step instead of the entities form. No adopt (the backend 409s it and no
+    identity should be stamped), no entity selection, and the entry is marked view_only
+    so the coordinator never uploads. This replaces the hard already_streaming error
+    from v0.17.0 - the block became a mode."""
     mock_client = _mock_client()
     mock_client.get_profile = AsyncMock(
         return_value={**LINK_PROFILE, "derived": {"transport": "sonnen_webhook"}})
@@ -2599,10 +2599,49 @@ async def test_link_flow_blocks_already_streaming_plant(hass: HomeAssistant) -> 
             result["flow_id"], {"next_step_id": "link"})
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"profile_input": LINK_TOKEN})
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "view_only"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {"profile_input": "already_streaming"}
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+    data = result["data"]
+    assert data[CONF_VIEW_ONLY] is True
+    assert data[CONF_CREATED_BY_HA] is False, "view-only far ALDRIG radera profilen server-side"
+    assert CONF_BATT_IN not in data, "inga entiteter i visningslage"
     mock_client.adopt_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_view_only_reauth_asks_for_new_token(hass: HomeAssistant) -> None:
+    """Reauth on a view-only entry must NEVER create a new profile (the default reauth
+    does, by design, for streaming entries). Instead it asks for a fresh token - the
+    web-side owner can mint one - and just swaps CONF_TOKEN."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    data: dict[str, Any] = {CONF_TOKEN: "dead-token", CONF_ZONE: ZONE,
+                            CONF_VIEW_ONLY: True, CONF_CREATED_BY_HA: False,
+                            CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0}
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="uid-view-1")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(
+        return_value={**LINK_PROFILE, "derived": {"transport": "sonnen_webhook"}})
+
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        assert result["type"] == FlowResultType.FORM
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "fresh-token-xyz"})
+
+    assert result["reason"] == "reauth_successful"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_TOKEN] == "fresh-token-xyz"
+    mock_client.create_profile.assert_not_awaited()
 
 
 @pytest.mark.asyncio

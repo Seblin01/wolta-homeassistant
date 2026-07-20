@@ -37,6 +37,7 @@ from .const import (
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
+    CONF_VIEW_ONLY,
     CONF_ZONE,
     DOMAIN,
     WOLTA_API_BASE,
@@ -148,6 +149,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         self.token: str = entry.data[CONF_TOKEN]
         self._zone: str = entry.data[CONF_ZONE]
+        # Visningsläge (bundna anläggningar): polla bara resultat - rör aldrig
+        # statistikläsning, PUT /data eller recompute-kadensen. Se const.CONF_VIEW_ONLY.
+        self._view_only: bool = bool(entry.data.get(CONF_VIEW_ONLY))
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -256,6 +260,26 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
                 else:
                     self._apply_profile_sync(profile)
+
+            # Visningsläge: bara resultat-pollen. Hela strömningsmaskineriet (invert-/
+            # entitets-självläkning, bookmark, statistikläsning, PUT /data, recompute-
+            # kadens, measured-params-repairs) förutsätter att VI äger datan - här ägs
+            # den av anläggningens bindning (Sonnen-webhook/Reduxi), och servern 409:ar
+            # dessutom varje skrivförsök. pending/fast-poll-logiken speglar sluttampen.
+            if self._view_only:
+                results = await self.client.results(self.token)
+                job = results.get("job") or {}
+                data = WoltaData(
+                    results=results,
+                    last_uploaded=None,
+                    n_days=results["period"]["n_days"],
+                    pending=(
+                        results.get("status") in ("pending", "running")
+                        or job.get("status") in ("pending", "running")
+                    ),
+                )
+                self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
+                return data
 
             # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
             # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with

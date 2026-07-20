@@ -47,6 +47,12 @@ CONF_CREATED_BY_HA = "created_by_ha"
 # which falls back to the entry_id (available there, since a reauth flow carries the entry) and
 # persists it. No setup-time backfill — nothing else reads the key.
 CONF_PLANT_ID = "plant_id"
+# View-only entry (bound plants): the plant already streams via its own binding (Sonnen
+# webhook / Reduxi), so this entry only POLLS results - the coordinator must never read HA
+# statistics, PUT data or trigger the recompute cadence, and reauth must never create a new
+# profile (it just asks for a fresh token). Missing key = False (every pre-v0.18.0 entry
+# streams).
+CONF_VIEW_ONLY = "view_only"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

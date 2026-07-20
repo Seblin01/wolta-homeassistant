@@ -152,6 +152,17 @@
           "solar": "Solproduktionsenergi (valfri)"
         },
         "data_description": {}
+      },
+      "view_only": {
+        "title": "Lägg till i visningsläge",
+        "description": "Anläggningen strömmar redan sin data till wolta.se via sin egen koppling (Sonnen-webhook eller Reduxi), så Home Assistant kommer inte att ladda upp något till den. Du får Wolta-sensorerna — betyg, batterivärde, besparing, IRR, payback — och omräkningsknappen. Allt annat hanteras på wolta.se. Skicka för att lägga till anläggningen i visningsläge."
+      },
+      "reauth_view_only": {
+        "title": "Ny token för visningsanläggning",
+        "description": "Den sparade token fungerar inte längre — den förnyades troligen på wolta.se. Klistra in en färsk profillänk eller token för anläggningen (logga in på wolta.se och skapa en på anläggningssidan). Inget skapas eller ändras på wolta.se.",
+        "data": {
+          "profile_input": "Profillänk eller token"
+        }
       }
     },
     "error": {
@@ -162,8 +173,7 @@
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
-      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
-      "already_streaming": "Anläggningen strömmar redan sin data till wolta.se via en annan koppling (Sonnen-webhook eller Reduxi). Att länka den här skulle ge två källor som skriver samma timmar. Koppla först loss den kopplingen på wolta.se om du vill strömma via Home Assistant i stället."
+      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
