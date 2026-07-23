@@ -95,6 +95,12 @@ _ISSUE_EFFICIENCY = "measured_efficiency"
 _CAP_MATURE_DAYS = 60
 _CAP_PLATEAU_DAYS = 10
 _CAP_GAP = 0.15
+# observed_capacity reconstructs the SoC window assuming ~0.95 charge efficiency. A plant whose
+# real round-trip efficiency is well below that (parasitic/standby losses – e.g. Emaldo, issue #1)
+# accumulates too much, so the measured window OVERSHOOTS true usable. Below this round-trip
+# threshold the reconstruction is untrustworthy in the UP direction, so we don't offer to raise
+# capacity to it (inflation reaches ~6 % at 0.80 and climbs fast toward the 15 % gap below that).
+_CAP_TRUST_EFF = 0.80
 # Power: observed peak is a LOWER bound. Raising (observed > configured) is high-confidence, so
 # a smaller gap suffices; lowering (observed < configured) risks nudging a correct-but-gently-used
 # value down (flattering the grade), so demand a bigger gap.
@@ -665,6 +671,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         reserve = self.config_entry.data.get(CONF_RESERVE_PCT) or 0.0
         effective = configured * (1.0 - reserve / 100.0) if configured else None
         measured = float(oc["kwh"]) if oc and oc.get("kwh") else None
+        # Trust gate (issue #1): the reconstruction inflates at low round-trip efficiency. Prefer
+        # the MEASURED round-trip (observed_eff, always present once the capacity adopt matures at
+        # 60 d), falling back to the configured eff. When it's low we suppress an UP suggestion
+        # only – a DOWN one stays valid (true usable is then even lower than the inflated figure).
+        oe = betyg.get("observed_eff") if isinstance(betyg, dict) else None
+        eff_signal = (float(oe["eff"]) if oe and oe.get("eff")
+                      else self.config_entry.data.get(CONF_EFF))
+        untrusted_up = (eff_signal is not None and eff_signal < _CAP_TRUST_EFF
+                        and measured is not None and effective is not None
+                        and measured > effective)
         fire = (
             measured is not None
             and effective
@@ -672,6 +688,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             and oc.get("n_days", 0) >= _CAP_MATURE_DAYS
             and oc.get("plateau_days", 0) >= _CAP_PLATEAU_DAYS
             and abs(measured - effective) / effective >= _CAP_GAP
+            and not untrusted_up
         )
         self._set_measured_issue(
             _ISSUE_CAPACITY,

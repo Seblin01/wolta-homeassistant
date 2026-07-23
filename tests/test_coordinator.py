@@ -1400,6 +1400,49 @@ async def test_capacity_issue_cleared_when_no_observed(hass, mock_entry):
     assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
 
 
+@pytest.mark.asyncio
+async def test_capacity_issue_suppressed_when_low_efficiency_and_up(hass, mock_entry):
+    """Issue #1 (Emaldo/Leif): vid låg round-trip-verkningsgrad är observed_capacity uppblåst
+    (0.95-laddantagandet stämmer inte, parasitförluster) → erbjud INTE att HÖJA kapaciteten
+    till det opålitliga värdet, trots att glappet passerar 15 %."""
+    from custom_components.wolta.const import CONF_BATTERY_KWH as _K
+
+    c = await _cap_coordinator(hass, mock_entry, **{_K: 13.0})
+    results = {"betyg": {
+        "observed_capacity": {"kwh": 15.75, "n_days": 90, "plateau_days": 20},
+        "observed_eff": {"eff": 0.70, "n_days": 90}}}
+    c._evaluate_measured_params(results)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_fires_down_even_when_low_efficiency(hass, mock_entry):
+    """Låg verkningsgrad tystar bara UPP-förslag. Ett NER-förslag är fortfarande giltigt:
+    är det uppblåsta uppmätta ÄNDÅ lägre än konfigurerat är verklig användbar ännu lägre."""
+    from custom_components.wolta.const import CONF_BATTERY_KWH as _K
+
+    c = await _cap_coordinator(hass, mock_entry, **{_K: 20.0})
+    results = {"betyg": {
+        "observed_capacity": {"kwh": 15.0, "n_days": 90, "plateau_days": 20},
+        "observed_eff": {"eff": 0.70, "n_days": 90}}}
+    c._evaluate_measured_params(results)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_fires_up_when_efficiency_ok(hass, mock_entry):
+    """God verkningsgrad → observed_capacity är pålitligt → HÖJ-förslag går fram som vanligt
+    (grinden får inte tysta legitima adopts för normala batterier)."""
+    from custom_components.wolta.const import CONF_BATTERY_KWH as _K
+
+    c = await _cap_coordinator(hass, mock_entry, **{_K: 11.0})
+    results = {"betyg": {
+        "observed_capacity": {"kwh": 14.0, "n_days": 90, "plateau_days": 20},
+        "observed_eff": {"eff": 0.90, "n_days": 90}}}
+    c._evaluate_measured_params(results)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is not None
+
+
 # ---------------------------------------------------------------------------
 # Measured-power and measured-efficiency adopt gates
 # ---------------------------------------------------------------------------

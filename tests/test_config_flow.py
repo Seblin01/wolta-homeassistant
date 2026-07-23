@@ -837,6 +837,109 @@ async def test_reauth_flow_updates_token(hass: HomeAssistant) -> None:
     assert updated_entry.data[CONF_ZONE] == ZONE
 
 
+@pytest.mark.asyncio
+async def test_reauth_flow_preserves_all_profile_fields(hass: HomeAssistant) -> None:
+    """Reauth recreates the profile from entry.data (the old server profile is gone), so it
+    MUST seed every configured field – not just battery basics – or reserve_pct, economy,
+    tariffs and nameplate silently reset server-side until the user re-opens Configure."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW, CONF_NAMEPLATE_KWH
+
+    initial_data: dict[str, Any] = {
+        CONF_TOKEN: "old-token",
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: ["sensor.solar"],
+        CONF_BATTERY_KWH: 15.36,
+        CONF_BATTERY_KW: 5.0,
+        CONF_EFF: 0.9,
+        CONF_SHARE: True,
+        CONF_RESERVE_PCT: 10.0,
+        CONF_COST_SEK: 120000.0,
+        CONF_PURCHASE_DATE: "2026-03-01",
+        CONF_GRID_VAR_ORE: 40.0,
+        CONF_SURCHARGE_ORE: 8.0,
+        CONF_EXPORT_EXTRA_ORE: 5.0,
+        CONF_NAMEPLATE_KWH: 15.36,
+        CONF_NAMEPLATE_KW: 8.0,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Wolta (SE3)", data=initial_data,
+        source=config_entries.SOURCE_USER, unique_id="reauth-fields")
+    entry.add_to_hass(hass)
+
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=initial_data)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert kwargs["reserve_pct"] == 10.0
+    assert kwargs["cost_sek"] == 120000.0
+    assert kwargs["purchase_date"] == "2026-03-01"
+    assert kwargs["grid_var_ore"] == 40.0
+    assert kwargs["surcharge_ore"] == 8.0
+    assert kwargs["export_extra_ore"] == 5.0
+    assert kwargs["nameplate_kwh"] == 15.36
+    assert kwargs["nameplate_kw"] == 8.0
+
+
+@pytest.mark.asyncio
+async def test_reauth_linked_profile_omits_plant_scoped_cost(hass: HomeAssistant) -> None:
+    """En länkad (webbskapad) profil kan vara plant-scopad: dess cost_sek täcker HELA
+    anläggningen. Reauth skapar en ny HA-ägd (batteri-scopad) profil, så cost_sek MÅSTE
+    utelämnas — annars re-scopar backenden anläggningspriset till batteri-capex och ger
+    vilseledande IRR. Scope-neutrala fält (reserve/tariffer/nameplate) seedas ändå."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.wolta.const import CONF_CREATED_BY_HA
+
+    initial_data: dict[str, Any] = {
+        CONF_TOKEN: "old-token", CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.bi"], CONF_BATT_OUT: ["sensor.bo"],
+        CONF_GRID_IN: ["sensor.gi"], CONF_GRID_OUT: ["sensor.go"],
+        CONF_SOLAR: ["sensor.s"],
+        CONF_BATTERY_KWH: 15.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
+        CONF_SHARE: True,
+        CONF_COST_SEK: 250000.0,      # plant-nivå-pris speglat från servern
+        CONF_RESERVE_PCT: 10.0,
+        CONF_CREATED_BY_HA: False,    # länkad (webbskapad) profil
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Wolta (SE3)", data=initial_data,
+        source=config_entries.SOURCE_USER, unique_id="reauth-linked")
+    entry.add_to_hass(hass)
+
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=initial_data)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert kwargs["cost_sek"] is None       # plant-scopat pris utelämnas
+    assert kwargs["reserve_pct"] == 10.0    # scope-neutrala fält seedas ändå
+
+
 # ---------------------------------------------------------------------------
 # Multi-sensor: two solar sensors → entry.data stores list
 # ---------------------------------------------------------------------------

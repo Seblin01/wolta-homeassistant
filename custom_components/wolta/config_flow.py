@@ -767,6 +767,20 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # of silently starting an empty profile. Entries created before v0.16.0 have
                 # no stored id; they fall back to entry_id, which IS available here (a reauth
                 # flow carries the entry) and is stable and unique to this plant.
+                # The old server profile is gone (purged/rotated), so this create SEEDS a
+                # fresh one and entry.data is the only surviving copy of the user's config.
+                # Pass EVERY configured field, not just the battery basics – otherwise
+                # reserve_pct, economy, tariffs and nameplate silently reset server-side until
+                # the user re-opens Configure. Optional fields default to None in the client
+                # (omitted from the payload) so an unset field stays unset.
+                #
+                # cost_sek is the exception: create scopes it as "battery" (profile.py). A LINKED
+                # (web-created) profile may be PLANT-scoped – its cost covers the whole system –
+                # and we cannot GET cost_scope here (the old profile is gone). Sending that value
+                # would misattribute the plant price as battery capex → misleading IRR. So skip it
+                # for linked entries (created_by_ha False); the plant price is owned/edited on the
+                # web anyway. HA-created entries (default True) are battery-scoped → send it.
+                created_by_ha = entry_data.get(CONF_CREATED_BY_HA, True)
                 new_token = await client.create_profile(
                     zone=entry_data[CONF_ZONE],
                     battery_kwh=entry_data[CONF_BATTERY_KWH],
@@ -774,6 +788,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     eff=entry_data[CONF_EFF],
                     has_solar=bool(entry_data.get(CONF_SOLAR)),
                     share_profile=entry_data.get(CONF_SHARE, DEFAULT_SHARE),
+                    reserve_pct=entry_data.get(CONF_RESERVE_PCT),
+                    cost_sek=entry_data.get(CONF_COST_SEK) if created_by_ha else None,
+                    purchase_date=entry_data.get(CONF_PURCHASE_DATE),
+                    grid_var_ore=entry_data.get(CONF_GRID_VAR_ORE),
+                    surcharge_ore=entry_data.get(CONF_SURCHARGE_ORE),
+                    export_extra_ore=entry_data.get(CONF_EXPORT_EXTRA_ORE),
+                    nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
+                    nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
                 )
             except WoltaApiError as err:
