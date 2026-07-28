@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_components.wolta.coordinator import WoltaCoordinator, WoltaData
-from custom_components.wolta.sensor import SENSOR_DESCRIPTIONS, WoltaSensor, async_setup_entry
+from custom_components.wolta.sensor import (
+    SENSOR_DESCRIPTIONS,
+    WoltaSensor,
+    _measured_battery_value,
+    async_setup_entry,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -30,13 +35,18 @@ RESULTS_FULL = {
         "holistic": {
             "score_on": 0.82,
             "score_off": 0.61,
-            "measured_total_sek": 9800.0,
-            "model_total_on_sek": 11200.0,
-            "model_total_off_sek": 7100.0,
-            "wear_ore": 12.5,
+            "gross_score_on": 0.85,
+            "measured_period_sek": 9800.0,
+            "measured_wear_sek": 340.0,
+            "model_on_period_sek": 11200.0,
+            "model_on_wear_sek": 410.0,
+            "model_off_period_sek": 7100.0,
         },
+        # factor 1.0 keeps existing native_value assertions (e.g. 9800.0) valid; the
+        # x annual.factor multiplication itself is proven separately below with a
+        # non-trivial factor (test_measured_battery_value_reads_period_times_factor).
+        "annual": {"basis": "measured", "factor": 1.0},
         "price_skill": 0.74,
-        "gap_sek": 1400.0,
         "peer": {"n": 312, "percentile": 68},
         "components": [
             {"key": "timing", "label": "Laddtidpunkt", "captured": 0.80, "possible": 1.0, "possible_on": 0.95},
@@ -77,13 +87,15 @@ RESULTS_EUR = {
         "holistic": {
             "score_on": 0.75,
             "score_off": 0.55,
-            "measured_total_sek": 800.0,
-            "model_total_on_sek": 950.0,
-            "model_total_off_sek": 600.0,
-            "wear_ore": 10.0,
+            "gross_score_on": 0.78,
+            "measured_period_sek": 800.0,
+            "measured_wear_sek": 28.0,
+            "model_on_period_sek": 950.0,
+            "model_on_wear_sek": 33.0,
+            "model_off_period_sek": 600.0,
         },
+        "annual": {"basis": "measured", "factor": 1.0},
         "price_skill": 0.68,
-        "gap_sek": 150.0,
         "peer": {"n": 200, "percentile": 55},
         "components": [],
         "worst_days": [],
@@ -110,13 +122,15 @@ RESULTS_NO_DECISION = {
         "holistic": {
             "score_on": 0.80,
             "score_off": 0.58,
-            "measured_total_sek": 8000.0,
-            "model_total_on_sek": 9500.0,
-            "model_total_off_sek": 6000.0,
-            "wear_ore": 11.0,
+            "gross_score_on": 0.83,
+            "measured_period_sek": 8000.0,
+            "measured_wear_sek": 300.0,
+            "model_on_period_sek": 9500.0,
+            "model_on_wear_sek": 360.0,
+            "model_off_period_sek": 6000.0,
         },
+        "annual": {"basis": "measured", "factor": 1.0},
         "price_skill": 0.70,
-        "gap_sek": 1500.0,
         "peer": {"n": 280, "percentile": 60},
         "components": [],
         "worst_days": [],
@@ -134,13 +148,15 @@ RESULTS_NO_HISTORY = {
         "holistic": {
             "score_on": 0.80,
             "score_off": 0.58,
-            "measured_total_sek": 8000.0,
-            "model_total_on_sek": 9500.0,
-            "model_total_off_sek": 6000.0,
-            "wear_ore": 11.0,
+            "gross_score_on": 0.83,
+            "measured_period_sek": 8000.0,
+            "measured_wear_sek": 300.0,
+            "model_on_period_sek": 9500.0,
+            "model_on_wear_sek": 360.0,
+            "model_off_period_sek": 6000.0,
         },
+        "annual": {"basis": "measured", "factor": 1.0},
         "price_skill": 0.70,
-        "gap_sek": 1500.0,
         "peer": {"n": 280, "percentile": 60},
         "components": [],
         "worst_days": [],
@@ -219,8 +235,12 @@ def test_optimeringsbetyg_attributes():
     assert attrs["peer_percentile"] == 68
     assert "peer_n" in attrs
     assert attrs["peer_n"] == 312
-    assert "gap_sek" in attrs
-    assert attrs["gap_sek"] == pytest.approx(1400.0)
+    assert "annual_basis" in attrs
+    assert attrs["annual_basis"] == "measured"
+    assert "measured_period_sek" in attrs
+    assert attrs["measured_period_sek"] == pytest.approx(9800.0)
+    assert "measured_wear_sek" in attrs
+    assert attrs["measured_wear_sek"] == pytest.approx(340.0)
     assert "price_skill" in attrs
     assert attrs["price_skill"] == pytest.approx(0.74)
     assert "components" in attrs
@@ -229,6 +249,7 @@ def test_optimeringsbetyg_attributes():
     assert "mal" not in attrs
     assert "peer_percentil" not in attrs  # svensk v0.4.3-nyckel, ersatt i v0.4.4
     assert "komponenter" not in attrs
+    assert "gap_sek" not in attrs  # utgått (nettoperiod-payload, 2026-07-27)
 
 
 def test_optimeringsbetyg_unavailable_when_betyg_none():
@@ -253,8 +274,9 @@ def test_optimeringsbetyg_unavailable_when_score_on_missing():
 
 def test_batterivarde_ar_value_is_measured_battery_value():
     """v0.5.0 (plan 33): the sensor shows the grade's MEASURED battery value
-    (betyg.holistic.measured_total_sek) – the same figure as the website's "Du fångade" –
-    not decision.avg_annual_sek which is the ENTIRE plant's savings (solar+battery)."""
+    (holistic.measured_period_sek x annual.factor - factor is 1.0 in this fixture, so
+    the value equals the raw period sum) – not decision.avg_annual_sek which is the
+    ENTIRE plant's savings (solar+battery)."""
     s = _sensor("batterivarde_ar", RESULTS_FULL)
     assert s.native_value == pytest.approx(9800.0)
 
@@ -737,12 +759,13 @@ def test_irr_payback_capex_scope_attribute_absent_on_older_api():
 
 def test_batterivarde_ar_fallback_grade_never_shows_annualized_scrap():
     """Sebastians 3-dygnsanläggning (2026-07-20): ett OMOGET betyg (fallback-läge,
-    score_on=None) bär ändå measured_total_sek - UPPRÄKNAT med 365/n_days, dvs. tre
-    sommardagar x 122 presenterade som årsvärde. Mognadsgrinden är score_on (samma som
-    betygssensorn): utan score → aldrig measured; utan decision → otillgänglig."""
+    score_on=None) bär ändå measured_period_sek - historiskt sett annualiserat med
+    365/n_days, dvs. tre sommardagar presenterade som årsvärde. Mognadsgrinden är
+    score_on (samma som betygssensorn): utan score → aldrig measured; utan decision
+    → otillgänglig. Gate leg 2 (score_on None) blockerar även om annual saknas här."""
     results = {
         **RESULTS_FULL,
-        "betyg": {"holistic": {"score_on": None, "measured_total_sek": 2566.0}},
+        "betyg": {"holistic": {"score_on": None, "measured_period_sek": 2566.0}},
         "decision": None,
     }
     s = _sensor("batterivarde_ar", results)
@@ -752,10 +775,10 @@ def test_batterivarde_ar_fallback_grade_never_shows_annualized_scrap():
 
 def test_batterivarde_ar_fallback_grade_with_decision_says_modelled():
     """Omoget betyg MEN varm decision → modellvärdet används, och source-attributet måste
-    säga 'modelled' (inte 'measured' bara för att measured_total_sek råkar finnas)."""
+    säga 'modelled' (inte 'measured' bara för att measured_period_sek råkar finnas)."""
     results = {
         **RESULTS_FULL,
-        "betyg": {"holistic": {"score_on": None, "measured_total_sek": 2566.0}},
+        "betyg": {"holistic": {"score_on": None, "measured_period_sek": 2566.0}},
     }
     s = _sensor("batterivarde_ar", results)
     assert s.native_value == pytest.approx(2900.0)
@@ -782,14 +805,60 @@ def test_optimeringsbetyg_mature_attrs_say_not_preliminary():
 
 
 def test_batterivarde_ar_preliminary_measured_never_used():
-    """Skärpning av v0.18.1-grinden: ett PRELIMINÄRT betyg har nu ett score, men dess
-    measured_total_sek är fortfarande en ×365/n-uppräkning av ett kort fönster - den får
-    inte visas som årsvärde. Kravet är MOGET betyg (score + inte preliminary)."""
-    base = {"preliminary": True,
-            "holistic": {"score_on": 0.5, "measured_total_sek": 2566.0}}
+    """Nettoperiod-payload (2026-07-27): score_on kan vara satt innan betyget är moget
+    (< 30 dygn), men då saknas annual-blocket helt - grinden kräver BÅDA (annual + score_on),
+    så measured_period_sek får inte visas som årsvärde förrän backend skickar annual."""
+    base = {"holistic": {"score_on": 0.5, "measured_period_sek": 2566.0}}
     s = _sensor("batterivarde_ar", {**RESULTS_FULL, "betyg": base, "decision": None})
     assert s.native_value is None and s.available is False
     # Med varm decision → modellvärdet, ärligt källmärkt.
     s2 = _sensor("batterivarde_ar", {**RESULTS_FULL, "betyg": base})
     assert s2.native_value == pytest.approx(2900.0)
     assert s2.extra_state_attributes.get("source") == "modelled"
+
+
+# ---------------------------------------------------------------------------
+# _measured_battery_value (nettoperiod spec, 2026-07-27): period x annual.factor,
+# gated on BOTH annual presence and score_on. Unit tests on the raw function so the
+# multiplication and both gate legs are proven independently of the sensor plumbing.
+# ---------------------------------------------------------------------------
+
+
+def test_measured_battery_value_reads_period_times_factor():
+    """The sensor keeps kr/year semantics itself: measured_period_sek (a window sum,
+    net of battery wear) x annual.factor. Backend no longer pre-annualizes this field."""
+    results = {
+        "betyg": {
+            "holistic": {"score_on": 0.8, "measured_period_sek": 100.0},
+            "annual": {"basis": "extrapolated", "factor": 8.117},
+        }
+    }
+    assert _measured_battery_value(results) == pytest.approx(811.7)
+
+
+def test_measured_battery_value_none_when_annual_missing():
+    """Gate leg 1: annual is null (< 30 days of data) even though score_on is set →
+    None. annual's presence is the backend-owned maturity threshold; without it the
+    window sum must not be presented as an annual figure."""
+    results = {
+        "betyg": {
+            "holistic": {"score_on": 0.8, "measured_period_sek": 100.0},
+            "annual": None,
+        }
+    }
+    assert _measured_battery_value(results) is None
+
+
+def test_measured_battery_value_none_when_score_on_missing():
+    """Gate leg 2: annual IS present (>= 30-day fallback payloads carry it too) but
+    score_on is None → still None. Dropping this check would make a fallback plant
+    start showing a value where it correctly shows none today - a future simplification
+    of the `if not annual or holistic.get("score_on") is None` gate must not merge these
+    into a single condition that loses this case."""
+    results = {
+        "betyg": {
+            "holistic": {"score_on": None, "measured_period_sek": 100.0},
+            "annual": {"basis": "extrapolated", "factor": 8.0},
+        }
+    }
+    assert _measured_battery_value(results) is None

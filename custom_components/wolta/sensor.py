@@ -78,22 +78,32 @@ def _decision_available(results: dict) -> bool:
 
 
 def _measured_battery_value(results: dict) -> float | None:
-    """betyg.holistic.measured_total_sek, but ONLY from a MATURE grade: score_on set AND
-    not preliminary. A fallback-mode grade (< 7 days) still carries measured_total_sek,
-    ANNUALIZED with 365/n_days - e.g. three summer days x 122 presented as a yearly
-    figure (found on Sebastian's 3-day plant, 2026-07-20) - and a PRELIMINARY grade
-    (7-29 days, backend api 0.43.0) has a real score but the same annualization problem.
-    Neither may surface as "battery value per year"."""
+    """Annualized measured battery value: holistic.measured_period_sek x annual.factor.
+
+    Spec 2026-07-27 (nettoperiod): the payload went period-first - measured_period_sek is
+    a WINDOW sum (net of battery wear on both sides), not a pre-annualized figure, so the
+    sensor does the x annual.factor multiplication itself to keep a stable kr/year unit
+    (HA statistics require it, and the energy dashboard would break on a rolling-window
+    unit).
+
+    Gate: annual must be present AND score_on must be set. annual's presence is the
+    backend-owned maturity threshold (same 30-day floor as the old preliminary flag, now
+    computed server-side) - but annual is also present on >= 30-day FALLBACK payloads
+    (score_on still None), so the score_on check must stay or a fallback plant would start
+    showing a value where it correctly shows none today."""
     betyg = results.get("betyg") or {}
     holistic = betyg.get("holistic") or {}
-    if holistic.get("score_on") is None or betyg.get("preliminary"):
+    annual = betyg.get("annual")
+    if not annual or holistic.get("score_on") is None:
         return None
-    return holistic.get("measured_total_sek")
+    period = holistic.get("measured_period_sek")
+    return round(period * annual["factor"], 2) if period is not None else None
 
 
 def _battery_value(results: dict) -> float | None:
     """Battery value per year – MEASURED from a mature grade when available
-    (betyg.holistic.measured_total_sek, the same figure wolta.se shows),
+    (holistic.measured_period_sek x annual.factor; wolta.se itself shows the raw window
+    sum primarily under 365 days, the sensor applies the same factor to stay annualized),
     otherwise the decision engine's modeled battery share (avg_battery_sek).
     NEVER decision.avg_annual_sek – that's the whole plant's savings
     including the solar value (plan 33)."""
@@ -205,7 +215,15 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 "peer_n": (
                     (data.results.get("betyg") or {}).get("peer") or {}
                 ).get("n"),
-                "gap_sek": (data.results.get("betyg") or {}).get("gap_sek"),
+                "annual_basis": (
+                    (data.results.get("betyg") or {}).get("annual") or {}
+                ).get("basis"),
+                "measured_period_sek": (
+                    (data.results.get("betyg") or {}).get("holistic") or {}
+                ).get("measured_period_sek"),
+                "measured_wear_sek": (
+                    (data.results.get("betyg") or {}).get("holistic") or {}
+                ).get("measured_wear_sek"),
                 "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
                 "components": (data.results.get("betyg") or {}).get("components"),
                 # Preliminärt betyg (backend api 0.43.0): score från 7 dygn, flaggat tills
