@@ -252,6 +252,28 @@ def test_optimeringsbetyg_attributes():
     assert "gap_sek" not in attrs  # utgått (nettoperiod-payload, 2026-07-27)
 
 
+def test_optimeringsbetyg_publishes_negative_score_raw():
+    """A negative grade is published as-is, NOT floored at 0.
+
+    Since spec 2026-07-27 the grade is net of battery wear on both sides, so score_on has
+    no lower bound: a plant cycling harder than is profitable lands below zero (worse than
+    a passive battery). wolta.se refuses to render that as a number and shows an "under
+    the baseline" state instead, but a sensor state is data, not a claim to a reader -
+    flooring would make "at the baseline" and "far below it" indistinguishable in the
+    recorder forever and hide the sign that automations act on. Entity stays available."""
+    results = {**RESULTS_FULL, "betyg": {"holistic": {"score_on": -0.44}}}
+    s = _sensor("optimeringsbetyg", results)
+    assert s.available is True
+    assert s.native_value == pytest.approx(-44.0, abs=0.01)
+
+
+def test_optimeringsbetyg_does_not_clamp_above_100():
+    """Upper end is raw too - the backend clamps score_on at 1.05, so 105 % reaches the
+    sensor and is expected, not an error."""
+    results = {**RESULTS_FULL, "betyg": {"holistic": {"score_on": 1.05}}}
+    assert _sensor("optimeringsbetyg", results).native_value == pytest.approx(105.0, abs=0.01)
+
+
 def test_optimeringsbetyg_unavailable_when_betyg_none():
     s = _sensor("optimeringsbetyg", RESULTS_NO_BETYG)
     assert s.available is False
@@ -825,8 +847,8 @@ def test_batterivarde_ar_preliminary_measured_never_used():
 
 
 def test_measured_battery_value_reads_period_times_factor():
-    """The sensor keeps kr/year semantics itself: measured_period_sek (a window sum,
-    net of battery wear) x annual.factor. Backend no longer pre-annualizes this field."""
+    """The sensor keeps kr/year semantics itself: measured_period_sek (a window sum)
+    x annual.factor. Backend no longer pre-annualizes this field."""
     results = {
         "betyg": {
             "holistic": {"score_on": 0.8, "measured_period_sek": 100.0},
@@ -834,6 +856,29 @@ def test_measured_battery_value_reads_period_times_factor():
         }
     }
     assert _measured_battery_value(results) == pytest.approx(811.7)
+
+
+def test_measured_battery_value_is_gross_not_net_of_wear():
+    """measured_period_sek is GROSS - the wear is reported separately as
+    measured_wear_sek and must NOT be subtracted here.
+
+    An earlier docstring claimed this field was net of wear on both sides. It never was
+    (the backend sets it from g.measured_total_sek), and the wrong claim made a
+    net-looking "fix" look like a bugfix. Publishing gross is the deliberate choice: it
+    keeps the entity's long-term statistics on one basis and matches the modelled
+    decision.avg_battery_sek fallback. This test fails the moment someone subtracts the
+    wear."""
+    results = {
+        "betyg": {
+            "holistic": {
+                "score_on": 0.8,
+                "measured_period_sek": 100.0,
+                "measured_wear_sek": 30.0,   # present, and deliberately ignored
+            },
+            "annual": {"basis": "extrapolated", "factor": 2.0},
+        }
+    }
+    assert _measured_battery_value(results) == pytest.approx(200.0)   # gross, not 140.0
 
 
 def test_measured_battery_value_none_when_annual_missing():

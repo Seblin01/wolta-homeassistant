@@ -44,6 +44,24 @@ class WoltaSensorEntityDescription(SensorEntityDescription):
 
 
 def _betyg_score(results: dict) -> float | None:
+    """Optimisation grade in percent: holistic.score_on x 100, published RAW.
+
+    Spec 2026-07-27 (nettoperiod): the grade is now net of battery wear on both sides, so
+    score_on has no lower bound - a plant that cycles harder than is profitable scores
+    BELOW zero (worse than a fully passive battery). The value is deliberately not floored
+    at 0 here, unlike wolta.se, which refuses to render a negative grade as a number at all
+    and shows an "under the baseline" state instead.
+
+    The two surfaces differ because they serve different consumers. A number on a web page
+    is a claim made to a reader, and "0" would read as "exactly at the baseline" - a lie
+    about a plant that did materially worse. A sensor state is data: it feeds automations,
+    history and statistics, where the sign is the actionable signal and flooring would
+    silently erase how bad the situation is (and make "at baseline" and "far below
+    baseline" indistinguishable forever in the recorder).
+
+    Upper end is untouched too: the backend clamps score_on at 1.05, so values slightly
+    above 100 percent are expected and are not an error.
+    """
     betyg = results.get("betyg") or {}
     holistic = betyg.get("holistic") or {}
     score_on = holistic.get("score_on")
@@ -81,10 +99,25 @@ def _measured_battery_value(results: dict) -> float | None:
     """Annualized measured battery value: holistic.measured_period_sek x annual.factor.
 
     Spec 2026-07-27 (nettoperiod): the payload went period-first - measured_period_sek is
-    a WINDOW sum (net of battery wear on both sides), not a pre-annualized figure, so the
-    sensor does the x annual.factor multiplication itself to keep a stable kr/year unit
-    (HA statistics require it, and the energy dashboard would break on a rolling-window
-    unit).
+    a WINDOW sum, not a pre-annualized figure, so the sensor does the x annual.factor
+    multiplication itself to keep a stable kr/year unit (HA statistics require it, and the
+    energy dashboard would break on a rolling-window unit).
+
+    GROSS, not net. measured_period_sek is the measured battery value BEFORE the wear
+    deduction (the backend sets it from g.measured_total_sek and reports the wear
+    separately as measured_wear_sek). This differs from wolta.se, which shows the NET
+    figure under "Du fangade" in its default wear-on view - for a 100-day plant the two
+    differ by measured_wear_sek x 3.65. Keeping gross here is deliberate: it preserves
+    continuity of the long-term HA statistics for this entity (the value did not silently
+    shift basis mid-history) and it matches the decision.avg_battery_sek fallback in
+    _battery_value below, which is a gross modelled figure - a fallback that changed
+    meaning depending on which branch produced it would be worse than a documented
+    mismatch with the website. Do not "fix" this by subtracting measured_wear_sek without
+    also changing the fallback and accepting the statistics discontinuity.
+
+    Note that the GRADE (see _betyg_score) IS net of wear on both sides. Grade and battery
+    value answer different questions - how well you controlled it, versus what it earned -
+    and do not have to share a wear convention.
 
     Gate: annual must be present AND score_on must be set. annual's presence is the
     backend-owned maturity threshold (same 30-day floor as the old preliminary flag, now

@@ -23,6 +23,26 @@ The `gap_sek` attribute on the optimisation grade sensor is removed (no longer s
 the backend). New attributes: `annual_basis`, `measured_period_sek`,
 `measured_wear_sek`.
 
+**The battery value stays gross, the grade goes net.** These two sensors deliberately use
+different wear conventions, so it is worth being explicit. `batterivarde_ar` (battery value
+per year) reports the measured battery value **before** the wear deduction, the same basis
+it has always used; the wear is available separately as the `measured_wear_sek` attribute
+on the grade sensor if you want to subtract it yourself. wolta.se shows the **net** figure
+under "Du fångade" in its default view, so the website and the sensor will differ by the
+wear amount (for a 100-day plant, `measured_wear_sek` × 3.65). Keeping the sensor on gross
+preserves the continuity of your long-term statistics for that entity and matches the
+modelled fallback it drops back to, which is also a gross figure. The optimisation grade
+itself, on the other hand, is now net on both sides as described above.
+
+**Grades below zero are published as-is.** Because the grade now subtracts wear from both
+sides, a plant that cycles harder than is profitable can score below 0 % — that means it
+did worse than a fully passive battery. The sensor publishes the negative value unchanged
+rather than flooring it at 0, so automations and statistics keep the sign and you can see
+how far below the baseline it is. wolta.se takes the opposite approach and refuses to show
+a negative grade as a number at all, displaying an "under baslinjen" state instead, so the
+same plant looks different in the two places by design. Values slightly above 100 % are
+also passed through (the backend caps the underlying ratio at 1.05).
+
 ### Requires wolta.se API 0.52.0 or later
 
 This is a breaking backend change, but it does not show up as a hard failure in
