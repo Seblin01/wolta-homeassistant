@@ -105,15 +105,28 @@ def _measured_battery_value(results: dict) -> float | None:
 
     GROSS, not net. measured_period_sek is the measured battery value BEFORE the wear
     deduction (the backend sets it from g.measured_total_sek and reports the wear
-    separately as measured_wear_sek). This differs from wolta.se, which shows the NET
-    figure under "Du fangade" in its default wear-on view - for a 100-day plant the two
-    differ by measured_wear_sek x 3.65. Keeping gross here is deliberate: it preserves
+    separately as measured_wear_sek). Keeping gross here is deliberate: it preserves
     continuity of the long-term HA statistics for this entity (the value did not silently
     shift basis mid-history) and it matches the decision.avg_battery_sek fallback in
     _battery_value below, which is a gross modelled figure - a fallback that changed
     meaning depending on which branch produced it would be worse than a documented
     mismatch with the website. Do not "fix" this by subtracting measured_wear_sek without
     also changing the fallback and accepting the statistics discontinuity.
+
+    Comparing this against wolta.se: two things differ, WEAR and UNIT, and only the wear
+    part is a basis choice. This sensor is always SEK/year. The site's "Du fangade" figure
+    follows the upload length: below 365 days (annual.basis "extrapolated") it is a SUM IN
+    KR FOR THE PERIOD, and only from 365 days ("measured") is it a kr/year average. The
+    directly comparable figure on the site is therefore the greyed "uppraknat till helar"
+    line below 365 days, and "Du fangade" itself from 365 days. That figure is net while
+    the site's wear toggle is on (default), so it sits measured_wear_sek x annual.factor
+    below this sensor; with the toggle off it matches exactly.
+
+    Worked example, 120-day plant (period 1123, wear 210, factor 3.044): sensor 3418
+    kr/year, site "Du fangade 913 kr" (period sum, net), site's yearly projection 2779
+    kr/year. 3418 - 2779 = 639 = the wear; the rest of the way down to 913 is the unit.
+    An earlier version of this note claimed the gap was measured_wear_sek x 3.65 against
+    "Du fangade" - that only ever held for >= 365-day plants, where the units agree.
 
     Note that the GRADE (see _betyg_score) IS net of wear on both sides. Grade and battery
     value answer different questions - how well you controlled it, versus what it earned -

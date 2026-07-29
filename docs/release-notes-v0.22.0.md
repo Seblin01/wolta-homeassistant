@@ -27,12 +27,32 @@ the backend). New attributes: `annual_basis`, `measured_period_sek`,
 different wear conventions, so it is worth being explicit. `batterivarde_ar` (battery value
 per year) reports the measured battery value **before** the wear deduction, the same basis
 it has always used; the wear is available separately as the `measured_wear_sek` attribute
-on the grade sensor if you want to subtract it yourself. wolta.se shows the **net** figure
-under "Du fångade" in its default view, so the website and the sensor will differ by the
-wear amount (for a 100-day plant, `measured_wear_sek` × 3.65). Keeping the sensor on gross
+on the grade sensor if you want to subtract it yourself. Keeping the sensor on gross
 preserves the continuity of your long-term statistics for that entity and matches the
 modelled fallback it drops back to, which is also a gross figure. The optimisation grade
 itself, on the other hand, is now net on both sides as described above.
+
+**Comparing the sensor with the website.** This needs a little care, because the two do not
+always show the same *unit*. The sensor is always SEK/year: `measured_period_sek` ×
+`annual.factor`. The "Du fångade" figure on wolta.se follows the length of your upload
+instead — below 365 days (`annual.basis` = `"extrapolated"`) it is a **sum in kr for the
+uploaded period**, not a yearly figure at all, and only from 365 days (`basis` =
+`"measured"`) does it become a measured kr/year average. So the figure that is directly
+comparable to the sensor is:
+
+- **below 365 days:** the greyed-out line under the two cards, "Ditt fångade värde uppräknat
+  till helår blir ungefär X kr/år";
+- **from 365 days:** "Du fångade" itself.
+
+That figure is net of wear while "Räkna med batterislitage" is ticked, which is the default,
+so it sits `measured_wear_sek` × `annual.factor` below the sensor. Untick the box and it
+matches the sensor exactly.
+
+A worked example on a 120-day plant (`measured_period_sek` 1123, `measured_wear_sek` 210,
+`annual.factor` 3.044): the sensor reads 1123 × 3.044 = **3418 kr/year**. The website shows
+"Du fångade **913 kr**" — the period sum, net of wear — and the line below it puts the yearly
+projection at **2779 kr/year**. The 639 kr between 2779 and 3418 is the wear; the rest of the
+distance down to 913 kr is the unit, not a disagreement.
 
 **Grades below zero are published as-is.** Because the grade now subtracts wear from both
 sides, a plant that cycles harder than is profitable can score below 0 % — that means it
