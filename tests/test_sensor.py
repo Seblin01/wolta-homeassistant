@@ -722,6 +722,76 @@ def test_optimeringsbetyg_omits_capacity_hint_when_absent():
 
 
 # ---------------------------------------------------------------------------
+# measured battery parameters on optimeringsbetyg (backend api 0.51.0)
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_measured_params():
+    """When betyg carries the observed_* measurements (backend api 0.51.0), the
+    grade sensor exposes them as flat attributes: value + status per parameter."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {
+            **RESULTS_FULL["betyg"],
+            "observed_capacity": {"kwh": 19.8, "plateau_days": 12, "n_days": 150},
+            "observed_power": {"kw": 9.6, "n_days": 150},
+            "observed_eff": {"eff": 0.91, "n_days": 150},
+            "observed_capacity_status": "ok",
+            "observed_power_status": "ok",
+            "observed_eff_status": "ok",
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("measured_capacity_kwh") == 19.8
+    assert attrs.get("measured_capacity_status") == "ok"
+    assert attrs.get("measured_power_kw") == 9.6
+    assert attrs.get("measured_power_status") == "ok"
+    assert attrs.get("measured_efficiency") == 0.91
+    assert attrs.get("measured_efficiency_status") == "ok"
+
+
+def test_optimeringsbetyg_measured_status_without_value():
+    """Statuses are always sent by a fresh backend even when a measurement has
+    not matured (observed_* dict omitted): the status attribute explains the
+    absence, and the value attribute is omitted entirely (not None)."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {
+            **RESULTS_FULL["betyg"],
+            "observed_power": {"kw": 4.2, "n_days": 18},
+            "observed_capacity_status": "immature",
+            "observed_power_status": "ok",
+            "observed_eff_status": "unmeasurable",
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert "measured_capacity_kwh" not in attrs
+    assert attrs.get("measured_capacity_status") == "immature"
+    assert attrs.get("measured_power_kw") == 4.2
+    assert attrs.get("measured_power_status") == "ok"
+    assert "measured_efficiency" not in attrs
+    assert attrs.get("measured_efficiency_status") == "unmeasurable"
+
+
+def test_optimeringsbetyg_measured_params_absent_on_older_payload():
+    """A grade cached before backend api 0.51.0 has none of the fields -> none
+    of the six attributes appear (absent, not None)."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    for key in (
+        "measured_capacity_kwh",
+        "measured_capacity_status",
+        "measured_power_kw",
+        "measured_power_status",
+        "measured_efficiency",
+        "measured_efficiency_status",
+    ):
+        assert key not in attrs
+
+
+# ---------------------------------------------------------------------------
 # applied_reserve on optimeringsbetyg (plan 38 / task 6)
 # ---------------------------------------------------------------------------
 
