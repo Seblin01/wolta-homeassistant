@@ -32,10 +32,12 @@ sensors to compare what the data shows against what you configured, e.g.:
 
 ### Notes
 
-- Requires backend fields introduced with wolta.se api 0.51.0 (live since 2026-07-28).
-  A grade computed before that lacks the fields until it is recomputed; integration
-  profiles recompute automatically within a day. Until then the attributes are simply
-  absent.
+- The value fields have been in the grade payload for a while (they already power the
+  "adopt measured value" repair flows); the `measured_*_status` fields require wolta.se
+  api 0.51.0 (live since 2026-07-28). A grade cached before that can therefore show
+  value attributes without their status attributes until it is recomputed; integration
+  profiles recompute automatically within a day. Absent fields simply omit their
+  attribute — nothing is set to null.
 - This is presentation only — nothing here affects the grade, and the existing
   "adopt measured value" repair flows are unchanged.
 - No breaking changes. No action needed after upgrading.

@@ -221,32 +221,29 @@ def _capacity_hint_attr(results: dict) -> dict[str, Any]:
 
 
 def _measured_params_attr(results: dict) -> dict[str, Any]:
-    """Measured battery parameters (backend api 0.51.0): capacity/power/efficiency as the
-    uploaded meter data actually shows them, plus a status enum (ok/immature/unmeasurable)
-    explaining why a value is absent. Mirrors the payload as-is – no preliminary-gating
-    here, unlike the adopt repairs (coordinator._evaluate_measured_params), which suggest
-    CHANGING the config and therefore must not act on immature measurements. Every key is
-    omitted entirely (not None) when the payload predates the fields (a grade cached
-    before 0.51.0), same absent-vs-false contract as _capacity_hint_attr above."""
+    """Measured battery parameters: capacity/power/efficiency as the uploaded meter data
+    actually shows them (the observed_* dicts, in the payload since the v0.12.0
+    adopt-repairs era), plus a status enum (ok/immature/unmeasurable) explaining why a
+    value is absent (observed_*_status, backend api 0.51.0). Mirrors the payload as-is –
+    no preliminary-gating here, unlike the adopt repairs
+    (coordinator._evaluate_measured_params), which suggest CHANGING the config and
+    therefore must not act on immature measurements. Every key is omitted entirely (not
+    None) when its payload field is absent – an older cached grade can carry values
+    without statuses, or neither – same absent-vs-false contract as _capacity_hint_attr
+    above."""
     betyg = results.get("betyg") or {}
     attrs: dict[str, Any] = {}
-    oc = betyg.get("observed_capacity")
-    if oc and oc.get("kwh") is not None:
-        attrs["measured_capacity_kwh"] = oc["kwh"]
-    op = betyg.get("observed_power")
-    if op and op.get("kw") is not None:
-        attrs["measured_power_kw"] = op["kw"]
-    oe = betyg.get("observed_eff")
-    if oe and oe.get("eff") is not None:
-        attrs["measured_efficiency"] = oe["eff"]
-    for status_field, attr in (
-        ("observed_capacity_status", "measured_capacity_status"),
-        ("observed_power_status", "measured_power_status"),
-        ("observed_eff_status", "measured_efficiency_status"),
+    for field, value_key, value_attr, status_attr in (
+        ("observed_capacity", "kwh", "measured_capacity_kwh", "measured_capacity_status"),
+        ("observed_power", "kw", "measured_power_kw", "measured_power_status"),
+        ("observed_eff", "eff", "measured_efficiency", "measured_efficiency_status"),
     ):
-        status = betyg.get(status_field)
+        obs = betyg.get(field)
+        if obs:
+            attrs[value_attr] = obs[value_key]
+        status = betyg.get(f"{field}_status")
         if status is not None:
-            attrs[attr] = status
+            attrs[status_attr] = status
     return attrs
 
 

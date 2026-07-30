@@ -138,6 +138,8 @@ Only changed fields are sent to Wolta. After saving, a recompute is triggered au
 - **Peak power** — the most power the battery has charged/discharged at the meter. This is a *lower bound* (your control may never have demanded full power), so the repair opens an **editable field** pre-filled with the measured value and asks you to set the battery's real maximum (its inverter limit). Too low a value flatters the grade; too high unfairly lowers it — confirm or raise the figure.
 - **Round-trip efficiency** — the measured AC energy-out ÷ energy-in. A true measurement, so it's a one-click adopt; corrects a stale efficiency set from thin history at setup.
 
+**The grade sensor exposes the measured parameters as attributes (v0.23.0+).** The same three measurements are available directly on the grade sensor for dashboards and template sensors: `measured_capacity_kwh`, `measured_power_kw` and `measured_efficiency` (a fraction), each with a companion `measured_*_status` attribute — `ok`, `immature` (data hasn't reached the measurement's maturity threshold yet) or `unmeasurable` (impossible with your sensor setup, e.g. a net-metering sensor that collapses the battery flow). These are measured lower bounds, not nameplate specs. An absent value simply omits its attribute; the status says why.
+
 ## Full results on wolta.se
 
 The Wolta device page has a **Visit** link that opens your complete results on wolta.se (grade breakdown, economy drill-downs, history) using your profile token. Note: anyone with access to your Home Assistant can follow the link.

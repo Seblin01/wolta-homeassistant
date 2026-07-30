@@ -775,9 +775,35 @@ def test_optimeringsbetyg_measured_status_without_value():
     assert attrs.get("measured_efficiency_status") == "unmeasurable"
 
 
+def test_optimeringsbetyg_measured_value_without_status():
+    """A grade cached before backend api 0.51.0 can carry the observed_* value
+    dicts (sent since the v0.12.0 adopt-repairs era) without the status fields
+    (new in 0.51.0): values appear, status attributes are omitted."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {
+            **RESULTS_FULL["betyg"],
+            "observed_capacity": {"kwh": 19.8, "plateau_days": 12, "n_days": 150},
+            "observed_eff": {"eff": 0.91, "n_days": 150},
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("measured_capacity_kwh") == 19.8
+    assert attrs.get("measured_efficiency") == 0.91
+    for key in (
+        "measured_capacity_status",
+        "measured_power_kw",
+        "measured_power_status",
+        "measured_efficiency_status",
+    ):
+        assert key not in attrs
+
+
 def test_optimeringsbetyg_measured_params_absent_on_older_payload():
-    """A grade cached before backend api 0.51.0 has none of the fields -> none
-    of the six attributes appear (absent, not None)."""
+    """A payload with none of the measured fields (a very old cached grade, or
+    no measurable battery data) -> none of the six attributes appear (absent,
+    not None)."""
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     attrs = s.extra_state_attributes
     for key in (
