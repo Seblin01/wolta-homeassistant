@@ -24,8 +24,10 @@ Example (Skånska Energi's published model): fixed part 20 öre/kWh + 5.61 % of 
 
 ### Notes
 
-- Requires wolta.se backend api 0.55.0+ (live). Older backends reject the fields
-  with a validation error rather than silently ignoring them.
+- Requires wolta.se backend api 0.55.0+ (live since 2026-07-31). Against an older
+  backend the fields would be accepted but ignored, so the grade would silently keep
+  using the country default — not a concern in practice, since wolta.se is the only
+  deployment and is always current.
 - Setting or clearing a field triggers a grade recompute, like the öre fields.
 - The `applied_tariff` attribute on the grade sensor carries the new keys
   (`grid_var_pct`, `export_extra_pct`) automatically once the grade is recomputed.
