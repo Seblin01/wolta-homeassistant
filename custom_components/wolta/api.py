@@ -120,6 +120,8 @@ class WoltaApiClient:
         grid_var_ore: float | None = None,
         surcharge_ore: float | None = None,
         export_extra_ore: float | None = None,
+        grid_var_pct: float | None = None,
+        export_extra_pct: float | None = None,
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
@@ -147,6 +149,10 @@ class WoltaApiClient:
             payload["surcharge_ore"] = surcharge_ore
         if export_extra_ore is not None:
             payload["export_extra_ore"] = export_extra_ore
+        if grid_var_pct is not None:
+            payload["grid_var_pct"] = grid_var_pct
+        if export_extra_pct is not None:
+            payload["export_extra_pct"] = export_extra_pct
         # Plain `is not None` (not `or None`): reserve_pct=0 is a legitimate value
         # (a user whose control system keeps zero reserve floor) and must reach
         # the backend, not be swallowed as "unset". Mirrors the tariff fields above.

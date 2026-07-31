@@ -26,6 +26,10 @@ CONF_PURCHASE_DATE = "purchase_date"
 CONF_GRID_VAR_ORE = "grid_var_ore"
 CONF_SURCHARGE_ORE = "surcharge_ore"
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
+# Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
+# spot (southern-Sweden DSO model) and export compensation as % of spot.
+CONF_GRID_VAR_PCT = "grid_var_pct"
+CONF_EXPORT_EXTRA_PCT = "export_extra_pct"
 # Battery charge/discharge reversed (issue #1): some community integrations/meters
 # (Emaldo, signed Shelly) map the directions the wrong way → inverted grade. The flag swaps
 # batt_in/batt_out in the upload path so the user doesn't have to change their HA sensors.

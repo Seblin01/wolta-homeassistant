@@ -45,9 +45,11 @@ from .const import (
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
+    CONF_EXPORT_EXTRA_PCT,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
+    CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
@@ -390,6 +392,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_EXPORT_EXTRA_ORE): _number_selector(
                     min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
                 ),
+                vol.Optional(CONF_GRID_VAR_PCT): _number_selector(
+                    min_val=0.0, max_val=100.0, step=0.01, unit="% of spot"
+                ),
+                vol.Optional(CONF_EXPORT_EXTRA_PCT): _number_selector(
+                    min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot"
+                ),
                 # Förvald när historiken visar stadigt ur > in (omkastade sensorer)
                 vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
                     BooleanSelectorConfig()
@@ -500,6 +508,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             grid_var_ore: float | None = self._plant_data.get(CONF_GRID_VAR_ORE)
             surcharge_ore: float | None = self._plant_data.get(CONF_SURCHARGE_ORE)
             export_extra_ore: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_ORE)
+            grid_var_pct: float | None = self._plant_data.get(CONF_GRID_VAR_PCT)
+            export_extra_pct: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_PCT)
             reserve_pct: float | None = self._plant_data.get(CONF_RESERVE_PCT)
             nameplate_kwh: float | None = self._plant_data.get(CONF_NAMEPLATE_KWH)
             nameplate_kw: float | None = self._plant_data.get(CONF_NAMEPLATE_KW)
@@ -519,6 +529,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     grid_var_ore=grid_var_ore,
                     surcharge_ore=surcharge_ore,
                     export_extra_ore=export_extra_ore,
+                    grid_var_pct=grid_var_pct,
+                    export_extra_pct=export_extra_pct,
                     reserve_pct=reserve_pct,
                     nameplate_kwh=nameplate_kwh,
                     nameplate_kw=nameplate_kw,
@@ -560,6 +572,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_SURCHARGE_ORE] = surcharge_ore
                 if export_extra_ore is not None:
                     entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
+                if grid_var_pct is not None:
+                    entry_data[CONF_GRID_VAR_PCT] = grid_var_pct
+                if export_extra_pct is not None:
+                    entry_data[CONF_EXPORT_EXTRA_PCT] = export_extra_pct
                 if reserve_pct is not None:
                     entry_data[CONF_RESERVE_PCT] = reserve_pct
                 if nameplate_kwh is not None:
@@ -672,6 +688,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_NAMEPLATE_KW, CONF_EFF,
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+            CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -704,6 +721,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_NAMEPLATE_KW, CONF_EFF,
                 CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
                 CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+                CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
             ):
                 if prof.get(key) is not None:
                     entry_data[key] = prof[key]
@@ -794,6 +812,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     grid_var_ore=entry_data.get(CONF_GRID_VAR_ORE),
                     surcharge_ore=entry_data.get(CONF_SURCHARGE_ORE),
                     export_extra_ore=entry_data.get(CONF_EXPORT_EXTRA_ORE),
+                    grid_var_pct=entry_data.get(CONF_GRID_VAR_PCT),
+                    export_extra_pct=entry_data.get(CONF_EXPORT_EXTRA_PCT),
                     nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
                     nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
@@ -876,7 +896,8 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         CONF_EFF, CONF_RESERVE_PCT,
     ),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
-    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE),
+    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+                   CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT),
 }
 # Required fields (always present in the form, prefilled from the server snapshot)
 _REQUIRED_FIELDS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
@@ -1045,6 +1066,8 @@ class WoltaOptionsFlow(OptionsFlow):
             _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
+            _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")),
+            _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
         ]))
 
         schema = vol.Schema({

@@ -27,9 +27,11 @@ from custom_components.wolta.const import (
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
+    CONF_EXPORT_EXTRA_PCT,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
+    CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
@@ -1222,7 +1224,7 @@ def _make_mock_entry(hass: HomeAssistant, extra_data: dict | None = None) -> Any
 _SYNC_KEYS = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
-    CONF_EXPORT_EXTRA_ORE,
+    CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
 )
 
 
@@ -1243,6 +1245,7 @@ _OPT_SECTION_OF = {
     CONF_COST_SEK: "economy", CONF_PURCHASE_DATE: "economy",
     CONF_GRID_VAR_ORE: "tariffs", CONF_SURCHARGE_ORE: "tariffs",
     CONF_EXPORT_EXTRA_ORE: "tariffs",
+    CONF_GRID_VAR_PCT: "tariffs", CONF_EXPORT_EXTRA_PCT: "tariffs",
 }
 
 
@@ -2792,3 +2795,114 @@ async def test_reconfigure_aborts_for_view_only(hass: HomeAssistant) -> None:
     result = await entry.start_reconfigure_flow(hass)
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "view_only_no_reconfigure"
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_pct_fields_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """Percent-of-spot fields (backend api 0.55.0) filled in the plant step are
+    passed to create_profile and stored, mirroring the öre fields exactly."""
+    mock_client = _mock_client()
+    step_user_with_pct = {
+        **STEP_USER_DATA,
+        CONF_GRID_VAR_PCT: 5.61,
+        CONF_EXPORT_EXTRA_PCT: 5.0,
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=step_user_with_pct
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    _, kwargs = mock_client.create_profile.call_args
+    assert kwargs["grid_var_pct"] == 5.61
+    assert kwargs["export_extra_pct"] == 5.0
+    data = result["data"]
+    assert data[CONF_GRID_VAR_PCT] == 5.61
+    assert data[CONF_EXPORT_EXTRA_PCT] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_options_flow_changes_pct_field(hass: HomeAssistant) -> None:
+    """Changing grid_var_pct in the options flow → patch_profile with the new value."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_PCT: 5.61},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                CONF_GRID_VAR_PCT: 7.5,  # changed
+            }),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"grid_var_pct": 7.5}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_PCT] == 7.5
+
+
+@pytest.mark.asyncio
+async def test_options_flow_clears_pct_field(hass: HomeAssistant) -> None:
+    """Clearing a previously set pct field → patch_profile null (clear-to-schablon),
+    and an unrelated change preserves an untouched pct field (no silent wipe)."""
+    entry = _make_mock_entry(
+        hass,
+        extra_data={CONF_GRID_VAR_PCT: 5.61},
+    )
+    mock_client, mock_coordinator = _mock_options_env(entry)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{
+                CONF_BATTERY_KWH: 22.0,
+                CONF_BATTERY_KW: 5.0,
+                CONF_EFF: 0.9,
+                # grid_var_pct omitted = actively cleared
+            }),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {"grid_var_pct": None}

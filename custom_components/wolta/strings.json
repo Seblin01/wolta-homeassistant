@@ -110,6 +110,8 @@
           "grid_var_ore": "Grid fee (öre/ct per kWh) – optional",
           "surcharge_ore": "Electricity supplier markup (öre/ct per kWh) – optional",
           "export_extra_ore": "Export premium/discount (öre/ct per kWh) – optional",
+          "grid_var_pct": "Grid fee, percent of spot (% of spot) – optional",
+          "export_extra_pct": "Export compensation, percent of spot (% of spot) – optional",
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
@@ -124,6 +126,8 @@
           "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
           "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
           "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Leave blank to use your country's standard tariff.",
+          "grid_var_pct": "The variable part of your grid fee expressed as a percent of the spot price (common in southern Sweden since 2026: fixed öre part + percent part). Leave blank if your grid fee is öre-only.",
+          "export_extra_pct": "Export compensation expressed as a percent of the spot price (can be negative). Leave blank if your compensation is öre-only.",
           "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
         }
       },
@@ -224,12 +228,16 @@
             "data": {
               "grid_var_ore": "Grid fee (öre/ct per kWh)",
               "surcharge_ore": "Electricity supplier markup (öre/ct per kWh)",
-              "export_extra_ore": "Export premium/discount (öre/ct per kWh)"
+              "export_extra_ore": "Export premium/discount (öre/ct per kWh)",
+              "grid_var_pct": "Grid fee, percent of spot (% of spot)",
+              "export_extra_pct": "Export compensation, percent of spot (% of spot)"
             },
             "data_description": {
               "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
               "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
-              "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff."
+              "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff.",
+              "grid_var_pct": "The variable part of your grid fee as a percent of the spot price. Clear the field to remove the percent component.",
+              "export_extra_pct": "Export compensation as a percent of the spot price (can be negative). Clear the field to remove the percent component."
             }
           }
         },
