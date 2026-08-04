@@ -57,6 +57,13 @@ CONF_PLANT_ID = "plant_id"
 # profile (it just asks for a fresh token). Missing key = False (every pre-v0.18.0 entry
 # streams).
 CONF_VIEW_ONLY = "view_only"
+# Set when the user dismisses the measured-power repair via its "ignore" option. observed_power
+# is only a lower bound and can be inflated by chronic sensor jumps in the cumulative HA
+# statistics, so a user who stands by their configured power must be able to silence the nudge
+# permanently. The coordinator suppresses the repair while this is truthy; adopting a value via
+# the repair's "set power" path clears it (the user re-engaged). Client-only, never sent to the
+# server, so it is absent from _PROFILE_SYNC_KEYS.
+CONF_POWER_ISSUE_IGNORED = "power_issue_ignored"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

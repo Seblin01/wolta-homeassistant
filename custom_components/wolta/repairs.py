@@ -24,8 +24,16 @@ from homeassistant import data_entry_flow
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
-from .const import CONF_BATTERY_KW, CONF_BATTERY_KWH, CONF_EFF, CONF_RESERVE_PCT
+from .const import (
+    CONF_BATTERY_KW,
+    CONF_BATTERY_KWH,
+    CONF_EFF,
+    CONF_POWER_ISSUE_IGNORED,
+    CONF_RESERVE_PCT,
+    DOMAIN,
+)
 
 
 class _AdoptRepairFlow(RepairsFlow):
@@ -100,28 +108,60 @@ class MeasuredEfficiencyRepairFlow(_AdoptRepairFlow):
 
 
 class MeasuredPowerRepairFlow(_AdoptRepairFlow):
-    """Set the peak power, pre-filled with the measured value but editable.
+    """Set the peak power, pre-filled with the measured value but editable — or ignore it.
 
-    Observed power is a lower bound, so the user confirms or raises it to the battery's real
-    maximum instead of blindly adopting a possibly-too-low measurement."""
+    Observed power is only a LOWER bound (the controller may never have demanded full power), and
+    it has no hard physical ceiling, so chronic sensor jumps can inflate it above the hardware
+    maximum. The user therefore gets a menu: set the battery's real maximum, or ignore the nudge
+    and keep their configured value (persisted so it stops re-appearing)."""
 
-    def __init__(self, entry: ConfigEntry, measured_kw: float) -> None:
+    def __init__(self, entry: ConfigEntry, measured_kw: float, *,
+                 configured_kw: float | None = None, days: int = 0) -> None:
         super().__init__(entry)
         self._measured_kw = measured_kw
+        self._configured_kw = configured_kw
+        self._days = days
 
-    async def async_step_confirm(self, user_input=None) -> data_entry_flow.FlowResult:
+    def _placeholders(self) -> dict[str, str]:
+        return {
+            "measured": f"{self._measured_kw:.1f}",
+            "configured": f"{self._configured_kw:.1f}" if self._configured_kw else "?",
+            "days": str(self._days),
+        }
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return self.async_show_menu(
+            step_id="init", menu_options=["set_power", "ignore"],
+            description_placeholders=self._placeholders())
+
+    async def async_step_set_power(self, user_input=None) -> data_entry_flow.FlowResult:
         if user_input is not None:
             kw = float(user_input[CONF_BATTERY_KW])
             new_data = {**self._entry.data, CONF_BATTERY_KW: kw}
+            # The user re-engaged with the value → clear any prior "ignore" so a future genuine
+            # mismatch can surface again.
+            new_data.pop(CONF_POWER_ISSUE_IGNORED, None)
             return await self._finish(patch={"battery_kw": kw}, new_data=new_data)
         return self.async_show_form(
-            step_id="confirm",
+            step_id="set_power",
             data_schema=vol.Schema({
                 vol.Required(CONF_BATTERY_KW, default=self._measured_kw): vol.All(
                     vol.Coerce(float), vol.Range(min=0.1, max=100.0)),
             }),
-            description_placeholders={"measured": f"{self._measured_kw:.1f}"},
+            description_placeholders=self._placeholders(),
         )
+
+    async def async_step_ignore(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Persist the dismissal (the coordinator suppresses the repair while it's set) and clear
+        # the currently-open issue immediately instead of waiting for the next poll. No server
+        # PATCH/recompute: the configured value is unchanged, only the client-side nudge is muted.
+        new_data = {**self._entry.data, CONF_POWER_ISSUE_IGNORED: True}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        ir.async_delete_issue(
+            self.hass, DOMAIN, f"measured_power_{self._entry.entry_id}")
+        return self.async_create_entry(title="", data={})
 
 
 async def async_create_fix_flow(
@@ -132,7 +172,11 @@ async def async_create_fix_flow(
     data = data or {}
     entry = hass.config_entries.async_get_entry(data.get("entry_id", ""))
     if issue_id.startswith("measured_power"):
-        return MeasuredPowerRepairFlow(entry, float(data.get("measured_kw", 0.0)))
+        configured = data.get("configured_kw")
+        return MeasuredPowerRepairFlow(
+            entry, float(data.get("measured_kw", 0.0)),
+            configured_kw=float(configured) if configured is not None else None,
+            days=int(data.get("days", 0)))
     if issue_id.startswith("measured_efficiency"):
         return MeasuredEfficiencyRepairFlow(entry, float(data.get("measured_eff", 0.0)))
     return MeasuredCapacityRepairFlow(entry, float(data.get("measured_kwh", 0.0)))

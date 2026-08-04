@@ -26,7 +26,15 @@
       "title": "Check your battery's maximum power",
       "fix_flow": {
         "step": {
-          "confirm": {
+          "init": {
+            "title": "Check your battery's maximum power",
+            "description": "Over {days} days, the most power your battery has charged or discharged at the meter is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing, and a chronically spiky sensor can push it above what the hardware can really deliver. Set your battery's true maximum power (its inverter limit), or ignore this and keep the value you entered.",
+            "menu_options": {
+              "set_power": "Set the maximum power",
+              "ignore": "Ignore and keep my value"
+            }
+          },
+          "set_power": {
             "title": "Set the battery's maximum power",
             "description": "Over {days} days, the most power your battery has charged or discharged at the meter is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing — if your control never demanded full power, the real maximum may be higher. Enter your battery's true maximum power (its inverter limit). A perfect controller would use all of it, so a value set too low would flatter your grade and one set too high would unfairly lower it. It's probably around {measured} kW — raise it if your battery can do more.",
             "data": {

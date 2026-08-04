@@ -1529,6 +1529,49 @@ async def test_power_issue_raise_fires_on_small_gap(hass, mock_entry):
     assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is not None
 
 
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_NAMEPLATE_KW as _CNPKW,
+    CONF_POWER_ISSUE_IGNORED as _CPII,
+)
+
+
+@pytest.mark.asyncio
+async def test_power_issue_suppressed_above_physical_ceiling(hass, mock_entry):
+    """Jans fall: 9.9 kW-batteri, uppmätt 27.5 kW (sensor-hopp i kumulativ HA-statistik som
+    observed_power inte kan skilja från äkta effekt). 27.5 > 9.9×1.5 = 14.85 → fysiskt omöjligt
+    → artefakt, inte en underdeklaration → höj-förslaget tystas (kcommer inte tillbaka)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 9.9})
+    c._evaluate_measured_params(_op_results(27.5))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_power_issue_still_fires_within_physical_ceiling(hass, mock_entry):
+    """En äkta måttlig underdeklaration (satte 9.9, batteriet gör 12 = 1.21× < 1.5×) är fysiskt
+    rimlig → höj-nudgen ska fortfarande komma (grinden får inte översuppa)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 9.9})
+    c._evaluate_measured_params(_op_results(12.0))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_power_ceiling_uses_nameplate_when_higher(hass, mock_entry):
+    """Fysiktaket refererar märkeffekten när den är satt och högre: batteri 9.9 men märkt 20 kW
+    → tak = max(20, 9.9)×1.5 = 30 → uppmätt 25 (över 9.9-referensen men under märk-taket) ska
+    fortfarande nudga upp, inte tystas."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 9.9, _CNPKW: 20.0})
+    c._evaluate_measured_params(_op_results(25.0))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_power_issue_suppressed_when_ignored(hass, mock_entry):
+    """Användaren har tryckt 'ignorera' → flaggan tystar en annars eldande nudge (3.0 vs 3.6)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBKW: 3.0, _CPII: True})
+    c._evaluate_measured_params(_op_results(3.6))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is None
+
+
 # ---------------------------------------------------------------------------
 # View-only entries (bound plants): never upload, never recompute
 # ---------------------------------------------------------------------------

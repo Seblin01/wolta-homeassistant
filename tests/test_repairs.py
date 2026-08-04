@@ -96,26 +96,96 @@ from custom_components.wolta.repairs import (  # noqa: E402
 )
 
 
+from custom_components.wolta.const import CONF_POWER_ISSUE_IGNORED  # noqa: E402
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_power_repair_menu_offers_set_and_ignore(hass: HomeAssistant):
+    """The power repair opens on a menu so the user can either set the real power or dismiss it."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_BATTERY_KW: 10.0}
+
+    flow = MeasuredPowerRepairFlow(entry, 3.6)
+    flow.hass = hass
+    menu = await flow.async_step_init()
+    assert menu["type"] == "menu"
+    assert set(menu["menu_options"]) == {"set_power", "ignore"}
+
+
 @pytest.mark.asyncio
 async def test_power_repair_uses_editable_field(hass: HomeAssistant):
-    """Power flow shows a field pre-filled with the measured peak; the user can raise it,
-    and the submitted value (not the measured one) is what gets PATCHed."""
+    """The set-power branch shows a field pre-filled with the measured peak; the user can raise
+    it, and the submitted value (not the measured one) is what gets PATCHed."""
     entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
     entry.data = {CONF_BATTERY_KW: 10.0}
     hass.config_entries.async_update_entry = MagicMock()
 
     flow = MeasuredPowerRepairFlow(entry, 3.6)
     flow.hass = hass
-    form = await flow.async_step_init()
+    form = await flow.async_step_set_power()
     assert form["type"] == "form"
+    assert form["step_id"] == "set_power"
     assert form["description_placeholders"]["measured"] == "3.6"
 
     # User raises it to the real inverter limit (5 kW) rather than accepting 3.6.
-    result = await flow.async_step_confirm({CONF_BATTERY_KW: 5.0})
+    result = await flow.async_step_set_power({CONF_BATTERY_KW: 5.0})
     assert result["type"] == "create_entry"
     coordinator.client.patch_profile.assert_awaited_once_with("tok", battery_kw=5.0)
     new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
     assert new_data[CONF_BATTERY_KW] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_power_repair_form_shows_full_context(hass: HomeAssistant):
+    """The set-power form restates the configured value and history length (threaded from the
+    issue), not just the measured peak — so the placeholders in the string are all filled."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_BATTERY_KW: 9.9}
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(
+        hass, "measured_power_e1",
+        {"entry_id": "e1", "measured_kw": 27.5, "configured_kw": 9.9, "days": 317})
+    flow.hass = hass
+    form = await flow.async_step_set_power()
+    ph = form["description_placeholders"]
+    assert ph["measured"] == "27.5"
+    assert ph["configured"] == "9.9"
+    assert ph["days"] == "317"
+
+
+@pytest.mark.asyncio
+async def test_power_repair_set_power_clears_ignore_flag(hass: HomeAssistant):
+    """Adopting a value re-engages the user → any earlier 'ignore' is cleared, so a future
+    genuine mismatch can surface again."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_BATTERY_KW: 10.0, CONF_POWER_ISSUE_IGNORED: True}
+    hass.config_entries.async_update_entry = MagicMock()
+
+    flow = MeasuredPowerRepairFlow(entry, 3.6)
+    flow.hass = hass
+    await flow.async_step_set_power({CONF_BATTERY_KW: 5.0})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert CONF_POWER_ISSUE_IGNORED not in new_data
+
+
+@pytest.mark.asyncio
+async def test_power_repair_ignore_persists_flag_and_clears_issue(hass: HomeAssistant):
+    """The ignore branch persists the dismissal flag and deletes the open repair immediately."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {CONF_BATTERY_KW: 10.0}
+    hass.config_entries.async_update_entry = MagicMock()
+    ir.async_create_issue(
+        hass, "wolta", "measured_power_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="measured_power")
+
+    flow = MeasuredPowerRepairFlow(entry, 27.5)
+    flow.hass = hass
+    result = await flow.async_step_ignore()
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_POWER_ISSUE_IGNORED] is True
+    assert ir.async_get(hass).async_get_issue("wolta", "measured_power_e1") is None
 
 
 @pytest.mark.asyncio
