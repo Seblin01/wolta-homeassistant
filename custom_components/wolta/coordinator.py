@@ -34,6 +34,8 @@ from .const import (
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
+    CONF_NAMEPLATE_KW,
+    CONF_POWER_ISSUE_IGNORED,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SOLAR,
@@ -108,6 +110,11 @@ _CAP_TRUST_EFF = 0.80
 # value down (flattering the grade), so demand a bigger gap.
 _POWER_GAP = 0.15
 _POWER_GAP_SHRINK = 0.30
+# A battery cannot sustain charge/discharge above ~1.5× its declared inverter power (the same
+# physical ceiling the backend's per-hour energy cap uses, spec 2026-08-03). observed_power above
+# this multiple of the declared power (nameplate or configured) is a sensor artefact → don't
+# nudge the user to raise their (correct) value to it.
+_POWER_MAX_PHYSICAL = 1.5
 _EFF_ABS_GAP = 0.08        # absolute round-trip gap (eff is 0.5–1.0; a true measurement)
 _EFF_MAX_PLAUSIBLE = 0.98  # don't adopt an implausibly high round-trip (clamp/boundary artefact)
 
@@ -713,12 +720,30 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         op = betyg.get("observed_power") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_BATTERY_KW)
         measured = float(op["kw"]) if op and op.get("kw") else None
+        # Physical-ceiling gate (Jan Hinders, 2026-08-04): observed_power has only spike
+        # protection (3rd-highest interval), no hard ceiling. Chronic sensor jumps in a
+        # cumulative HA statistic can inflate it far above the hardware maximum (a 9.9 kW battery
+        # "measured" at 27.5 kW). A battery can't sustain charge/discharge above its inverter
+        # power, so a measurement exceeding the declared power (nameplate if set, else configured)
+        # by more than the fysiktak tolerance is a data artefact, not an under-declaration.
+        # Suppress the UP suggestion only — a DOWN one (measured < configured) is always below
+        # the ceiling and stays valid. Mirrors the capacity trust gate (untrusted_up).
+        nameplate = self.config_entry.data.get(CONF_NAMEPLATE_KW)
+        ceiling_ref = max(nameplate or 0.0, configured or 0.0)
+        untrusted_up = (
+            measured is not None and ceiling_ref > 0
+            and measured > ceiling_ref * _POWER_MAX_PHYSICAL
+        )
+        # The user can dismiss the nudge for good (repair "ignore"); they stand by their value.
+        ignored = bool(self.config_entry.data.get(CONF_POWER_ISSUE_IGNORED))
         fire = False
         if (
             measured is not None
             and configured
             and configured > 0
             and op.get("n_days", 0) >= _CAP_MATURE_DAYS
+            and not untrusted_up
+            and not ignored
         ):
             gap = abs(measured - configured) / configured
             # Raise = high-confidence (small gap); lower = risky (needs a bigger gap).
@@ -732,7 +757,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 "configured": f"{configured:.1f}",
                 "days": str(op.get("n_days", 0)),
             } if fire else {},
-            data={"measured_kw": measured} if fire else {},
+            # configured_kw/days are threaded to the fix flow too: a custom RepairsFlow does not
+            # inherit the issue's translation_placeholders (only the default ConfirmRepairFlow
+            # does), so the flow must be given every value its step strings reference.
+            data={"measured_kw": measured, "configured_kw": configured,
+                  "days": op.get("n_days", 0)} if fire else {},
         )
 
     def _evaluate_efficiency_issue(self, betyg: dict) -> None:

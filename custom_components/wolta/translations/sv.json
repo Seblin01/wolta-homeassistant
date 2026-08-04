@@ -26,7 +26,15 @@
       "title": "Kontrollera batteriets maxeffekt",
       "fix_flow": {
         "step": {
-          "confirm": {
+          "init": {
+            "title": "Kontrollera batteriets maxeffekt",
+            "description": "Under {days} dygn är den högsta effekt batteriet laddat eller laddat ur vid mätaren ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra, och en sensor som hoppar kan pressa upp värdet över vad hårdvaran faktiskt klarar. Ange batteriets verkliga maxeffekt (växelriktarens gräns), eller ignorera detta och behåll värdet du angett.",
+            "menu_options": {
+              "set_power": "Ange maxeffekten",
+              "ignore": "Ignorera och behåll mitt värde"
+            }
+          },
+          "set_power": {
             "title": "Ange batteriets maxeffekt",
             "description": "Under {days} dygn är den högsta effekt batteriet laddat eller laddat ur vid mätaren ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra — om din styrning aldrig bad om full effekt kan det verkliga maxvärdet vara högre. Ange batteriets verkliga maxeffekt (växelriktarens gräns). En perfekt styrning skulle utnyttja hela, så ett för lågt värde smickrar betyget och ett för högt sänker det orättvist. Det ligger troligen runt {measured} kW — höj om batteriet klarar mer.",
             "data": {
