@@ -25,8 +25,10 @@ from .const import (
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_CAPACITY_ISSUE_IGNORED,
     CONF_COST_SEK,
     CONF_EFF,
+    CONF_EFFICIENCY_ISSUE_IGNORED,
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
     CONF_GRID_IN,
@@ -690,6 +692,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         untrusted_up = (eff_signal is not None and eff_signal < _CAP_TRUST_EFF
                         and measured is not None and effective is not None
                         and measured > effective)
+        ignored = bool(self.config_entry.data.get(CONF_CAPACITY_ISSUE_IGNORED))
         fire = (
             measured is not None
             and effective
@@ -698,6 +701,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             and oc.get("plateau_days", 0) >= _CAP_PLATEAU_DAYS
             and abs(measured - effective) / effective >= _CAP_GAP
             and not untrusted_up
+            and not ignored
         )
         self._set_measured_issue(
             _ISSUE_CAPACITY,
@@ -708,7 +712,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 "configured": f"{effective:.1f}",
                 "days": str(oc.get("n_days", 0)),
             } if fire else {},
-            data={"measured_kwh": measured} if fire else {},
+            data={"measured_kwh": measured, "configured_kwh": effective,
+                  "days": oc.get("n_days", 0)} if fire else {},
         )
 
     def _evaluate_power_issue(self, betyg: dict) -> None:
@@ -771,6 +776,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         oe = betyg.get("observed_eff") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_EFF)
         measured = float(oe["eff"]) if oe and oe.get("eff") else None
+        # observed_eff = Σdischarged/Σcharged over all history. Spurious sensor jumps inflate the
+        # charged sum → the ratio is biased LOW (a plausible-but-wrong figure like 0.76 for a real
+        # ~0.90 round-trip). There is no clean physical floor that separates a genuine low AC
+        # round-trip from an artefact, so unlike power there is no auto-suppression — but the user
+        # can dismiss it (the ignore option), which persists here.
+        ignored = bool(self.config_entry.data.get(CONF_EFFICIENCY_ISSUE_IGNORED))
         fire = (
             measured is not None
             and configured
@@ -779,6 +790,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # high is a clamp/window-boundary artefact, so don't offer to adopt it.
             and measured < _EFF_MAX_PLAUSIBLE
             and abs(measured - float(configured)) >= _EFF_ABS_GAP
+            and not ignored
         )
         self._set_measured_issue(
             _ISSUE_EFFICIENCY,
@@ -789,7 +801,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 "configured": f"{float(configured):.2f}",
                 "days": str(oe.get("n_days", 0)),
             } if fire else {},
-            data={"measured_eff": measured} if fire else {},
+            data={"measured_eff": measured, "configured_eff": float(configured),
+                  "days": oe.get("n_days", 0)} if fire else {},
         )
 
     # ------------------------------------------------------------------

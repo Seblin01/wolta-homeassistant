@@ -1572,6 +1572,28 @@ async def test_power_issue_suppressed_when_ignored(hass, mock_entry):
     assert ir.async_get(hass).async_get_issue(DOMAIN, _POWER_ISSUE_ID) is None
 
 
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_CAPACITY_ISSUE_IGNORED as _CCII,
+    CONF_EFFICIENCY_ISSUE_IGNORED as _CEII,
+)
+
+
+@pytest.mark.asyncio
+async def test_capacity_issue_suppressed_when_ignored(hass, mock_entry):
+    """Ignorera-flaggan tystar kapacitetsnudgen (15 vs uppmätt 11 skulle annars elda)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0, _CCII: True})
+    c._evaluate_measured_params(_oc_results(11.0))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_suppressed_when_ignored(hass, mock_entry):
+    """Jans fall: ignorera-flaggan tystar verkningsgradsnudgen (0.9 vs uppmätt 0.76)."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.9, _CEII: True})
+    c._evaluate_measured_params(_oe_results(0.76))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
 # ---------------------------------------------------------------------------
 # View-only entries (bound plants): never upload, never recompute
 # ---------------------------------------------------------------------------

@@ -12,6 +12,14 @@
       "title": "Wolta mätte en annan batterikapacitet",
       "fix_flow": {
         "step": {
+          "init": {
+            "title": "Använd den uppmätta batterikapaciteten?",
+            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan), inte märkt kapacitet. Använd det (det nollar även eventuell reserv, som mätningen redan exkluderar), eller behåll ditt värde — t.ex. om du inte fulladdat eller urladdat helt under perioden.",
+            "menu_options": {
+              "confirm": "Använd den uppmätta kapaciteten",
+              "ignore": "Ignorera och behåll mitt värde"
+            }
+          },
           "confirm": {
             "title": "Använd den uppmätta batterikapaciteten?",
             "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan) — inte märkt kapacitet eller cell-talet din batteri-app kan visa vid 100 %, som är högre eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på din hårdvara, så värdet bör motsvara vad batteriet verkligen flyttar.\n\nAnvänd {measured} kWh? Det sätter batterikapaciteten och nollar eventuell reserv (det uppmätta värdet exkluderar den redan). Har du bara inte fulladdat eller urladdat helt under perioden kan du strunta i detta och avfärda ärendet."
@@ -54,6 +62,14 @@
       "title": "Wolta mätte en annan verkningsgrad",
       "fix_flow": {
         "step": {
+          "init": {
+            "title": "Använd den uppmätta verkningsgraden?",
+            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nDet är AC-round-trip vägg-till-vägg, alltså lägre än batteriets DC/cell-siffra. Använd den för att göra ekonomin ärlig, eller behåll ditt värde om du tror att din verkliga round-trip är högre — en hoppande sensor kan dra ned mätningen.",
+            "menu_options": {
+              "confirm": "Använd den uppmätta verkningsgraden",
+              "ignore": "Ignorera och behåll mitt värde"
+            }
+          },
           "confirm": {
             "title": "Använd den uppmätta verkningsgraden?",
             "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nBetyget jämför dig med en perfekt styrning på din hårdvara, så verkningsgraden bör motsvara batteriets verkliga AC-round-trip. Den kan bli fel om den sattes utifrån tunn historik vid installationen. Använd {measured}?"

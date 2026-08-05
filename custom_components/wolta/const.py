@@ -64,6 +64,12 @@ CONF_VIEW_ONLY = "view_only"
 # the repair's "set power" path clears it (the user re-engaged). Client-only, never sent to the
 # server, so it is absent from _PROFILE_SYNC_KEYS.
 CONF_POWER_ISSUE_IGNORED = "power_issue_ignored"
+# Same dismissal mechanism for the capacity and efficiency repairs. observed_capacity and
+# observed_eff are both derived from the same meter flows, so a plant with spurious sensor jumps
+# (which inflate the charged/discharged sums) can push either measurement to an implausible value;
+# the user must be able to keep their configured figure. Client-only, cleared on adopt.
+CONF_CAPACITY_ISSUE_IGNORED = "capacity_issue_ignored"
+CONF_EFFICIENCY_ISSUE_IGNORED = "efficiency_issue_ignored"
 
 # Defaults
 DEFAULT_ZONE = "SE3"
