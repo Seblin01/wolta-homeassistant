@@ -42,13 +42,18 @@ async def test_repair_adopts_measured_and_clears_reserve(hass: HomeAssistant):
     flow = MeasuredCapacityRepairFlow(entry, 11.0)
     flow.hass = hass
 
-    # Step 1: shows the confirm form.
-    form = await flow.async_step_init()
+    # Step 1: menu (adopt or ignore).
+    menu = await flow.async_step_init()
+    assert menu["type"] == "menu"
+    assert set(menu["menu_options"]) == {"confirm", "ignore"}
+
+    # Step 2: the confirm form.
+    form = await flow.async_step_confirm()
     assert form["type"] == "form"
     assert form["step_id"] == "confirm"
     assert form["description_placeholders"]["measured"] == "11.0"
 
-    # Step 2: confirm.
+    # Step 3: confirm.
     result = await flow.async_step_confirm({})
     assert result["type"] == "create_entry"
 
@@ -196,13 +201,105 @@ async def test_efficiency_repair_adopts_measured(hass: HomeAssistant):
 
     flow = MeasuredEfficiencyRepairFlow(entry, 0.72)
     flow.hass = hass
-    form = await flow.async_step_init()
+    menu = await flow.async_step_init()
+    assert menu["type"] == "menu"
+    assert set(menu["menu_options"]) == {"confirm", "ignore"}
+    form = await flow.async_step_confirm()
     assert form["step_id"] == "confirm"
     result = await flow.async_step_confirm({})
     assert result["type"] == "create_entry"
     coordinator.client.patch_profile.assert_awaited_once_with("tok", eff=0.72)
     new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
     assert new_data[CONF_EFF] == 0.72
+
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_EFFICIENCY_ISSUE_IGNORED,
+)
+
+
+@pytest.mark.asyncio
+async def test_capacity_repair_ignore_persists_flag_and_clears_issue(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=15.0, reserve=None)
+    entry.entry_id = "e1"
+    hass.config_entries.async_update_entry = MagicMock()
+    ir.async_create_issue(
+        hass, "wolta", "measured_capacity_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="measured_capacity")
+
+    flow = MeasuredCapacityRepairFlow(entry, 11.0)
+    flow.hass = hass
+    result = await flow.async_step_ignore()
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_CAPACITY_ISSUE_IGNORED] is True
+    assert ir.async_get(hass).async_get_issue("wolta", "measured_capacity_e1") is None
+    # An adopt-only flow must not silently PATCH the server when the user chose to ignore.
+    flow._entry.runtime_data.client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capacity_repair_form_shows_full_context(hass: HomeAssistant):
+    """Confirm form restates configured + days (threaded from the issue), not just measured."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=15.0, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(
+        hass, "measured_capacity_e1",
+        {"entry_id": "e1", "measured_kwh": 11.0, "configured_kwh": 15.0, "days": 200})
+    flow.hass = hass
+    form = await flow.async_step_confirm()
+    ph = form["description_placeholders"]
+    assert ph["measured"] == "11.0"
+    assert ph["configured"] == "15.0"
+    assert ph["days"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_efficiency_repair_form_shows_full_context(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=15.0, reserve=None)
+    entry.data = {CONF_EFF: 0.9}
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(
+        hass, "measured_efficiency_e1",
+        {"entry_id": "e1", "measured_eff": 0.76, "configured_eff": 0.9, "days": 318})
+    flow.hass = hass
+    form = await flow.async_step_confirm()
+    ph = form["description_placeholders"]
+    assert ph["measured"] == "0.76"
+    assert ph["configured"] == "0.90"
+    assert ph["days"] == "318"
+
+
+@pytest.mark.asyncio
+async def test_capacity_repair_adopt_clears_ignore_flag(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=15.0, reserve=None)
+    entry.data = {CONF_BATTERY_KWH: 15.0, CONF_CAPACITY_ISSUE_IGNORED: True}
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = MeasuredCapacityRepairFlow(entry, 11.0)
+    flow.hass = hass
+    await flow.async_step_confirm({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert CONF_CAPACITY_ISSUE_IGNORED not in new_data
+
+
+@pytest.mark.asyncio
+async def test_efficiency_repair_ignore_persists_flag_and_clears_issue(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=15.0, reserve=None)
+    entry.entry_id = "e1"
+    entry.data = {CONF_EFF: 0.9}
+    hass.config_entries.async_update_entry = MagicMock()
+    ir.async_create_issue(
+        hass, "wolta", "measured_efficiency_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="measured_efficiency")
+
+    flow = MeasuredEfficiencyRepairFlow(entry, 0.76)
+    flow.hass = hass
+    result = await flow.async_step_ignore()
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_EFFICIENCY_ISSUE_IGNORED] is True
+    assert ir.async_get(hass).async_get_issue("wolta", "measured_efficiency_e1") is None
 
 
 @pytest.mark.asyncio
