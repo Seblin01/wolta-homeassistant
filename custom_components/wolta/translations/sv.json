@@ -129,7 +129,7 @@
           "nameplate_kw": "Märkeffekt (kW) – valfri",
           "eff": "Rundtripsverkningsgrad (0,5–1,0)",
           "reserve_pct": "Reservgolv (%) – valfritt",
-          "cost_sek": "Batteriets inköpspris (kr) – endast batteriet, valfritt",
+          "cost_sek": "Vad du betalade för batteriet (kr) – endast batteriet, valfritt",
           "purchase_date": "Inköpsdatum – valfritt",
           "grid_var_ore": "Nätavgift (öre/ct per kWh) – valfritt",
           "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh) – valfritt",
@@ -145,7 +145,7 @@
           "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara AC-effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt vid mätaren är lägre (växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
           "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
           "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger.",
-          "cost_sek": "Inköpspris för ENDAST batteriet (inte solceller/installation) i kr. Används för att räkna batteriets IRR och återbetalningstid. Valfritt. Har du köpt batteriet i flera steg, eller vill ange solcellernas kostnad och se hela anläggningens avkastning? Det redigerar du på din wolta.se-profil.",
+          "cost_sek": "Vad du faktiskt betalade för ENDAST batteriet (inte solceller/installation), i kr. Ange fakturans slutsumma, efter eventuellt grönt avdrag. Används för att räkna batteriets IRR och återbetalningstid. Valfritt. Har du köpt batteriet i flera steg, eller vill ange solcellernas kostnad och se hela anläggningens avkastning? Det redigerar du på din wolta.se-profil.",
           "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt. När datumet föreslås ur din sensorhistorik är det första registrerade månadens start – justera om du vet exakt datum. Datum i framtiden (planerat köp)? Resultaten visar bara det faktiska utfallet hittills – för ett planerat köp, använd beslutskalkylatorn på wolta.se i stället.",
           "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
           "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
@@ -239,11 +239,11 @@
             "name": "Ekonomi",
             "description": "Angav du ett samlat pris för hela anläggningen (sol + batteri) på wolta.se? Då hanteras inköpspriset där, och prisfältet döljs här.",
             "data": {
-              "cost_sek": "Inköpspris batteri (kr) – endast batteriet",
+              "cost_sek": "Vad du betalade för batteriet (kr) – endast batteriet",
               "purchase_date": "Inköpsdatum"
             },
             "data_description": {
-              "cost_sek": "Inköpspris för ENDAST batteriet (inte solpaneler) i SEK. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
+              "cost_sek": "Vad du faktiskt betalade för ENDAST batteriet (inte solpaneler), i kr — fakturans slutsumma, efter eventuellt grönt avdrag. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
               "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Används för 'Facit i år'. Datum i framtiden (planerat köp)? Resultaten visar bara det faktiska utfallet hittills – för ett planerat köp, använd beslutskalkylatorn på wolta.se i stället. Rensa fältet för att ta bort värdet."
             }
           },
