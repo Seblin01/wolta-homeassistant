@@ -129,7 +129,7 @@
           "nameplate_kw": "Nameplate power (kW) – optional",
           "eff": "Round-trip efficiency (0.5–1.0)",
           "reserve_pct": "Reserve floor (%) – optional",
-          "cost_sek": "Battery purchase price (kr) – battery only, optional",
+          "cost_sek": "What you paid for the battery (kr) – battery only, optional",
           "purchase_date": "Purchase date – optional",
           "grid_var_ore": "Grid fee (öre/ct per kWh) – optional",
           "surcharge_ore": "Electricity supplier markup (öre/ct per kWh) – optional",
@@ -145,7 +145,7 @@
           "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable AC power above; the rated figure lets wolta.se explain the difference when the measured power at the meter is lower (inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
           "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
           "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
-          "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels/installation) in SEK. Used to calculate the battery's IRR and payback. Optional. Bought the battery in stages, or want to record your solar cost and see the whole plant's return? Those are edited on your wolta.se profile.",
+          "cost_sek": "What you actually paid for the BATTERY ONLY (not solar panels/installation), in SEK. Enter the invoice total, after any green deduction. Used to calculate the battery's IRR and payback. Optional. Bought the battery in stages, or want to record your solar cost and see the whole plant's return? Those are edited on your wolta.se profile.",
           "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional. When suggested from your sensor history, the date is the start of the first recorded month — adjust if you know the exact date. Date in the future (a planned purchase)? The results only show the actual outcome so far — for a planned purchase, use the decision calculator on wolta.se instead.",
           "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
           "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
@@ -239,11 +239,11 @@
             "name": "Economy",
             "description": "Entered a combined price for the whole plant (solar + battery) on wolta.se? Then the purchase price is managed there, and the price field is hidden here.",
             "data": {
-              "cost_sek": "Battery purchase price (kr) – battery only",
+              "cost_sek": "What you paid for the battery (kr) – battery only",
               "purchase_date": "Purchase date"
             },
             "data_description": {
-              "cost_sek": "Purchase price of the BATTERY ONLY (not solar panels) in SEK. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
+              "cost_sek": "What you actually paid for the BATTERY ONLY (not solar panels), in SEK — the invoice total, after any green deduction. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
               "purchase_date": "Date the battery (or solar+battery) system was installed. Used to calculate this year's actual savings. Date in the future (a planned purchase)? The results only show the actual outcome so far — for a planned purchase, use the decision calculator on wolta.se instead. Clear the field to remove the value."
             }
           },
