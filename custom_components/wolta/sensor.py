@@ -132,15 +132,25 @@ def _measured_battery_value(results: dict) -> float | None:
     value answer different questions - how well you controlled it, versus what it earned -
     and do not have to share a wear convention.
 
-    Gate: annual must be present AND score_on must be set. annual's presence is the
-    backend-owned maturity threshold (same 30-day floor as the old preliminary flag, now
-    computed server-side) - but annual is also present on >= 30-day FALLBACK payloads
+    Gate: annual must be present WITH a factor, AND score_on must be set. annual's presence
+    is the backend-owned maturity threshold (same 30-day floor as the old preliminary flag,
+    now computed server-side) - but annual is also present on >= 30-day FALLBACK payloads
     (score_on still None), so the score_on check must stay or a fallback plant would start
-    showing a value where it correctly shows none today."""
+    showing a value where it correctly shows none today.
+
+    The factor check is DEFENSIVE, not a live branch. Since the F12 audit (2026-08-20) the
+    backend refuses to annualise a window shorter than 180 days - a 32-day summer window
+    x 11.4 is not a yearly figure (two HA instances against the SAME battery reported 3713
+    and 5789 SEK/year for exactly that reason) - but it signals that by omitting the whole
+    `annual` block, which the `not annual` leg above already handles. It deliberately does
+    NOT send a factor-less dict: versions up to v0.27.0 did `annual["factor"]` as soon as
+    the block was truthy, which raises KeyError inside native_value/available and leaves a
+    dead sensor until the user updates. Keep this check anyway so a future payload change
+    degrades to "no value" instead of throwing."""
     betyg = results.get("betyg") or {}
     holistic = betyg.get("holistic") or {}
     annual = betyg.get("annual")
-    if not annual or holistic.get("score_on") is None:
+    if not annual or annual.get("factor") is None or holistic.get("score_on") is None:
         return None
     period = holistic.get("measured_period_sek")
     return round(period * annual["factor"], 2) if period is not None else None

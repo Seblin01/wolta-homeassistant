@@ -990,6 +990,32 @@ def test_measured_battery_value_none_when_annual_missing():
     assert _measured_battery_value(results) is None
 
 
+def test_measured_battery_value_none_on_factorless_annual():
+    """DEFENSIVE (F12, audit 2026-08-20). The backend signals "too short to annualise" by
+    omitting `annual` entirely - it must never send a factor-less dict, because versions up
+    to v0.27.0 raise KeyError on one. This locks in that a factor-less block degrades to
+    "no value" here instead of throwing inside native_value/available."""
+    results = {
+        "betyg": {
+            "holistic": {"score_on": 0.8, "measured_period_sek": 500.0},
+            "annual": {"basis": "short"},
+        }
+    }
+    assert _measured_battery_value(results) is None
+
+
+def test_measured_battery_value_old_payload_without_basis_short_still_works():
+    """Backwards compatibility: payloads cached before the F12 change carry a factor and
+    no "short" basis. They must keep working unchanged."""
+    results = {
+        "betyg": {
+            "holistic": {"score_on": 0.8, "measured_period_sek": 500.0},
+            "annual": {"basis": "extrapolated", "factor": 2.0},
+        }
+    }
+    assert _measured_battery_value(results) == pytest.approx(1000.0)
+
+
 def test_measured_battery_value_none_when_score_on_missing():
     """Gate leg 2: annual IS present (>= 30-day fallback payloads carry it too) but
     score_on is None → still None. Dropping this check would make a fallback plant
