@@ -9,6 +9,36 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+# Bounded timeouts for the two mints. HA's shared session sets no ClientTimeout,
+# so aiohttp's default applied: total=300 s, sock_connect=30 s (measured against
+# the installed aiohttp, not assumed). A per-request timeout= REPLACES the
+# session default outright - it does not merge - so `total` below is the single
+# ceiling covering connect, TLS, request and response together. That is stricter
+# than the old sock_connect=30, which bounded only the connect phase; do not read
+# the two numbers as comparable.
+#
+# The two mints get DIFFERENT budgets, for the same reason they already have
+# different failure contracts (see their docstrings):
+#
+#   SETUP: mint_link is the FIRST thing async_setup_entry does and is optional by
+#   design - it degrades silently to the cached or tokenless link. Nobody is
+#   watching, so the only thing a long wait buys is a stalled startup: unbounded,
+#   a blackholed connection held integration setup for up to five minutes, re-paid
+#   on every ConfigEntryNotReady retry (a broken-IPv6 network burns a connect
+#   attempt per AAAA before falling back - wolta.se is Cloudflare-fronted). Keep
+#   it short; a mint that loses the race just runs again next setup.
+#
+#   INTERACTIVE: mint_claim_code runs while the user sits in the options dialog
+#   waiting for a code, and its failure is VISIBLE (abort, not degrade). Here a
+#   spurious timeout costs more than a few extra seconds of waiting, so it gets a
+#   larger budget - enough for a slow mobile link with a cold DNS cache.
+#
+# A timeout raises asyncio.TimeoutError, which IS the builtin TimeoutError on
+# 3.11+, so it lands in the except clauses both call sites already have. No new
+# failure mode, only a bounded wait.
+SETUP_MINT_TIMEOUT = aiohttp.ClientTimeout(total=10)
+INTERACTIVE_MINT_TIMEOUT = aiohttp.ClientTimeout(total=25)
+
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
 # NPM/nginx defaults can be as low as 1 MB). ~5000 15-min rows ≈ 0.8 MB → passes
@@ -267,7 +297,10 @@ class WoltaApiClient:
         WoltaApiError, så ett smalare except hade läckt ut och fällt entryn – precis det
         anropskedjan ska förhindra."""
         try:
-            data = await self._request("POST", "/profile/link", headers=self._auth(token))
+            data = await self._request(
+                "POST", "/profile/link", headers=self._auth(token),
+                timeout=SETUP_MINT_TIMEOUT,
+            )
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             # Debug, not warning/error: this degrades silently by design (see
             # docstring above) - the log line only exists so "why is the Visit
@@ -308,7 +341,8 @@ class WoltaApiClient:
         """
         try:
             data = await self._request(
-                "POST", "/profile/claim-code", headers=self._auth(token)
+                "POST", "/profile/claim-code", headers=self._auth(token),
+                timeout=INTERACTIVE_MINT_TIMEOUT,
             )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise WoltaApiError(f"Network error minting claim code: {err}") from err
