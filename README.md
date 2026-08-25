@@ -142,11 +142,11 @@ Only changed fields are sent to Wolta. After saving, a recompute is triggered au
 
 ## Full results on wolta.se
 
-The Wolta device page has a **Visit** link that opens your plant on wolta.se, using a read-scoped link minted automatically for this installation (backend v0.79.0+; existing entries mint one at their next setup). It shows the full plant view — grade breakdown, economy drill-downs, history — and lets you edit economy, tariff and grade-window fields there. It cannot delete the plant, mint a new link, share the plant with anyone else, or edit technical fields (sensors, battery capacity/power/efficiency) — those stay in Home Assistant's Configure dialog. Anyone with access to your Home Assistant can follow the link and use what it grants. For full editing rights on wolta.se, see [Account linking](#account-linking) below.
+The Wolta device page has a **Visit** link that opens your plant on wolta.se, using a read-only link minted automatically for this installation (backend v0.79.0+; existing entries mint one at their next setup). It shows the full plant view — grade breakdown, economy drill-downs, history — but the link itself writes nothing: it cannot edit economy, tariff or grade-window fields, delete the plant, mint a new link, share the plant with anyone else, or edit technical fields (sensors, battery capacity/power/efficiency). The link sits in `configuration_url`, which travels in every device-registry export people attach to GitHub issues or forum posts, so it is deliberately unable to change anything, even the fields it lets you view. Anyone with access to your Home Assistant can follow the link and see everything it shows. For any editing on wolta.se, see [Account linking](#account-linking) below.
 
 ## Account linking
 
-The read link above covers day-to-day tuning — economy, tariff, grade window — and viewing your results. For full editing rights on wolta.se (technical fields, deleting the plant, sharing, rotating the link), link the plant to a wolta.se account.
+The read link above covers viewing your results — grade breakdown, economy drill-downs, history — but not changing them. Editing anything on wolta.se (economy, tariff, grade window, technical fields, deleting the plant, sharing, rotating the link) requires linking the plant to a wolta.se account — it is the only way to change a Home-Assistant-created plant from wolta.se.
 
 Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Link to a wolta.se account** instead of **Settings**. The flow mints a one-time linking code, shown on screen. Sign in or create an account at wolta.se, go to **Account → Link plant**, and enter the code there.
 
