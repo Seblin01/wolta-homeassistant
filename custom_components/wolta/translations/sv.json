@@ -286,7 +286,7 @@
       },
       "account_link": {
         "title": "Koppla till ett wolta.se-konto",
-        "description": "Din kopplingskod är **{code}**.\n\nLogga in eller skapa ett konto på wolta.se, gå till Konto → Koppla anläggning och ange koden. Koden gäller i 10 minuter."
+        "description": "Din kopplingskod är **{code}**.\n\nLogga in eller skapa ett konto på wolta.se, gå till Konto → Koppla anläggning och ange koden. Koden gäller i 10 minuter. En ny kod gör en tidigare kod ogiltig, även om den inte hunnit gå ut."
       }
     },
     "error": {

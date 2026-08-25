@@ -1986,6 +1986,43 @@ async def test_options_kopplingskod_fel_ger_abort(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_options_kopplingskod_purgad_profil_startar_reauth(
+    hass: HomeAssistant,
+) -> None:
+    """WoltaAuthError (404 - purgad/okänd profil) på mint_claim_code ska starta
+    reauth precis som async_step_settings gör på get_profile, inte falla ner i det
+    bredare `except WoltaApiError` och abortera med det vilseledande cannot_connect
+    (review-fynd: IMPORTANT 1, config_flow.py)."""
+    from custom_components.wolta.api import WoltaAuthError
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-purged")
+    entry.add_to_hass(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.mint_claim_code = AsyncMock(side_effect=WoltaAuthError("404"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+        await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_required"
+    reauth_flows = [
+        f for f in hass.config_entries.flow.async_progress()
+        if f["context"].get("source") == config_entries.SOURCE_REAUTH
+    ]
+    assert len(reauth_flows) == 1
+
+
+@pytest.mark.asyncio
 async def test_options_kopplingskod_tom_kropp_ger_abort(
     hass: HomeAssistant, aioclient_mock
 ) -> None:

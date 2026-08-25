@@ -142,7 +142,7 @@ Only changed fields are sent to Wolta. After saving, a recompute is triggered au
 
 ## Full results on wolta.se
 
-The Wolta device page has a **Visit** link that opens your plant on wolta.se, using a read-scoped link minted automatically for this installation (server v0.30.0+; existing entries mint one at their next setup). It shows the full plant view — grade breakdown, economy drill-downs, history — and lets you edit economy, tariff and grade-window fields there. It cannot delete the plant, mint a new link, share the plant with anyone else, or edit technical fields (sensors, battery capacity/power/efficiency) — those stay in Home Assistant's Configure dialog. Anyone with access to your Home Assistant can follow the link and use what it grants. For full editing rights on wolta.se, see [Account linking](#account-linking) below.
+The Wolta device page has a **Visit** link that opens your plant on wolta.se, using a read-scoped link minted automatically for this installation (backend v0.79.0+; existing entries mint one at their next setup). It shows the full plant view — grade breakdown, economy drill-downs, history — and lets you edit economy, tariff and grade-window fields there. It cannot delete the plant, mint a new link, share the plant with anyone else, or edit technical fields (sensors, battery capacity/power/efficiency) — those stay in Home Assistant's Configure dialog. Anyone with access to your Home Assistant can follow the link and use what it grants. For full editing rights on wolta.se, see [Account linking](#account-linking) below.
 
 ## Account linking
 

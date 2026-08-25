@@ -1001,6 +1001,12 @@ class WoltaOptionsFlow(OptionsFlow):
         client = WoltaApiClient(session)
         try:
             code = await client.mint_claim_code(self.config_entry.data[CONF_TOKEN])
+        except WoltaAuthError:
+            # Purgad/okänd profil: cannot_connect vore vilseledande – starta
+            # reauth-flödet direkt istället för att låta användaren gissa
+            # fritt om koden aldrig kommer.
+            self.config_entry.async_start_reauth(self.hass)
+            return self.async_abort(reason="reauth_required")
         except WoltaApiError as err:
             _LOGGER.error("Could not create linking code: %s", err)
             return self.async_abort(reason="cannot_connect")
