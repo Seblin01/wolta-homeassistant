@@ -256,10 +256,16 @@ class WoltaApiClient:
         tillbaka på sin cache och i sista hand på en tokenlös URL. Ett misslyckat mint
         får aldrig fälla entryn. isinstance-garden: _request returnerar None på tom
         kropp (api.py:90-96), och ett oväntat tomt 200 ska bete sig som ett fel, inte
-        kasta AttributeError."""
+        kasta AttributeError.
+
+        (WoltaApiError, aiohttp.ClientError, TimeoutError) – samma mönster som
+        coordinator.py:386/:552: ett riktigt offline-läge (DNS/anslutningsfel, timeout)
+        kastas av self._session.request(...) INNAN _request hinner konvertera det till en
+        WoltaApiError, så ett smalare except hade läckt ut och fällt entryn – precis det
+        anropskedjan ska förhindra."""
         try:
             data = await self._request("POST", "/profile/link", headers=self._auth(token))
-        except WoltaApiError:
+        except (WoltaApiError, aiohttp.ClientError, TimeoutError):
             return None
         return data.get("link_token") if isinstance(data, dict) else None
 

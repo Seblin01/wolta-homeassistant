@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
@@ -474,5 +475,31 @@ async def test_mint_link_ger_none_pa_tom_kropp(aioclient_mock: AiohttpClientMock
     """_request returnerar None på 204/tom kropp (api.py:90-96) – mint_link får inte
     kasta AttributeError på det (plangranskningen, fynd H12)."""
     aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", status=200, text="")
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_natverksfel(aioclient_mock: AiohttpClientMocker) -> None:
+    """Kodgranskning (kritiskt fynd 1): ett RIKTIGT offline-läge – DNS/anslutningsfel –
+    kastas av self._session.request(...) (api.py:76) INNAN _request hinner konvertera
+    det till en WoltaApiError. Ett smalt `except WoltaApiError` läcker ut det felet, ut
+    ur async_setup_entry, och fäller entryn – exakt det brief:en namngav först. Ett HTTP
+    503 (test ovan) konverteras av _request och testade aldrig den här grenen."""
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link",
+                        exc=aiohttp.ClientConnectorError(
+                            connection_key=connection_key, os_error=OSError("offline")))
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_timeout(aioclient_mock: AiohttpClientMocker) -> None:
+    """Samma gren som ovan, men TimeoutError – den andra hälften av
+    coordinator.py:386/:552-mönstret `except (aiohttp.ClientError, TimeoutError)`."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", exc=TimeoutError("timed out"))
     client = _client(aioclient_mock)
     assert await client.mint_link("tok-1") is None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
@@ -138,6 +139,49 @@ async def test_async_setup_entry_survives_mint_link_failure(
 
     assert result is True
     mock_update_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_survives_mint_link_offline(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Kodgranskning (kritiskt fynd 1): the property that actually matters to a user
+    whose internet is down when HA restarts – a real connection failure (not an HTTP
+    error status) out of mint_link must still leave the entry set up."""
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(
+        f"{WOLTA_API_BASE}/api/v1/profile/link",
+        exc=aiohttp.ClientConnectorError(connection_key=connection_key, os_error=OSError("offline")),
+    )
+    mock_coord = _make_mock_coordinator()
+    mock_entry = MagicMock()
+    mock_entry.data = ENTRY_DATA.copy()
+    mock_entry.entry_id = "test_entry_id"
+    mock_entry.domain = DOMAIN
+    mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+
+    with (
+        patch(
+            "custom_components.wolta.WoltaCoordinator",
+            return_value=mock_coord,
+        ),
+        patch(
+            "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "homeassistant.config_entries.ConfigEntries.async_update_entry",
+        ) as mock_update_entry,
+    ):
+        from custom_components.wolta import async_setup_entry
+
+        result = await async_setup_entry(hass, mock_entry)
+
+    assert result is True
+    mock_update_entry.assert_not_called()
+    mock_coord.async_config_entry_first_refresh.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

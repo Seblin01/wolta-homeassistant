@@ -112,3 +112,48 @@ def test_button_has_translation_key():
     btn = _make_button(coord)
     assert btn._attr_translation_key == "recompute"
     assert btn._attr_has_entity_name is True
+
+
+# ---------------------------------------------------------------------------
+# configuration_url: the read link, never the owner token (spec 2026-08-24)
+# ---------------------------------------------------------------------------
+
+
+def test_button_device_info_configuration_url_anvander_laslanken() -> None:
+    """Kodgranskning (kritiskt fynd 2): sensor.py and button.py both set
+    configuration_url independently, so a sensor-only test does not guard this file.
+    Builds a REAL WoltaRecomputeButton from an entry with BOTH a distinct owner token
+    and a distinct link token, and checks the produced configuration_url."""
+    from custom_components.wolta.const import CONF_LINK_TOKEN, CONF_TOKEN
+
+    coord = _make_coordinator()
+    entry = MagicMock()
+    entry.entry_id = ENTRY_ID
+    entry.unique_id = ENTRY_ID
+    entry.data = {CONF_TOKEN: "OWNER-SECRET-DO-NOT-LEAK", CONF_LINK_TOKEN: "wpl_readonly"}
+    entry.runtime_data = coord
+
+    btn = WoltaRecomputeButton(coordinator=coord, entry=entry)
+    url = btn._attr_device_info["configuration_url"]
+
+    assert "wpl_readonly" in url
+    assert "OWNER-SECRET-DO-NOT-LEAK" not in url
+
+
+def test_button_device_info_configuration_url_fallback_utan_lanken() -> None:
+    """Ingen cachad länk (mint har aldrig lyckats) → tokenlös sida, och fortfarande
+    ALDRIG ägar-tokenet."""
+    from custom_components.wolta.const import CONF_TOKEN
+
+    coord = _make_coordinator()
+    entry = MagicMock()
+    entry.entry_id = ENTRY_ID
+    entry.unique_id = ENTRY_ID
+    entry.data = {CONF_TOKEN: "OWNER-SECRET-DO-NOT-LEAK"}  # no CONF_LINK_TOKEN
+    entry.runtime_data = coord
+
+    btn = WoltaRecomputeButton(coordinator=coord, entry=entry)
+    url = btn._attr_device_info["configuration_url"]
+
+    assert url == "https://wolta.se/anlaggning"
+    assert "OWNER-SECRET-DO-NOT-LEAK" not in url
