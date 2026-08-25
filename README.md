@@ -77,7 +77,7 @@ Or add it manually:
 No account or API token is required. Setup starts with a choice:
 
 - **Create a new profile** — Home Assistant provisions a Wolta profile automatically (the flow below).
-- **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server, the profile is adopted for integration use (backend v0.19.0+), and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data). The profile must include a battery — solar-only profiles are rejected.
+- **Link an existing wolta.se profile** — already used wolta.se? Paste your personal profile link (the one with `?profile=…`) or just the token. Your plant parameters are read from the server, the profile is adopted for integration use (backend v0.19.0+), and the plant step is skipped; Home Assistant takes over data uploads from there (overlapping periods are overwritten with sensor data). The profile must include a battery — solar-only profiles are rejected. (Pasting the read link from your device's Visit button here doesn't work — it can't authenticate a new setup; get a profile link or token from the plant page on wolta.se instead.)
 
   If the plant already streams its data to wolta.se through another connection (the Sonnen
   webhook or a Reduxi bridge), the flow offers **view-only mode** instead: you get all the
@@ -111,7 +111,7 @@ Because a linked profile belongs to your wolta.se usage, **removing the integrat
 
 ## Adjusting values afterwards
 
-Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) to adjust values without removing the integration. The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
+Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Settings** to adjust values without removing the integration. (The other menu option, **Link to a wolta.se account**, is covered under [Account linking](#account-linking) below.) The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Nameplate capacity (kWh) and nameplate power (kW) — optional manufacturer-rated figures. The grade itself always uses the usable/deliverable values above; the rated figures let wolta.se compare per-kWh prices fairly in the expansion calculator and explain measured-vs-rated differences. Clearing a field removes the value.
@@ -142,7 +142,15 @@ Only changed fields are sent to Wolta. After saving, a recompute is triggered au
 
 ## Full results on wolta.se
 
-The Wolta device page has a **Visit** link that opens your complete results on wolta.se (grade breakdown, economy drill-downs, history) using your profile token. Note: anyone with access to your Home Assistant can follow the link.
+The Wolta device page has a **Visit** link that opens your plant on wolta.se, using a read-scoped link minted automatically for this installation (server v0.30.0+; existing entries mint one at their next setup). It shows the full plant view — grade breakdown, economy drill-downs, history — and lets you edit economy, tariff and grade-window fields there. It cannot delete the plant, mint a new link, share the plant with anyone else, or edit technical fields (sensors, battery capacity/power/efficiency) — those stay in Home Assistant's Configure dialog. Anyone with access to your Home Assistant can follow the link and use what it grants. For full editing rights on wolta.se, see [Account linking](#account-linking) below.
+
+## Account linking
+
+The read link above covers day-to-day tuning — economy, tariff, grade window — and viewing your results. For full editing rights on wolta.se (technical fields, deleting the plant, sharing, rotating the link), link the plant to a wolta.se account.
+
+Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Link to a wolta.se account** instead of **Settings**. The flow mints a one-time linking code, shown on screen. Sign in or create an account at wolta.se, go to **Account → Link plant**, and enter the code there.
+
+The code is valid for 10 minutes and can be used once. If it expires before you enter it, or you've already used it, open the menu again to mint a fresh one.
 
 ## Privacy
 
@@ -188,7 +196,7 @@ If your entities differ (other language, integrations installed before v0.4.3, o
 
 ### Notes
 
-The dashboard ends with a markdown card linking to your full results on wolta.se. The link is resolved dynamically from the device's `configuration_url` (v0.4.1+), so no manual token pasting is needed.
+The dashboard ends with a markdown card linking to your full results on wolta.se. The link is resolved dynamically from the device's `configuration_url` (v0.4.1+; a read-scoped link since v0.30.0 — see [Full results on wolta.se](#full-results-on-woltase)), so no manual token pasting and no dashboard change are needed.
 
 Economy sensors (battery value, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). They show `unavailable` for other zones.
 
