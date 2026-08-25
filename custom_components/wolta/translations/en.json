@@ -204,7 +204,8 @@
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
       "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
-      "control_system_name_required": "Enter the control system's name when you have chosen Other."
+      "control_system_name_required": "Enter the control system's name when you have chosen Other.",
+      "link_is_read_link": "That is the plant's read link. Linking the integration needs the owner token – if you have lost it, link the plant to an account and create a new token there."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
@@ -216,6 +217,13 @@
   "options": {
     "step": {
       "init": {
+        "title": "Wolta",
+        "menu_options": {
+          "settings": "Settings",
+          "account_link": "Link to a wolta.se account"
+        }
+      },
+      "settings": {
         "title": "Wolta profile",
         "description": "These values are your shared Wolta profile – changes here show up on wolta.se too, and changes made on wolta.se show up here. Clear an optional field to remove its value.",
         "sections": {
@@ -275,6 +283,10 @@
         "data_description": {
           "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
         }
+      },
+      "account_link": {
+        "title": "Link to a wolta.se account",
+        "description": "Your linking code is **{code}**.\n\nSign in or create an account at wolta.se, go to Account → Link plant and enter the code. The code is valid for 10 minutes. Minting a new code invalidates any earlier one, even if it hasn't expired yet."
       }
     },
     "error": {

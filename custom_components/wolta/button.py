@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import WoltaApiError, WoltaRateLimitError
-from .const import CONF_TOKEN, DOMAIN, profile_url
+from .const import CONF_LINK_TOKEN, DOMAIN, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator
 
 
@@ -29,12 +29,15 @@ class WoltaRecomputeButton(CoordinatorEntity[WoltaCoordinator], ButtonEntity):
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.unique_id}_recompute"
+        # Läslänk, aldrig ägar-tokenet (spec 2026-08-24). Saknas den cachade länken
+        # (mint har aldrig lyckats) faller vi tillbaka på den tokenlösa sidan.
+        link = entry.data.get(CONF_LINK_TOKEN)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Wolta",
             manufacturer="Wolta",
             entry_type="service",
-            configuration_url=profile_url(entry.data[CONF_TOKEN]),
+            configuration_url=link_url(link) if link else f"{WOLTA_API_BASE}/anlaggning",
         )
 
     async def async_press(self) -> None:

@@ -515,19 +515,61 @@ def test_unique_id_format():
 # ---------------------------------------------------------------------------
 
 
-def test_device_info_configuration_url():
-    """The device's configuration_url points to the plant hub /anlaggning (token mode:
-    ?profile=) – /optimeringsbetyg is the public surface since the 2026-07-15 IA."""
-    sensor = _sensor("optimeringsbetyg", RESULTS_FULL)
+def test_configuration_url_bar_aldrig_agar_tokenet() -> None:
+    """Kärninvarianten (spec 2026-08-24): ägar-tokenet lämnar aldrig entry.data –
+    configuration_url bygger på LÄSLÄNKEN. Ersätter test_device_info_configuration_url
+    + test_profile_url_quotes_token."""
+    from custom_components.wolta.const import link_url
+    url = link_url("wpl_läsbar/token")
+    assert url.startswith("https://wolta.se/anlaggning?link=")
+    assert "wpl_l%C3%A4sbar%2Ftoken" in url        # URL-encodat, som profile_url var
+    assert "profile=" not in url
+
+
+def test_profile_url_ar_borttagen() -> None:
+    """profile_url() raderas (spec fynd I) – enda konsumenterna var device-vägarna."""
+    from custom_components.wolta import const
+    assert not hasattr(const, "profile_url")
+
+
+def test_sensor_device_info_configuration_url_anvander_laslanken() -> None:
+    """Kodgranskning (kritiskt fynd 2): den TIDIGARE testsviten kollade bara
+    link_url() i isolering, aldrig den faktiska ledningen i sensor.py – ett
+    copy-paste-fel som läste entry.data[CONF_TOKEN] i stället för CONF_LINK_TOKEN
+    (exakt vad den gamla koden gjorde) hade gått igenom obemärkt. Bygger en RIKTIG
+    WoltaSensor från en entry med BÅDE ett distinkt ägar-token och ett distinkt
+    länk-token, och kollar det producerade configuration_url."""
+    from custom_components.wolta.const import CONF_LINK_TOKEN, CONF_TOKEN
+
+    coord = _make_coordinator(RESULTS_FULL)
+    entry = _make_entry()
+    entry.data = {CONF_TOKEN: "OWNER-SECRET-DO-NOT-LEAK", CONF_LINK_TOKEN: "wpl_readonly"}
+    entry.runtime_data = coord
+
+    description = next(d for d in SENSOR_DESCRIPTIONS if d.key == "optimeringsbetyg")
+    sensor = WoltaSensor(coordinator=coord, entry=entry, description=description)
     url = sensor._attr_device_info["configuration_url"]
-    assert url == "https://wolta.se/anlaggning?profile=tok-test"
+
+    assert "wpl_readonly" in url
+    assert "OWNER-SECRET-DO-NOT-LEAK" not in url
 
 
-def test_profile_url_quotes_token():
-    """Token is URL-encoded (future-proofing in case the token format changes)."""
-    from custom_components.wolta.const import profile_url
+def test_sensor_device_info_configuration_url_fallback_utan_lanken() -> None:
+    """Ingen cachad länk (mint har aldrig lyckats) → tokenlös sida, och fortfarande
+    ALDRIG ägar-tokenet."""
+    from custom_components.wolta.const import CONF_TOKEN
 
-    assert profile_url("a/b+c") == "https://wolta.se/anlaggning?profile=a%2Fb%2Bc"
+    coord = _make_coordinator(RESULTS_FULL)
+    entry = _make_entry()
+    entry.data = {CONF_TOKEN: "OWNER-SECRET-DO-NOT-LEAK"}  # no CONF_LINK_TOKEN
+    entry.runtime_data = coord
+
+    description = next(d for d in SENSOR_DESCRIPTIONS if d.key == "optimeringsbetyg")
+    sensor = WoltaSensor(coordinator=coord, entry=entry, description=description)
+    url = sensor._attr_device_info["configuration_url"]
+
+    assert url == "https://wolta.se/anlaggning"
+    assert "OWNER-SECRET-DO-NOT-LEAK" not in url
 
 
 # ---------------------------------------------------------------------------

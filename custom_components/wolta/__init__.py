@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import WoltaApiClient
-from .const import CONF_CREATED_BY_HA, CONF_TOKEN, WOLTA_API_BASE
+from .const import CONF_CREATED_BY_HA, CONF_LINK_TOKEN, CONF_TOKEN, WOLTA_API_BASE
 from .coordinator import WoltaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,6 +20,17 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Wolta from a config entry."""
+    # Mint vid VARJE setup (spec §4.1). Idempotent server-side, så det här är gratis –
+    # och det är vad som gör flödet självläkande utan specialfall: reauth till annan
+    # anläggning, rotation/revoke gjord utifrån, två HA-instanser mot samma anläggning
+    # och ägar-token-rotation hanteras alla av att nästa setup hämtar aktuell länk.
+    # Ingen reload-risk: ingen update listener är registrerad (se coordinator.py:217).
+    client = WoltaApiClient(async_get_clientsession(hass), base_url=WOLTA_API_BASE)
+    link_token = await client.mint_link(entry.data[CONF_TOKEN])
+    if link_token and link_token != entry.data.get(CONF_LINK_TOKEN):
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_LINK_TOKEN: link_token})
+
     coordinator = WoltaCoordinator(hass, entry)
     entry.runtime_data = coordinator
     await coordinator.async_config_entry_first_refresh()

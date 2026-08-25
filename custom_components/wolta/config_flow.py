@@ -225,6 +225,15 @@ def extract_token(value: str) -> str:
     return value
 
 
+def _is_read_link(value: str) -> bool:
+    """Besök-länken är sedan v0.30.0 en LÄSlänk (?link=wpl_…), inte ägar-tokenet.
+    Riktat felmeddelande i BÅDA stegen som tar token-inmatning – användaren har
+    klistrat in rätt sorts länk för fel syfte, och ett generiskt 'ogiltig token'
+    hade lämnat henne utan väg framåt."""
+    v = value.strip()
+    return "link=wpl_" in v or v.startswith("wpl_")
+
+
 # ---------------------------------------------------------------------------
 # Config flow
 # ---------------------------------------------------------------------------
@@ -275,6 +284,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         """Link an existing wolta.se profile (token or Besök link)."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            if _is_read_link(user_input["profile_input"]):
+                errors["profile_input"] = "link_is_read_link"
+                return self._show_link_form(errors)
             token = extract_token(user_input["profile_input"])
             session = async_get_clientsession(self.hass)
             client = WoltaApiClient(session)
@@ -903,19 +915,22 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         writes, so a non-bound token is harmless too."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            token = extract_token(user_input["profile_input"])
-            try:
-                session = async_get_clientsession(self.hass)
-                client = WoltaApiClient(session)
-                await client.get_profile(token)
-            except WoltaAuthError:
-                errors["profile_input"] = "invalid_token"
-            except WoltaApiError:
-                errors["base"] = "cannot_connect"
+            if _is_read_link(user_input["profile_input"]):
+                errors["profile_input"] = "link_is_read_link"
             else:
-                return self.async_update_reload_and_abort(
-                    self._get_reauth_entry(), data_updates={CONF_TOKEN: token}
-                )
+                token = extract_token(user_input["profile_input"])
+                try:
+                    session = async_get_clientsession(self.hass)
+                    client = WoltaApiClient(session)
+                    await client.get_profile(token)
+                except WoltaAuthError:
+                    errors["profile_input"] = "invalid_token"
+                except WoltaApiError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    return self.async_update_reload_and_abort(
+                        self._get_reauth_entry(), data_updates={CONF_TOKEN: token}
+                    )
         return self.async_show_form(
             step_id="reauth_view_only",
             data_schema=vol.Schema(
@@ -930,12 +945,17 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 # ---------------------------------------------------------------------------
-# Options flow – edit the SHARED Wolta profile. The server is the source of
-# truth: the form is prefilled from a fresh GET /profile and the diff is
-# computed against that snapshot, never against entry.data (which is only a
-# cache) – otherwise a web-side change could be silently clobbered with stale
-# values. Fields are grouped in collapsible sections (battery/economy/tariffs);
-# sections nest user_input one level.
+# Options flow – opens with a MENU (decision 2026-08-25): "settings" is today's
+# form (edit the SHARED Wolta profile) and "account_link" mints a one-time code
+# to link the plant to a wolta.se account (full editing rights back, after
+# v0.30.0 replaced the owner token in configuration_url with a read-only link).
+#
+# settings: the server is the source of truth for the profile fields – the
+# form is prefilled from a fresh GET /profile and the diff is computed against
+# that snapshot, never against entry.data (which is only a cache) – otherwise a
+# web-side change could be silently clobbered with stale values. Fields are
+# grouped in collapsible sections (battery/economy/tariffs); sections nest
+# user_input one level.
 # ---------------------------------------------------------------------------
 
 _SEC_BATTERY = "battery"
@@ -962,6 +982,41 @@ class WoltaOptionsFlow(OptionsFlow):
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Meny (beslut 2026-08-25): options växte från ETT formulär till flera
+        åtgärder. Kostar ett klick för den som bara ska ändra ett värde, men ger
+        varje ny åtgärd en plats utan att formuläret sväller."""
+        return self.async_show_menu(
+            step_id="init", menu_options=["settings", "account_link"]
+        )
+
+    async def async_step_account_link(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Visa en kopplingskod för wolta.se-kontot (spec 2026-08-24 §4.2)."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data={})
+        session = async_get_clientsession(self.hass)
+        client = WoltaApiClient(session)
+        try:
+            code = await client.mint_claim_code(self.config_entry.data[CONF_TOKEN])
+        except WoltaAuthError:
+            # Purgad/okänd profil: cannot_connect vore vilseledande – starta
+            # reauth-flödet direkt istället för att låta användaren gissa
+            # fritt om koden aldrig kommer.
+            self.config_entry.async_start_reauth(self.hass)
+            return self.async_abort(reason="reauth_required")
+        except WoltaApiError as err:
+            _LOGGER.error("Could not create linking code: %s", err)
+            return self.async_abort(reason="cannot_connect")
+        return self.async_show_form(
+            step_id="account_link",
+            data_schema=vol.Schema({}),
+            description_placeholders={"code": code},
+        )
+
+    async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show and handle the options form."""
@@ -1130,4 +1185,4 @@ class WoltaOptionsFlow(OptionsFlow):
                 default=bool(entry.data.get(CONF_INVERT_BATTERY, False)),
             ): BooleanSelector(BooleanSelectorConfig()),
         })
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)

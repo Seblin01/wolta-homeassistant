@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
 from custom_components.wolta.api import (
     WoltaApiClient,
+    WoltaApiError,
     WoltaAuthError,
     WoltaRateLimitError,
 )
@@ -443,3 +445,142 @@ async def test_create_profile_omits_plant_id_when_unset(aioclient_mock: AiohttpC
     await client.create_profile(
         zone="SE3", battery_kwh=10, battery_kw=5, eff=0.9, has_solar=False, share_profile=False)
     assert "client_plant_id" not in aioclient_mock.mock_calls[-1][2]
+
+
+# ---------------------------------------------------------------------------
+# mint_link
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mint_link_returnerar_token(aioclient_mock: AiohttpClientMocker) -> None:
+    """Mint är idempotent server-side; klienten anropar den vid VARJE setup och
+    skriver över sin cache."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link",
+                        json={"link_token": "wpl_abc"})
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") == "wpl_abc"
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_fel(aioclient_mock: AiohttpClientMocker) -> None:
+    """Ett misslyckat mint får ALDRIG fälla entryn – anroparen faller tillbaka på
+    cachen och i sista hand på en tokenlös URL."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", status=503)
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_pa_tom_kropp(aioclient_mock: AiohttpClientMocker) -> None:
+    """_request returnerar None på 204/tom kropp (api.py:90-96) – mint_link får inte
+    kasta AttributeError på det (plangranskningen, fynd H12)."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", status=200, text="")
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_natverksfel(aioclient_mock: AiohttpClientMocker) -> None:
+    """Kodgranskning (kritiskt fynd 1): ett RIKTIGT offline-läge – DNS/anslutningsfel –
+    kastas av self._session.request(...) (api.py:76) INNAN _request hinner konvertera
+    det till en WoltaApiError. Ett smalt `except WoltaApiError` läcker ut det felet, ut
+    ur async_setup_entry, och fäller entryn – exakt det brief:en namngav först. Ett HTTP
+    503 (test ovan) konverteras av _request och testade aldrig den här grenen."""
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link",
+                        exc=aiohttp.ClientConnectorError(
+                            connection_key=connection_key, os_error=OSError("offline")))
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_timeout(aioclient_mock: AiohttpClientMocker) -> None:
+    """Samma gren som ovan, men TimeoutError – den andra hälften av
+    coordinator.py:386/:552-mönstret `except (aiohttp.ClientError, TimeoutError)`."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", exc=TimeoutError("timed out"))
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+# ---------------------------------------------------------------------------
+# mint_claim_code
+# ---------------------------------------------------------------------------
+#
+# Unlike mint_link (degrades to None by design), mint_claim_code RAISES on
+# failure - the user is standing in the options flow waiting for a code to
+# type in on wolta.se. But everything it raises must land in the ONE
+# WoltaApiError family, since the flow's caller only catches that (review
+# finding on task 13: an empty body or a real network error used to escape as
+# TypeError / aiohttp.ClientError / TimeoutError instead).
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_returnerar_kod(aioclient_mock: AiohttpClientMocker) -> None:
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile/claim-code",
+        json={"code": "ABCD-EFGH", "expires_in": 600},
+    )
+    client = _client(aioclient_mock)
+    assert await client.mint_claim_code("tok-1") == "ABCD-EFGH"
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_hojer_pa_tom_kropp(aioclient_mock: AiohttpClientMocker) -> None:
+    """_request returnerar None på 204/tom kropp (api.py:90-96) – samma gap
+    mint_link:s isinstance-vakt finns för, direkt ovanför. Utan en vakt här
+    TypeError:ar `data["code"]`, vilket läcker förbi flowets `except
+    WoltaApiError` och kraschar options-flowet i stället för att avbryta rent."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/claim-code", status=200, text="")
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError):
+        await client.mint_claim_code("tok-1")
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_hojer_pa_kropp_utan_code(
+    aioclient_mock: AiohttpClientMocker,
+) -> None:
+    """Ett 2xx-svar som saknar "code" (t.ex. en oväntad JSON-form) ska ge samma
+    riktade WoltaApiError, inte en KeyError."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/claim-code", json={"expires_in": 600})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError):
+        await client.mint_claim_code("tok-1")
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_hojer_woltaapierror_vid_natverksfel(
+    aioclient_mock: AiohttpClientMocker,
+) -> None:
+    """Kritiskt fynd (task 13-review): ett RIKTIGT offline-läge – DNS/anslutningsfel –
+    kastas av self._session.request(...) (api.py:76) INNAN _request hinner konvertera
+    det till en WoltaApiError. Måste omvandlas till WoltaApiError här, annars läcker
+    aiohttp.ClientConnectorError ut ur flowets smala `except WoltaApiError` och
+    kraschar options-flowet i stället för att avbryta med cannot_connect."""
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile/claim-code",
+        exc=aiohttp.ClientConnectorError(
+            connection_key=connection_key, os_error=OSError("offline")))
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError):
+        await client.mint_claim_code("tok-1")
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_hojer_woltaapierror_vid_timeout(
+    aioclient_mock: AiohttpClientMocker,
+) -> None:
+    """Samma gren som ovan, men TimeoutError – den andra hälften av
+    coordinator.py:386/:552-mönstret `except (aiohttp.ClientError, TimeoutError)`."""
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile/claim-code", exc=TimeoutError("timed out"))
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError):
+        await client.mint_claim_code("tok-1")

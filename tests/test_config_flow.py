@@ -1287,8 +1287,12 @@ async def test_options_flow_patches_profile_and_updates_entry(hass: HomeAssistan
         ),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
-        assert result["type"] == FlowResultType.FORM
+        assert result["type"] == FlowResultType.MENU
         assert result["step_id"] == "init"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "settings"
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
@@ -1348,6 +1352,8 @@ async def test_options_flow_swallows_recompute_rate_limit(hass: HomeAssistant) -
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1388,6 +1394,8 @@ async def test_options_flow_patches_only_changed_plant_fields(hass: HomeAssistan
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 30.0,   # changed
@@ -1420,6 +1428,8 @@ async def test_options_flow_unchanged_form_no_patch(hass: HomeAssistant) -> None
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1449,6 +1459,8 @@ async def test_options_flow_clears_cost_and_date(hass: HomeAssistant) -> None:
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
@@ -1496,8 +1508,11 @@ async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> Non
         ),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
 
     assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "settings"
     # Schema-defaults ska spegla server-snapshotet (= entry.data i detta test).
     # Sektioner nästlar schemat: yttre nyckel → section → inre schema.
     outer = result["data_schema"].schema
@@ -1535,6 +1550,8 @@ async def test_options_flow_changes_tariff_field(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1570,6 +1587,8 @@ async def test_options_flow_unrelated_change_preserves_tariff(hass: HomeAssistan
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
@@ -1610,6 +1629,8 @@ async def test_options_flow_clears_tariff_fields(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1648,6 +1669,8 @@ async def test_options_flow_changes_reserve_pct(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1685,6 +1708,8 @@ async def test_options_flow_unrelated_change_preserves_reserve_pct(
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 25.0,  # changed
@@ -1720,6 +1745,8 @@ async def test_options_flow_clears_reserve_pct(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -1751,6 +1778,8 @@ async def test_options_flow_reserve_pct_zero_is_sent(hass: HomeAssistant) -> Non
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
@@ -1789,6 +1818,8 @@ async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssis
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         assert result["type"] == FlowResultType.FORM
 
         result = await hass.config_entries.options.async_configure(
@@ -1825,8 +1856,11 @@ async def test_options_prefills_from_server_not_cache(hass: HomeAssistant) -> No
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
 
     assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "settings"
     outer = result["data_schema"].schema
     battery = next(
         v for k, v in outer.items()
@@ -1866,7 +1900,197 @@ async def test_options_flow_get_failure_aborts(hass: HomeAssistant) -> None:
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
 
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_options_ar_en_meny(hass: HomeAssistant) -> None:
+    """Options-flowen öppnar med en meny (beslut 2026-08-25): dagens formulär bakom
+    "settings", kopplingskoden bakom "account_link"."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="opts-menu")
+    entry.add_to_hass(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == FlowResultType.MENU
+        assert set(result["menu_options"]) == {"settings", "account_link"}
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "settings"
+
+
+@pytest.mark.asyncio
+async def test_options_visar_kopplingskod(hass: HomeAssistant) -> None:
+    """Kopplingskoden (spec 2026-08-24 §4.2): options-menyns account_link-val visar
+    en engångskod från POST /profile/claim-code i description_placeholders."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-ui")
+    entry.add_to_hass(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.mint_claim_code = AsyncMock(return_value="ABCD-EFGH")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "account_link"
+    assert "ABCD-EFGH" in str(result["description_placeholders"])
+
+
+@pytest.mark.asyncio
+async def test_options_kopplingskod_fel_ger_abort(hass: HomeAssistant) -> None:
+    """Ett misslyckat mint_claim_code får inte visa ett tomt formulär (till skillnad
+    från mint_link, som degraderar tyst) - flowet ska avbryta med cannot_connect."""
+    from custom_components.wolta.api import WoltaApiError
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-fail")
+    entry.add_to_hass(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.mint_claim_code = AsyncMock(side_effect=WoltaApiError("boom", status=500))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_options_kopplingskod_purgad_profil_startar_reauth(
+    hass: HomeAssistant,
+) -> None:
+    """WoltaAuthError (404 - purgad/okänd profil) på mint_claim_code ska starta
+    reauth precis som async_step_settings gör på get_profile, inte falla ner i det
+    bredare `except WoltaApiError` och abortera med det vilseledande cannot_connect
+    (review-fynd: IMPORTANT 1, config_flow.py)."""
+    from custom_components.wolta.api import WoltaAuthError
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-purged")
+    entry.add_to_hass(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.mint_claim_code = AsyncMock(side_effect=WoltaAuthError("404"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+        await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_required"
+    reauth_flows = [
+        f for f in hass.config_entries.flow.async_progress()
+        if f["context"].get("source") == config_entries.SOURCE_REAUTH
+    ]
+    assert len(reauth_flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_options_kopplingskod_tom_kropp_ger_abort(
+    hass: HomeAssistant, aioclient_mock
+) -> None:
+    """Task 13-reviewfynd: ett 2xx-svar utan body fick TypeErrora ut ur flowet
+    (data["code"] på None) i stället för att avbryta rent. Testar mot den RIKTIGA
+    WoltaApiClient (inte en mockad mint_claim_code) så att api.py:s vakt faktiskt
+    körs - en mockad metod hade dolt regressionen helt."""
+    from custom_components.wolta.api import WoltaApiClient
+    from custom_components.wolta.const import WOLTA_API_BASE
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-empty-body")
+    entry.add_to_hass(hass)
+    aioclient_mock.post(
+        f"{WOLTA_API_BASE}/api/v1/profile/claim-code", status=200, text="")
+    real_client = WoltaApiClient(aioclient_mock.create_session({}), base_url=WOLTA_API_BASE)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=real_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_options_kopplingskod_natverksfel_ger_abort(
+    hass: HomeAssistant, aioclient_mock
+) -> None:
+    """Task 13-reviewfynd: ett riktigt offline-läge (DNS/anslutningsfel) kastas av
+    self._session.request(...) INNAN _request hinner konvertera det till en
+    WoltaApiError - ett smalt `except WoltaApiError` i flowet läckte det ut som en
+    oskyddad aiohttp.ClientConnectorError. Samma verkliga-klient-uppställning som
+    testet ovan, så api.py:s except-gren faktiskt körs."""
+    import aiohttp
+    from custom_components.wolta.api import WoltaApiClient
+    from custom_components.wolta.const import WOLTA_API_BASE
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-network-fail")
+    entry.add_to_hass(hass)
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(
+        f"{WOLTA_API_BASE}/api/v1/profile/claim-code",
+        exc=aiohttp.ClientConnectorError(
+            connection_key=connection_key, os_error=OSError("offline")))
+    real_client = WoltaApiClient(aioclient_mock.create_session({}), base_url=WOLTA_API_BASE)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=real_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "cannot_connect"
 
@@ -1971,6 +2195,73 @@ async def test_link_flow_invalid_token_shows_error(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "link"
     assert result["errors"] == {"profile_input": "invalid_token"}
+
+
+@pytest.mark.asyncio
+async def test_link_steget_avvisar_laslank(hass: HomeAssistant) -> None:
+    """Efter bytet är Besök-länken en ?link=wpl_… som INTE duger som ägar-token.
+    Användaren ska få veta varför, inte ett generiskt 'ogiltig token'."""
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=_mock_client()),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={"profile_input": "https://wolta.se/anlaggning?link=wpl_abc"})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "link_is_read_link"}
+
+
+@pytest.mark.asyncio
+async def test_link_steget_avvisar_ral_wpl_token(hass: HomeAssistant) -> None:
+    """En rå wpl_-token (utan ?link=) ska avvisas lika tydligt som en full länk."""
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=_mock_client()),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"profile_input": "wpl_abcdef"})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "link_is_read_link"}
+
+
+@pytest.mark.asyncio
+async def test_reauth_view_only_avvisar_laslank(hass: HomeAssistant) -> None:
+    """Samma vakt i den andra anroparen: reauth_view_only avvisar en inklistrad
+    läslänk med samma riktade felmeddelande som länk-steget."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    data: dict[str, Any] = {CONF_TOKEN: "dead-token", CONF_ZONE: ZONE,
+                            CONF_VIEW_ONLY: True, CONF_CREATED_BY_HA: False,
+                            CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0}
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="uid-view-laslank")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client()
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        assert result["type"] == FlowResultType.FORM
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "https://wolta.se/anlaggning?link=wpl_zzz"})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "link_is_read_link"}
+    mock_client.get_profile.assert_not_called()
 
 
 async def _drive_create_to_plant(hass):
@@ -2248,6 +2539,8 @@ async def test_options_flow_purged_profile_starts_reauth(hass: HomeAssistant) ->
     with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
          patch("custom_components.wolta.config_flow.async_get_clientsession"):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         await hass.async_block_till_done()
 
     assert result["type"] == FlowResultType.ABORT
@@ -2462,6 +2755,8 @@ async def test_options_flow_changes_nameplate_kw(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -2493,6 +2788,8 @@ async def test_options_flow_clears_nameplate_kw(hass: HomeAssistant) -> None:
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
@@ -2536,6 +2833,8 @@ async def test_options_flow_hides_cost_for_plant_scoped_profile(hass: HomeAssist
         ),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         assert result["type"] == FlowResultType.FORM
 
         # Formuläret ska SAKNA cost-fältet (inte bara diffen skippa det) – annars vore
@@ -2866,6 +3165,8 @@ async def test_options_flow_changes_pct_field(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{
                 CONF_BATTERY_KWH: 22.0,
@@ -2897,6 +3198,8 @@ async def test_options_flow_clears_pct_field(hass: HomeAssistant) -> None:
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**{

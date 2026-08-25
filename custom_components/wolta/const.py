@@ -76,6 +76,9 @@ CONF_POWER_ISSUE_IGNORED = "power_issue_ignored"
 # the user must be able to keep their configured figure. Client-only, cleared on adopt.
 CONF_CAPACITY_ISSUE_IGNORED = "capacity_issue_ignored"
 CONF_EFFICIENCY_ISSUE_IGNORED = "efficiency_issue_ignored"
+# Läslänken (spec 2026-08-24): en CACHE av senaste lyckade mint, aldrig sanningskällan.
+# Servern äger länken; integrationen mintar vid varje setup (idempotent) och skriver över.
+CONF_LINK_TOKEN = "link_token"
 
 # Defaults
 DEFAULT_ZONE = "SE3"
@@ -91,14 +94,15 @@ DEFAULT_SHARE = False
 WOLTA_API_BASE = "https://wolta.se"
 
 
-def profile_url(token: str) -> str:
-    """Link to the profile's plant hub on wolta.se (token mode: ?profile=).
-
-    /anlaggning since the 2026-07-15 IA split (the hub owns all stored-profile
-    views + editing; /optimeringsbetyg is the public surface with smart landing).
-    """
+def link_url(link_token: str) -> str:
+    """Landningssidan för anläggningen, med LÄSLÄNKEN i stället för ägar-tokenet.
+    Ägar-tokenet skrivs aldrig in i configuration_url (Frencks HACS-review-notering,
+    hacs/default#9039): URL:en syns på enhetssidan och följer med varje
+    device-registry-export. WOLTA_API_BASE är ren sajt-bas – /api/v1 läggs på av
+    API-klienten, inte här."""
     from urllib.parse import quote
-    return f"{WOLTA_API_BASE}/anlaggning?profile={quote(token, safe='')}"
+
+    return f"{WOLTA_API_BASE}/anlaggning?link={quote(link_token, safe='')}"
 
 # Control systems for the plant-step selector. Values MUST match the backend's
 # CONTROL_SYSTEMS set (api/calibration.py) and the web's control-systems.ts - the
