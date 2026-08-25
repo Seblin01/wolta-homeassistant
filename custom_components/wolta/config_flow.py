@@ -1031,6 +1031,20 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
 _REQUIRED_FIELDS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
 
 
+def _zone_group(zone: str) -> list[tuple[str, str]]:
+    """Zones sharing `zone`'s two-letter country prefix, e.g. SE -> SE1..SE4.
+
+    This mirrors the backend's currency rule without duplicating it. The server accepts a
+    zone correction only when grade_currency() is unchanged (SEK for SE zones, EUR for
+    everything else), because the stored money columns hold raw numbers whose unit follows
+    the zone. Same-country is strictly NARROWER than that rule, so this list can never
+    offer something the server would reject with 422 - and it avoids the nonsense of
+    offering a Norwegian plant a move to Finland just because both are EUR.
+    """
+    prefix = zone[:2].upper()
+    return [(z, label) for z, label in SUPPORTED_ZONES if z[:2].upper() == prefix]
+
+
 class WoltaOptionsFlow(OptionsFlow):
     """Handle options for an existing Wolta config entry (shared-profile edit)."""
 
@@ -1044,9 +1058,13 @@ class WoltaOptionsFlow(OptionsFlow):
         """Meny (beslut 2026-08-25): options växte från ETT formulär till flera
         åtgärder. Kostar ett klick för den som bara ska ändra ett värde, men ger
         varje ny åtgärd en plats utan att formuläret sväller."""
-        return self.async_show_menu(
-            step_id="init", menu_options=["settings", "account_link"]
-        )
+        options = ["settings", "account_link"]
+        # Zonrättelsen visas bara när det FINNS något att byta till: ett land med en enda
+        # zon (t.ex. FI) skulle annars få en meny-post som leder till ett formulär med ett
+        # enda alternativ - det redan valda.
+        if len(_zone_group(self.config_entry.data.get(CONF_ZONE, ""))) > 1:
+            options.append("zone_correction")
+        return self.async_show_menu(step_id="init", menu_options=options)
 
     async def async_step_account_link(
         self, user_input: dict[str, Any] | None = None
@@ -1071,6 +1089,69 @@ class WoltaOptionsFlow(OptionsFlow):
             step_id="account_link",
             data_schema=vol.Schema({}),
             description_placeholders={"code": code},
+        )
+
+    async def async_step_zone_correction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Correct a price zone that was set wrong when the plant was created.
+
+        The zone decides which price series the grade and the economics are measured
+        against. It used to be immutable, which made a wrong choice permanent - and until
+        2026-08-25 several setup paths silently pre-filled SE3, so wrong choices happened.
+        The server now accepts a correction on the owner paths within the same currency
+        (api 0.80.0).
+
+        The current zone IS pre-selected here, unlike in setup. That is deliberate and not
+        a contradiction: in setup a pre-filled dropdown is acceptance by inaction, whereas
+        someone who navigated into "Correct the price zone" has already made an active
+        decision to change it - and needs to see what is stored today to change it.
+        """
+        entry = self.config_entry
+        errors: dict[str, str] = {}
+        current: str = entry.data.get(CONF_ZONE, "")
+
+        if user_input is not None:
+            chosen = user_input[CONF_ZONE]
+            if chosen != current:
+                session = async_get_clientsession(self.hass)
+                client = WoltaApiClient(session)
+                try:
+                    await client.patch_profile(entry.data[CONF_TOKEN], zone=chosen)
+                except WoltaAuthError:
+                    entry.async_start_reauth(self.hass)
+                    return self.async_abort(reason="reauth_required")
+                except WoltaApiError as err:
+                    _LOGGER.error("Zone correction rejected: %s", err)
+                    errors["base"] = "zone_rejected"
+                else:
+                    # The stored zone MUST follow the server in the same breath. Reauth
+                    # resends entry_data[CONF_ZONE], and the server refuses a re-onboard
+                    # whose zone differs from the stored one (reidentify_integration_plant
+                    # raises) - so a correction without this line would make the next
+                    # reauth fail with "already registered in another price zone".
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, CONF_ZONE: chosen}
+                    )
+            if not errors:
+                return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="zone_correction",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ZONE, default=current): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=z, label=label)
+                                for z, label in _zone_group(current)
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_settings(
