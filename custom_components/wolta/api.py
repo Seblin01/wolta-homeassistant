@@ -250,6 +250,19 @@ class WoltaApiClient:
         """
         return await self._request("GET", "/profile/results", headers=self._auth(token))
 
+    async def mint_link(self, token: str) -> str | None:
+        """Get-or-create anläggningens läslänk. Returnerar None vid fel (offline, äldre
+        backend utan endpointen, krypto otillgängligt server-side) – anroparen faller
+        tillbaka på sin cache och i sista hand på en tokenlös URL. Ett misslyckat mint
+        får aldrig fälla entryn. isinstance-garden: _request returnerar None på tom
+        kropp (api.py:90-96), och ett oväntat tomt 200 ska bete sig som ett fel, inte
+        kasta AttributeError."""
+        try:
+            data = await self._request("POST", "/profile/link", headers=self._auth(token))
+        except WoltaApiError:
+            return None
+        return data.get("link_token") if isinstance(data, dict) else None
+
     async def delete(self, token: str) -> None:
         """Right-to-erasure: delete the profile and all associated data.
 

@@ -443,3 +443,36 @@ async def test_create_profile_omits_plant_id_when_unset(aioclient_mock: AiohttpC
     await client.create_profile(
         zone="SE3", battery_kwh=10, battery_kw=5, eff=0.9, has_solar=False, share_profile=False)
     assert "client_plant_id" not in aioclient_mock.mock_calls[-1][2]
+
+
+# ---------------------------------------------------------------------------
+# mint_link
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mint_link_returnerar_token(aioclient_mock: AiohttpClientMocker) -> None:
+    """Mint är idempotent server-side; klienten anropar den vid VARJE setup och
+    skriver över sin cache."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link",
+                        json={"link_token": "wpl_abc"})
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") == "wpl_abc"
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_vid_fel(aioclient_mock: AiohttpClientMocker) -> None:
+    """Ett misslyckat mint får ALDRIG fälla entryn – anroparen faller tillbaka på
+    cachen och i sista hand på en tokenlös URL."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", status=503)
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None
+
+
+@pytest.mark.asyncio
+async def test_mint_link_ger_none_pa_tom_kropp(aioclient_mock: AiohttpClientMocker) -> None:
+    """_request returnerar None på 204/tom kropp (api.py:90-96) – mint_link får inte
+    kasta AttributeError på det (plangranskningen, fynd H12)."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile/link", status=200, text="")
+    client = _client(aioclient_mock)
+    assert await client.mint_link("tok-1") is None

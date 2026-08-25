@@ -70,3 +70,23 @@ async def test_diagnostics_redacts_plant_id(hass: HomeAssistant):
 
     assert "a1b2c3d4" not in str(diag)
     assert diag["entry_data"][CONF_PLANT_ID] == "**REDACTED**"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_redacts_link_token(hass: HomeAssistant):
+    """The read link's token must not survive into a shared diagnostics dump either –
+    it is a lesser-privileged credential than the owner token, but still a live,
+    revocable capability (read + scoped economy/tariff writes) worth keeping out of
+    GitHub issues and forum posts."""
+    from custom_components.wolta.const import CONF_LINK_TOKEN
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: "super-secret", CONF_ZONE: "SE3",
+                  CONF_LINK_TOKEN: "wpl_leak_me_not"}
+    entry.runtime_data = None
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert "wpl_leak_me_not" not in str(diag)
+    assert diag["entry_data"][CONF_LINK_TOKEN] == "**REDACTED**"

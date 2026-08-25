@@ -8,12 +8,15 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_PLANT_ID, CONF_TOKEN
+from .const import CONF_LINK_TOKEN, CONF_PLANT_ID, CONF_TOKEN
 
 # CONF_PLANT_ID is redacted alongside the token: it is the key the backend uses to recognise
 # this plant, so anyone holding it can re-onboard as this plant and take over its row. Users
 # routinely attach diagnostics dumps to GitHub issues and forum posts.
-TO_REDACT = [CONF_TOKEN, CONF_PLANT_ID]
+# CONF_LINK_TOKEN (spec 2026-08-24) is a lesser-privileged credential than the owner token –
+# read + scoped economy/tariff writes, never delete/mint/share – but still live and worth
+# keeping out of a shared dump.
+TO_REDACT = [CONF_TOKEN, CONF_PLANT_ID, CONF_LINK_TOKEN]
 
 
 async def async_get_config_entry_diagnostics(

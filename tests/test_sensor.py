@@ -515,19 +515,21 @@ def test_unique_id_format():
 # ---------------------------------------------------------------------------
 
 
-def test_device_info_configuration_url():
-    """The device's configuration_url points to the plant hub /anlaggning (token mode:
-    ?profile=) – /optimeringsbetyg is the public surface since the 2026-07-15 IA."""
-    sensor = _sensor("optimeringsbetyg", RESULTS_FULL)
-    url = sensor._attr_device_info["configuration_url"]
-    assert url == "https://wolta.se/anlaggning?profile=tok-test"
+def test_configuration_url_bar_aldrig_agar_tokenet() -> None:
+    """Kärninvarianten (spec 2026-08-24): ägar-tokenet lämnar aldrig entry.data –
+    configuration_url bygger på LÄSLÄNKEN. Ersätter test_device_info_configuration_url
+    + test_profile_url_quotes_token."""
+    from custom_components.wolta.const import link_url
+    url = link_url("wpl_läsbar/token")
+    assert url.startswith("https://wolta.se/anlaggning?link=")
+    assert "wpl_l%C3%A4sbar%2Ftoken" in url        # URL-encodat, som profile_url var
+    assert "profile=" not in url
 
 
-def test_profile_url_quotes_token():
-    """Token is URL-encoded (future-proofing in case the token format changes)."""
-    from custom_components.wolta.const import profile_url
-
-    assert profile_url("a/b+c") == "https://wolta.se/anlaggning?profile=a%2Fb%2Bc"
+def test_profile_url_ar_borttagen() -> None:
+    """profile_url() raderas (spec fynd I) – enda konsumenterna var device-vägarna."""
+    from custom_components.wolta import const
+    assert not hasattr(const, "profile_url")
 
 
 # ---------------------------------------------------------------------------
