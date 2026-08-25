@@ -120,7 +120,7 @@
       },
       "plant": {
         "title": "Batteri och ekonomi",
-        "description": "Förifyllt där det går utifrån din Home Assistant-plats och sensorhistorik – kontrollera värdena och justera.",
+        "description": "Förifyllt där det går utifrån din Home Assistant-plats och sensorhistorik – kontrollera värdena och justera. {zone_hint}",
         "data": {
           "zone": "Elpriszon",
           "battery_kwh": "Användbar batterikapacitet (kWh)",

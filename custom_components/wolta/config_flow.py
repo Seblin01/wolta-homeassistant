@@ -382,14 +382,36 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         supported = {z for z, _ in SUPPORTED_ZONES}
         guess = suggest_zone(self.hass.config.country, self.hass.config.latitude)
-        zone_default = guess if guess in supported else DEFAULT_ZONE
+        # Zone is an ACTIVE choice (Sebastian's directive 2026-08-24): it selects the
+        # price series the grade AND the economics are computed against, and it is
+        # IMMUTABLE server-side after plant creation (fixing a wrong zone means
+        # delete-and-recreate). A pre-selected dropdown is acceptance-by-inaction, so
+        # the location guess below is surfaced as INFORMATION in the description
+        # only - never as a schema default (mirrors CONF_CONTROL_SYSTEM below).
+        # The hint sentence is plain English regardless of UI language, same as the
+        # SUPPORTED_ZONES/CONTROL_SYSTEMS option labels it quotes from - it is not
+        # grammatically fused into the localized paragraph, just appended after it.
+        if guess in supported:
+            guess_label = dict(SUPPORTED_ZONES)[guess]
+            zone_hint = (
+                f"Based on your Home Assistant location, {guess_label} looks "
+                "likely – but you must still choose the zone yourself."
+            )
+        else:
+            zone_hint = (
+                "Home Assistant could not suggest a zone from your configured "
+                "location – check your electricity bill or grid operator to find yours."
+            )
         eff_suggested = self._prefill.get("eff")
         date_suggested = self._prefill.get("purchase_date")
         invert_default = bool(self._prefill.get("invert_suspected"))
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_ZONE, default=zone_default): _zone_selector(),
+                # Deliberately NO default: the zone is an ACTIVE choice (directive
+                # 2026-08-24) - the location guess above is surfaced via
+                # description_placeholders instead. See the comment above.
+                vol.Required(CONF_ZONE): _zone_selector(),
                 vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
                     min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
                 ),
@@ -450,7 +472,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # values), instead of wiping the form back to prefill defaults.
         if errors and user_input is not None:
             schema = self.add_suggested_values_to_schema(schema, user_input)
-        return self.async_show_form(step_id="plant", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="plant",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"zone_hint": zone_hint},
+        )
 
     # ------------------------------------------------------------------
     # Step 2: entity selectors (with energy-dashboard prefill)

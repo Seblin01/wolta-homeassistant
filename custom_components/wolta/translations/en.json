@@ -120,7 +120,7 @@
       },
       "plant": {
         "title": "Battery and economy",
-        "description": "Prefilled where possible from your Home Assistant location and sensor history – check the values and adjust.",
+        "description": "Prefilled where possible from your Home Assistant location and sensor history – check the values and adjust. {zone_hint}",
         "data": {
           "zone": "Electricity price zone",
           "battery_kwh": "Usable battery capacity (kWh)",

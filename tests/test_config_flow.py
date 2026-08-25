@@ -2280,7 +2280,12 @@ async def _drive_create_to_plant(hass):
 def _plant_schema_default(result, field):
     marker = next(k for k in result["data_schema"].schema
                   if (k.schema if hasattr(k, "schema") else str(k)) == field)
-    return marker.default()
+    # voluptuous wraps an explicit default value in a callable (default_factory);
+    # a Required() with NO default at all leaves .default as the raw vol.UNDEFINED
+    # sentinel, which is not callable - handle both so this helper also works for
+    # fields (like CONF_ZONE) that must render with nothing pre-selected.
+    d = marker.default
+    return d() if callable(d) else d
 
 
 @pytest.mark.asyncio
@@ -2306,7 +2311,15 @@ async def test_create_flow_order_entities_then_plant(hass: HomeAssistant) -> Non
 
 
 @pytest.mark.asyncio
-async def test_create_flow_zone_prefill_from_ha_config(hass: HomeAssistant) -> None:
+async def test_create_flow_zone_has_no_default(hass: HomeAssistant) -> None:
+    """Zone is an ACTIVE choice (directive 2026-08-24): it selects the price series
+    the grade AND the economics are computed against, and is IMMUTABLE server-side
+    after plant creation. A location-based guess must never pre-select the dropdown
+    - that would be acceptance-by-inaction, exactly like the pre-fix control_system
+    default. This test used to assert the default WAS "SE3" (the old, wrong
+    behaviour); it is now inverted per directive rather than deleted."""
+    import voluptuous as vol  # noqa: PLC0415
+
     hass.config.country = "SE"
     hass.config.latitude = 59.33
     mock_client = _mock_client()
@@ -2316,7 +2329,78 @@ async def test_create_flow_zone_prefill_from_ha_config(hass: HomeAssistant) -> N
          patch("custom_components.wolta.stats.async_fetch_lifetime",
                new=AsyncMock(return_value=(0.0, 0.0, None))):
         result = await _drive_create_to_plant(hass)
-    assert _plant_schema_default(result, CONF_ZONE) == "SE3"
+    assert _plant_schema_default(result, CONF_ZONE) is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_create_flow_zone_guess_surfaced_as_text(hass: HomeAssistant) -> None:
+    """The location guess is demoted from decision to information: it must still
+    reach the user, just as text in the description, not as a pre-selected value."""
+    hass.config.country = "SE"
+    hass.config.latitude = 59.33  # -> SE3, per the SE latitude bands
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+    hint = result["description_placeholders"]["zone_hint"]
+    assert "SE3" in hint
+    assert "still choose" in hint
+
+
+@pytest.mark.asyncio
+async def test_create_flow_zone_no_guess_reads_sensibly(hass: HomeAssistant) -> None:
+    """No HA location configured (latitude defaults to 0.0) -> suggest_zone() returns
+    None. The description must degrade to a neutral phrase, not 'looks likely: None'."""
+    hass.config.country = "SE"
+    hass.config.latitude = 0.0
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+    hint = result["description_placeholders"]["zone_hint"]
+    assert "None" not in hint
+    assert "could not suggest" in hint
+
+
+@pytest.mark.asyncio
+async def test_create_flow_zone_no_guess_unsupported_country(hass: HomeAssistant) -> None:
+    """A country the band logic doesn't cover also degrades to the neutral phrase."""
+    hass.config.country = "US"
+    hass.config.latitude = 40.0
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+    hint = result["description_placeholders"]["zone_hint"]
+    assert "None" not in hint
+    assert "could not suggest" in hint
+
+
+@pytest.mark.asyncio
+async def test_plant_step_requires_zone(hass: HomeAssistant) -> None:
+    """Submitting the plant step without a zone must not pass - it must never
+    silently create a plant with the old SE3 default."""
+    mock_client = _mock_client()
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
+    ):
+        result = await _drive_create_to_plant(hass)
+        submission = {k: v for k, v in STEP_USER_DATA.items() if k != CONF_ZONE}
+        with pytest.raises(Exception):  # vol.MultipleInvalid: required key missing
+            await hass.config_entries.flow.async_configure(
+                result["flow_id"], user_input=submission
+            )
 
 
 @pytest.mark.asyncio
