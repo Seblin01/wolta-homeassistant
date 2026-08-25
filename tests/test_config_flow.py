@@ -2403,6 +2403,45 @@ async def test_plant_step_requires_zone(hass: HomeAssistant) -> None:
             )
 
 
+def test_zone_hint_localized_by_language() -> None:
+    """The zone hint is a full, structurally different sentence per branch (guess
+    vs no-guess) - not one translation string with a value placeholder - so it
+    lives in the Python-side _ZONE_HINT_* tables (see the comment above them),
+    keyed on the two-letter language prefix. Distinctive substrings only, so a
+    copy edit doesn't break this test."""
+    from custom_components.wolta.config_flow import _zone_hint  # noqa: PLC0415
+
+    supported = {"SE3"}
+
+    assert "stämma" in _zone_hint("sv", "SE3", supported)
+    assert "looks likely" in _zone_hint("en", "SE3", supported)
+    assert "kunde inte föreslå" in _zone_hint("sv", None, supported)
+    assert "could not suggest" in _zone_hint("en", None, supported)
+    # Unrelated language (e.g. a German-language HA install) falls back to English.
+    assert "looks likely" in _zone_hint("de", "SE3", supported)
+    # Locale variants (e.g. "sv-SE") are matched on the two-letter prefix only.
+    assert "stämma" in _zone_hint("sv-SE", "SE3", supported)
+
+
+@pytest.mark.asyncio
+async def test_create_flow_zone_hint_wired_to_ha_language(hass: HomeAssistant) -> None:
+    """End-to-end check that hass.config.language actually reaches the rendered
+    hint (not just the pure _zone_hint() table tested above)."""
+    hass.config.language = "sv"
+    hass.config.country = "SE"
+    hass.config.latitude = 59.33  # -> SE3, per the SE latitude bands
+    mock_client = _mock_client()
+    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
+         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
+         patch("custom_components.wolta.stats.async_fetch_lifetime",
+               new=AsyncMock(return_value=(0.0, 0.0, None))):
+        result = await _drive_create_to_plant(hass)
+    hint = result["description_placeholders"]["zone_hint"]
+    assert "stämma" in hint
+    assert "looks likely" not in hint
+
+
 @pytest.mark.asyncio
 async def test_create_flow_invert_detection_prefills_toggle(hass: HomeAssistant) -> None:
     """Ur > in i historiken → invert-togglen förvald + eff-förslag = speglad kvot."""

@@ -235,6 +235,47 @@ def _is_read_link(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Zone hint (plant step) – location-guess text shown next to the (now defaultless,
+# see CONF_ZONE in async_step_plant) zone field.
+#
+# This prose lives in Python, not strings.json, because the two cases are
+# STRUCTURALLY different sentences (guess vs no-guess), not one sentence with a
+# value slot – a translation-string placeholder can only ever carry a single,
+# already-fixed language's prose, so it cannot hold "the whole sentence, in
+# whichever language the user runs HA in". SUPPORTED_ZONES/CONTROL_SYSTEMS don't
+# set a precedent here: those are identifier labels ("SE3 – Stockholm" reads the
+# same regardless of UI language), not sentences. Keyed on hass.config.language's
+# two-letter prefix; anything besides sv/en falls back to English. That is the
+# tradeoff being made – a small un-DRY table instead of a runtime
+# translation-string lookup – and it should not need rediscovering later.
+# ---------------------------------------------------------------------------
+
+_ZONE_HINT_GUESS: dict[str, str] = {
+    "sv": "Utifrån din Home Assistant-plats verkar {zone} stämma – men du måste "
+          "välja zonen själv.",
+    "en": "Based on your Home Assistant location, {zone} looks likely – but you "
+          "must still choose the zone yourself.",
+}
+_ZONE_HINT_NO_GUESS: dict[str, str] = {
+    "sv": "Home Assistant kunde inte föreslå en zon utifrån din inställda plats "
+          "– kolla din elräkning eller ditt elnätsbolag för att hitta rätt zon.",
+    "en": "Home Assistant could not suggest a zone from your configured location "
+          "– check your electricity bill or grid operator to find yours.",
+}
+
+
+def _zone_hint(hass_language: str, guess: str | None, supported: set[str]) -> str:
+    """Build the plant step's zone_hint text in the user's HA language (sv/en,
+    else English)."""
+    lang = hass_language.split("-")[0]
+    lang = lang if lang in _ZONE_HINT_GUESS else "en"
+    if guess in supported:
+        guess_label = dict(SUPPORTED_ZONES)[guess]
+        return _ZONE_HINT_GUESS[lang].format(zone=guess_label)
+    return _ZONE_HINT_NO_GUESS[lang]
+
+
+# ---------------------------------------------------------------------------
 # Config flow
 # ---------------------------------------------------------------------------
 
@@ -388,20 +429,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # delete-and-recreate). A pre-selected dropdown is acceptance-by-inaction, so
         # the location guess below is surfaced as INFORMATION in the description
         # only - never as a schema default (mirrors CONF_CONTROL_SYSTEM below).
-        # The hint sentence is plain English regardless of UI language, same as the
-        # SUPPORTED_ZONES/CONTROL_SYSTEMS option labels it quotes from - it is not
-        # grammatically fused into the localized paragraph, just appended after it.
-        if guess in supported:
-            guess_label = dict(SUPPORTED_ZONES)[guess]
-            zone_hint = (
-                f"Based on your Home Assistant location, {guess_label} looks "
-                "likely – but you must still choose the zone yourself."
-            )
-        else:
-            zone_hint = (
-                "Home Assistant could not suggest a zone from your configured "
-                "location – check your electricity bill or grid operator to find yours."
-            )
+        # See _zone_hint()/_ZONE_HINT_GUESS above for why this text is localized
+        # in Python rather than in strings.json.
+        zone_hint = _zone_hint(self.hass.config.language, guess, supported)
         eff_suggested = self._prefill.get("eff")
         date_suggested = self._prefill.get("purchase_date")
         invert_default = bool(self._prefill.get("invert_suspected"))
