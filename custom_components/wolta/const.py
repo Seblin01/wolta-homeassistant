@@ -19,6 +19,12 @@ CONF_BATTERY_KW = "battery_kw"
 # Backend spec 2026-07-15: shown as a note on the grade ("we measured X kW usable").
 CONF_NAMEPLATE_KW = "nameplate_kw"
 CONF_EFF = "eff"
+# Control system driving the battery (audit finding 2026-08-24: every plant onboarded
+# through this integration became 'unknown' in the corpus statistics because the field
+# could never be set). Mandatory in the plant step since v0.29.0, mirroring the web
+# guide's rule; "other" additionally requires the free-text name below.
+CONF_CONTROL_SYSTEM = "control_system"
+CONF_CONTROL_SYSTEM_NAME = "control_system_name"
 CONF_RESERVE_PCT = "reserve_pct"
 CONF_SHARE = "share"
 CONF_COST_SEK = "cost_sek"
@@ -93,6 +99,29 @@ def profile_url(token: str) -> str:
     """
     from urllib.parse import quote
     return f"{WOLTA_API_BASE}/anlaggning?profile={quote(token, safe='')}"
+
+# Control systems for the plant-step selector. Values MUST match the backend's
+# CONTROL_SYSTEMS set (api/calibration.py) and the web's control-systems.ts - the
+# server 422s on unknown values. Order mirrors the web picker. Brand names are
+# language-neutral; only the last three carry language (inline English labels,
+# same convention as SUPPORTED_ZONES below).
+CONTROL_SYSTEMS: list[tuple[str, str]] = [
+    ("tibber", "Tibber"),
+    ("checkwatt", "CheckWatt"),
+    ("greenely", "Greenely"),
+    ("aikion", "Aikion"),
+    ("sigenergy", "Sigenergy"),
+    ("emaldo", "Emaldo"),
+    ("ferroamp", "Ferroamp"),
+    ("sonnen", "Sonnen"),
+    ("reduxi", "Reduxi"),
+    ("huawei", "Huawei"),
+    ("pixii", "Pixii"),
+    ("emhass", "EMHASS"),
+    ("self_consumption", "Self-consumption (passive)"),
+    ("manual", "Manual"),
+    ("other", "Other"),
+]
 
 # Supported price zones for the zone selector (SP3 multi-land requirement).
 # Covers all 26 countries in the Wolta backend; labels are shown in the UI.

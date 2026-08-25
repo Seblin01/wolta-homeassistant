@@ -128,6 +128,8 @@
           "battery_kw": "Batteriets maxeffekt (kW)",
           "nameplate_kw": "Märkeffekt (kW) – valfri",
           "eff": "Rundtripsverkningsgrad (0,5–1,0)",
+          "control_system": "Styrsystem",
+          "control_system_name": "Styrsystemets namn (vid Annat)",
           "reserve_pct": "Reservgolv (%) – valfritt",
           "cost_sek": "Vad du betalade för batteriet (kr) – endast batteriet, valfritt",
           "purchase_date": "Inköpsdatum – valfritt",
@@ -201,7 +203,8 @@
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
-      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil."
+      "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
+      "control_system_name_required": "Ange styrsystemets namn när du valt Annat."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",

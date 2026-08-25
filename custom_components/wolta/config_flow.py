@@ -42,6 +42,8 @@ from .const import (
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
@@ -62,6 +64,7 @@ from .const import (
     CONF_TOKEN,
     CONF_VIEW_ONLY,
     CONF_ZONE,
+    CONTROL_SYSTEMS,
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
@@ -164,6 +167,18 @@ def _zone_selector() -> SelectSelector:
             options=[
                 SelectOptionDict(value=zone_id, label=label)
                 for zone_id, label in SUPPORTED_ZONES
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _control_system_selector() -> SelectSelector:
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(value=cs_id, label=label)
+                for cs_id, label in CONTROL_SYSTEMS
             ],
             mode=SelectSelectorMode.DROPDOWN,
         )
@@ -340,9 +355,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Plant parameters, prefilled from HA location and battery history."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._plant_data = user_input
-            return await self.async_step_privacy()
+            # "other" without a free-text name gives zero segmentation signal -
+            # same rule as the web guide (lib/guide.ts canAdvance).
+            if (user_input.get(CONF_CONTROL_SYSTEM) == "other"
+                    and not (user_input.get(CONF_CONTROL_SYSTEM_NAME) or "").strip()):
+                errors[CONF_CONTROL_SYSTEM_NAME] = "control_system_name_required"
+            if not errors:
+                self._plant_data = user_input
+                return await self.async_step_privacy()
 
         from .zone_prefill import suggest_zone  # noqa: PLC0415
 
@@ -372,6 +394,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # räcker (stats.analyze_battery_history) – bättre än databladsgissning.
                 vol.Required(CONF_EFF, default=eff_suggested or DEFAULT_EFF): _number_selector(
                     min_val=0.5, max_val=1.0, step=0.01
+                ),
+                # Deliberately NO default: the control system is an ACTIVE choice
+                # (audit 2026-08-24 - a silent default would put every inattentive
+                # user in the same corpus bucket, like the web guide's old SE3 zone).
+                vol.Required(CONF_CONTROL_SYSTEM): _control_system_selector(),
+                vol.Optional(CONF_CONTROL_SYSTEM_NAME): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
                 vol.Optional(CONF_RESERVE_PCT): _number_selector(
                     min_val=0.0, max_val=100.0, step=1.0, unit="%"
@@ -405,7 +434,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
 
-        return self.async_show_form(step_id="plant", data_schema=schema)
+        # Re-show after a validation error keeps what the user typed (suggested
+        # values), instead of wiping the form back to prefill defaults.
+        if errors and user_input is not None:
+            schema = self.add_suggested_values_to_schema(schema, user_input)
+        return self.async_show_form(step_id="plant", data_schema=schema, errors=errors)
 
     # ------------------------------------------------------------------
     # Step 2: entity selectors (with energy-dashboard prefill)
@@ -513,6 +546,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             reserve_pct: float | None = self._plant_data.get(CONF_RESERVE_PCT)
             nameplate_kwh: float | None = self._plant_data.get(CONF_NAMEPLATE_KWH)
             nameplate_kw: float | None = self._plant_data.get(CONF_NAMEPLATE_KW)
+            control_system: str | None = self._plant_data.get(CONF_CONTROL_SYSTEM)
+            # The name only means something together with "other" (the web sends the
+            # same pair); a stray name next to a brand value would be orphaned.
+            control_system_name: str | None = (
+                (self._plant_data.get(CONF_CONTROL_SYSTEM_NAME) or "").strip() or None
+                if control_system == "other" else None
+            )
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -535,6 +575,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     nameplate_kwh=nameplate_kwh,
                     nameplate_kw=nameplate_kw,
                     client_plant_id=self._plant_id,
+                    control_system=control_system,
+                    control_system_name=control_system_name,
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -582,6 +624,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry_data[CONF_NAMEPLATE_KWH] = nameplate_kwh
                 if nameplate_kw is not None:
                     entry_data[CONF_NAMEPLATE_KW] = nameplate_kw
+                if control_system is not None:
+                    entry_data[CONF_CONTROL_SYSTEM] = control_system
+                if control_system_name is not None:
+                    entry_data[CONF_CONTROL_SYSTEM_NAME] = control_system_name
                 entry_data[CONF_CREATED_BY_HA] = True
                 entry_data[CONF_INVERT_BATTERY] = bool(
                     self._plant_data.get(CONF_INVERT_BATTERY, False)
@@ -817,6 +863,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
                     nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
+                    # Entries from before v0.29.0 have no stored field -> None is
+                    # OMITTED by the client, and the backend (>= 0.79.0) preserves the
+                    # stored value on omission instead of clobbering it to null.
+                    control_system=entry_data.get(CONF_CONTROL_SYSTEM),
+                    control_system_name=entry_data.get(CONF_CONTROL_SYSTEM_NAME),
                 )
             except WoltaApiError as err:
                 _LOGGER.error("Reauth failed – could not create Wolta profile: %s", err)

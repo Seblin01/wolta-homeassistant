@@ -126,6 +126,8 @@ class WoltaApiClient:
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
         client_plant_id: str | None = None,
+        control_system: str | None = None,
+        control_system_name: str | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -166,6 +168,13 @@ class WoltaApiClient:
         # re-onboarded plant and keep its streamed history instead of starting a new row.
         if client_plant_id is not None:
             payload["client_plant_id"] = client_plant_id
+        # Omission is meaningful (server >= 0.79.0): on re-onboarding of a known plant
+        # an OMITTED control_system PRESERVES the stored value, so entries from before
+        # v0.29.0 (no stored field) must not send anything here.
+        if control_system is not None:
+            payload["control_system"] = control_system
+        if control_system_name is not None:
+            payload["control_system_name"] = control_system_name
         data = await self._request("POST", "/profile", json=payload)
         return data["profile_token"]
 

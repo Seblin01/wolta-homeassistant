@@ -128,6 +128,8 @@
           "battery_kw": "Battery max power (kW)",
           "nameplate_kw": "Nameplate power (kW) – optional",
           "eff": "Round-trip efficiency (0.5–1.0)",
+          "control_system": "Control system",
+          "control_system_name": "Control system name (when Other)",
           "reserve_pct": "Reserve floor (%) – optional",
           "cost_sek": "What you paid for the battery (kr) – battery only, optional",
           "purchase_date": "Purchase date – optional",
@@ -201,7 +203,8 @@
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
-      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile."
+      "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
+      "control_system_name_required": "Enter the control system's name when you have chosen Other."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
