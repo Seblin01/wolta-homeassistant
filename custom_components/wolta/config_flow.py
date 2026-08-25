@@ -235,6 +235,47 @@ def _is_read_link(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Zone hint (plant step) – location-guess text shown next to the (now defaultless,
+# see CONF_ZONE in async_step_plant) zone field.
+#
+# This prose lives in Python, not strings.json, because the two cases are
+# STRUCTURALLY different sentences (guess vs no-guess), not one sentence with a
+# value slot – a translation-string placeholder can only ever carry a single,
+# already-fixed language's prose, so it cannot hold "the whole sentence, in
+# whichever language the user runs HA in". SUPPORTED_ZONES/CONTROL_SYSTEMS don't
+# set a precedent here: those are identifier labels ("SE3 – Stockholm" reads the
+# same regardless of UI language), not sentences. Keyed on hass.config.language's
+# two-letter prefix; anything besides sv/en falls back to English. That is the
+# tradeoff being made – a small un-DRY table instead of a runtime
+# translation-string lookup – and it should not need rediscovering later.
+# ---------------------------------------------------------------------------
+
+_ZONE_HINT_GUESS: dict[str, str] = {
+    "sv": "Utifrån din Home Assistant-plats verkar {zone} stämma – men du måste "
+          "välja zonen själv.",
+    "en": "Based on your Home Assistant location, {zone} looks likely – but you "
+          "must still choose the zone yourself.",
+}
+_ZONE_HINT_NO_GUESS: dict[str, str] = {
+    "sv": "Home Assistant kunde inte föreslå en zon utifrån din inställda plats "
+          "– kolla din elräkning eller ditt elnätsbolag för att hitta rätt zon.",
+    "en": "Home Assistant could not suggest a zone from your configured location "
+          "– check your electricity bill or grid operator to find yours.",
+}
+
+
+def _zone_hint(hass_language: str, guess: str | None, supported: set[str]) -> str:
+    """Build the plant step's zone_hint text in the user's HA language (sv/en,
+    else English)."""
+    lang = hass_language.split("-")[0]
+    lang = lang if lang in _ZONE_HINT_GUESS else "en"
+    if guess in supported:
+        guess_label = dict(SUPPORTED_ZONES)[guess]
+        return _ZONE_HINT_GUESS[lang].format(zone=guess_label)
+    return _ZONE_HINT_NO_GUESS[lang]
+
+
+# ---------------------------------------------------------------------------
 # Config flow
 # ---------------------------------------------------------------------------
 
@@ -382,14 +423,25 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         supported = {z for z, _ in SUPPORTED_ZONES}
         guess = suggest_zone(self.hass.config.country, self.hass.config.latitude)
-        zone_default = guess if guess in supported else DEFAULT_ZONE
+        # Zone is an ACTIVE choice (Sebastian's directive 2026-08-24): it selects the
+        # price series the grade AND the economics are computed against, and it is
+        # IMMUTABLE server-side after plant creation (fixing a wrong zone means
+        # delete-and-recreate). A pre-selected dropdown is acceptance-by-inaction, so
+        # the location guess below is surfaced as INFORMATION in the description
+        # only - never as a schema default (mirrors CONF_CONTROL_SYSTEM below).
+        # See _zone_hint()/_ZONE_HINT_GUESS above for why this text is localized
+        # in Python rather than in strings.json.
+        zone_hint = _zone_hint(self.hass.config.language, guess, supported)
         eff_suggested = self._prefill.get("eff")
         date_suggested = self._prefill.get("purchase_date")
         invert_default = bool(self._prefill.get("invert_suspected"))
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_ZONE, default=zone_default): _zone_selector(),
+                # Deliberately NO default: the zone is an ACTIVE choice (directive
+                # 2026-08-24) - the location guess above is surfaced via
+                # description_placeholders instead. See the comment above.
+                vol.Required(CONF_ZONE): _zone_selector(),
                 vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
                     min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
                 ),
@@ -450,7 +502,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # values), instead of wiping the form back to prefill defaults.
         if errors and user_input is not None:
             schema = self.add_suggested_values_to_schema(schema, user_input)
-        return self.async_show_form(step_id="plant", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="plant",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"zone_hint": zone_hint},
+        )
 
     # ------------------------------------------------------------------
     # Step 2: entity selectors (with energy-dashboard prefill)
