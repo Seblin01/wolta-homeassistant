@@ -269,6 +269,23 @@ class WoltaApiClient:
             return None
         return data.get("link_token") if isinstance(data, dict) else None
 
+    async def mint_claim_code(self, token: str) -> str:
+        """Create a one-time claim code linking this plant to a wolta.se account.
+
+        POST /api/v1/profile/claim-code (Authorization: Bearer <token>) → 200
+        {"code": "XXXX-XXXX", "expires_in": 600}.
+
+        Unlike mint_link (which degrades to None on any error by design), this
+        RAISES on failure: the user is standing in the options flow waiting for a
+        code to type in on wolta.se, and a silently swallowed error would just show
+        a blank form with nothing to act on. The caller is expected to turn a raised
+        WoltaApiError into an abort(reason="cannot_connect").
+        """
+        data = await self._request(
+            "POST", "/profile/claim-code", headers=self._auth(token)
+        )
+        return data["code"]
+
     async def delete(self, token: str) -> None:
         """Right-to-erasure: delete the profile and all associated data.
 

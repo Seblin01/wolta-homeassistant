@@ -204,7 +204,8 @@
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
       "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
-      "control_system_name_required": "Ange styrsystemets namn när du valt Annat."
+      "control_system_name_required": "Ange styrsystemets namn när du valt Annat.",
+      "link_is_read_link": "Det där är anläggningens läslänk. Att koppla integrationen kräver ägar-tokenet – om du har tappat det, koppla anläggningen till ett konto och skapa ett nytt token där."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
@@ -216,6 +217,13 @@
   "options": {
     "step": {
       "init": {
+        "title": "Wolta",
+        "menu_options": {
+          "settings": "Inställningar",
+          "account_link": "Koppla till ett wolta.se-konto"
+        }
+      },
+      "settings": {
         "title": "Wolta-profil",
         "description": "Det här är din delade Wolta-profil – ändringar här syns på wolta.se, och ändringar gjorda på wolta.se syns här. Töm ett valfritt fält för att rensa värdet.",
         "sections": {
@@ -275,6 +283,10 @@
         "data_description": {
           "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Byter batteriets laddning och urladdning vid uppladdning, så du slipper ändra dina Home Assistant-sensorer."
         }
+      },
+      "account_link": {
+        "title": "Koppla till ett wolta.se-konto",
+        "description": "Din kopplingskod är **{code}**.\n\nLogga in eller skapa ett konto på wolta.se, gå till Konto → Koppla anläggning och ange koden. Koden gäller i 10 minuter."
       }
     },
     "error": {
