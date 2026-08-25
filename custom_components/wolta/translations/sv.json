@@ -220,7 +220,8 @@
         "title": "Wolta",
         "menu_options": {
           "settings": "Inställningar",
-          "account_link": "Koppla till ett wolta.se-konto"
+          "account_link": "Koppla till ett wolta.se-konto",
+          "zone_correction": "Rätta elområdet"
         }
       },
       "settings": {
@@ -287,10 +288,18 @@
       "account_link": {
         "title": "Koppla till ett wolta.se-konto",
         "description": "Din kopplingskod är **{code}**.\n\nLogga in eller skapa ett konto på wolta.se, gå till Konto → Koppla anläggning och ange koden. Koden gäller i 10 minuter. En ny kod gör en tidigare kod ogiltig, även om den inte hunnit gå ut."
+      },
+      "zone_correction": {
+        "title": "Rätta elområdet",
+        "description": "Byt elområde om det blev fel när anläggningen skapades. Zonen avgör vilka priser ditt betyg och din ekonomi mäts mot, så en rättelse räknar om dem — dina tal kommer att ändras. Bara zoner i samma land erbjuds: de sparade beloppen är angivna i zonens valuta och räknas inte om.",
+        "data": {
+          "zone": "Elområde"
+        }
       }
     },
     "error": {
-      "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen."
+      "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
+      "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },
     "abort": {
       "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare.",

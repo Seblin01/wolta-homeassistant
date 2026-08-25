@@ -1910,7 +1910,8 @@ async def test_options_flow_get_failure_aborts(hass: HomeAssistant) -> None:
 @pytest.mark.asyncio
 async def test_options_ar_en_meny(hass: HomeAssistant) -> None:
     """Options-flowen öppnar med en meny (beslut 2026-08-25): dagens formulär bakom
-    "settings", kopplingskoden bakom "account_link"."""
+    "settings", kopplingskoden bakom "account_link", zonrättelsen bakom "zone_correction"
+    (v0.32.0 - posten visas bara när landet har mer än en zon, se _zone_group)."""
     from pytest_homeassistant_custom_component.common import MockConfigEntry
 
     entry = MockConfigEntry(
@@ -1926,7 +1927,8 @@ async def test_options_ar_en_meny(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] == FlowResultType.MENU
-        assert set(result["menu_options"]) == {"settings", "account_link"}
+        assert set(result["menu_options"]) == {
+            "settings", "account_link", "zone_correction"}
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={"next_step_id": "settings"})
     assert result["type"] == FlowResultType.FORM
@@ -3472,3 +3474,102 @@ async def test_reauth_resends_stored_control_system(hass: HomeAssistant) -> None
                 result["flow_id"], user_input={}
             )
         assert mock_client.create_profile.call_args.kwargs.get("control_system") == expected
+
+
+# ---------------------------------------------------------------------------
+# v0.32.0: zone correction (backend api 0.80.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_zone_correction_patches_and_updates_entry(hass: HomeAssistant) -> None:
+    """A zone correction must PATCH the server AND move the entry's stored zone.
+
+    The stored zone is not cosmetic: reauth resends entry_data[CONF_ZONE], and the server
+    refuses a re-onboard whose zone differs from the one on record. Correcting only one of
+    the two leaves the integration in a state where the next reauth fails.
+    """
+    entry = _make_mock_entry(hass)
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"zone": "SE4"})
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "zone_correction"})
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "zone_correction"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={CONF_ZONE: "SE4"})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    assert mock_client.patch_profile.call_args.kwargs == {"zone": "SE4"}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_ZONE] == "SE4"
+
+
+@pytest.mark.asyncio
+async def test_zone_correction_unchanged_does_not_patch(hass: HomeAssistant) -> None:
+    """Re-picking the zone that is already stored is a no-op, not a PATCH."""
+    entry = _make_mock_entry(hass)
+    stored = entry.data[CONF_ZONE]
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock()
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "zone_correction"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={CONF_ZONE: stored})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_zone_correction_rejected_keeps_stored_zone(hass: HomeAssistant) -> None:
+    """A server rejection must NOT move the entry's zone.
+
+    Otherwise the integration would believe in a zone the server never accepted - and every
+    later reauth would resend it and fail.
+    """
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass)
+    stored = entry.data[CONF_ZONE]
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError("422"))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "zone_correction"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={CONF_ZONE: "SE1"})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "zone_rejected"}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_ZONE] == stored
+
+
+def test_zone_group_never_crosses_currency() -> None:
+    """_zone_group offers only same-country zones - strictly narrower than the server's
+    same-currency rule, so the menu can never propose a change the server would 422."""
+    from custom_components.wolta.config_flow import _zone_group
+
+    se = [z for z, _ in _zone_group("SE3")]
+    assert se == ["SE1", "SE2", "SE3", "SE4"]
+    assert all(z.startswith("SE") for z in se)
+    # A single-zone country yields one entry, which is why async_step_init hides the menu
+    # item in that case rather than offering a form with only the current value.
+    assert len(_zone_group("SE3")) > 1

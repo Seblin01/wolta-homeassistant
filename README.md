@@ -111,7 +111,7 @@ Because a linked profile belongs to your wolta.se usage, **removing the integrat
 
 ## Adjusting values afterwards
 
-Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Settings** to adjust values without removing the integration. (The other menu option, **Link to a wolta.se account**, is covered under [Account linking](#account-linking) below.) The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
+Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Settings** to adjust values without removing the integration. (The other menu options — **Link to a wolta.se account** and **Correct the price zone** — are covered under [Account linking](#account-linking) and [Correcting the price zone](#correcting-the-price-zone) below.) The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
 
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
 - Nameplate capacity (kWh) and nameplate power (kW) — optional manufacturer-rated figures. The grade itself always uses the usable/deliverable values above; the rated figures let wolta.se compare per-kWh prices fairly in the expansion calculator and explain measured-vs-rated differences. Clearing a field removes the value.
@@ -121,6 +121,14 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).
+
+### Correcting the price zone
+
+The price zone is chosen when the plant is created and normally stays put — it decides which day-ahead price series your grade and your economics are measured against. If it was set wrong, open **Configure → Correct the price zone** (v0.32.0+, requires server api 0.80.0+).
+
+Only zones in the same country are offered. The amounts you have entered — what you paid, your grid fee, your supplier markup — are expressed in the zone's currency and are **not** converted, so a move across a currency boundary would silently reinterpret e.g. 100,000 SEK as 100,000 EUR. For that case the answer is still to delete the plant and set it up again.
+
+A correction recalculates the grade and the economics against the new price series on your whole stored history, so **your figures will change**. The integration updates its own stored zone at the same time; nothing else needs doing.
 
 **Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The full history is re-uploaded from the new sensors and the grade recomputed — no need to remove the integration.
 

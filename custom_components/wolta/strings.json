@@ -220,7 +220,8 @@
         "title": "Wolta",
         "menu_options": {
           "settings": "Settings",
-          "account_link": "Link to a wolta.se account"
+          "account_link": "Link to a wolta.se account",
+          "zone_correction": "Correct the price zone"
         }
       },
       "settings": {
@@ -286,10 +287,18 @@
       "account_link": {
         "title": "Link to a wolta.se account",
         "description": "Your linking code is **{code}**.\n\nSign in or create an account at wolta.se, go to Account → Link plant and enter the code. The code is valid for 10 minutes. Minting a new code invalidates any earlier one, even if it hasn't expired yet."
+      },
+      "zone_correction": {
+        "title": "Correct the price zone",
+        "description": "Change the electricity price zone if it was set wrong when this plant was created. The zone decides which prices your grade and economics are measured against, so correcting it recalculates them — your figures will change. Only zones in the same country are offered: the stored amounts are expressed in the zone's currency and are not converted.",
+        "data": {
+          "zone": "Electricity price zone"
+        }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again."
+      "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
+      "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },
     "abort": {
       "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later.",
