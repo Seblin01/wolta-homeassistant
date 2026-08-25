@@ -584,3 +584,44 @@ async def test_mint_claim_code_hojer_woltaapierror_vid_timeout(
     client = _client(aioclient_mock)
     with pytest.raises(WoltaApiError):
         await client.mint_claim_code("tok-1")
+
+
+@pytest.mark.asyncio
+async def test_mint_link_skickar_bunden_timeout(aioclient_mock) -> None:
+    """Code-review 2026-08-25: mint_link kors som ALLRA forsta handling i
+    async_setup_entry och ar frivillig by design. Utan egen timeout gallde
+    aiohttps default (total=300 s), sa en svartahalsanslutning kunde stalla
+    integrationens uppstart i fem minuter - och kostnaden betalades om vid varje
+    ConfigEntryNotReady-retry. Testet pinnar att anropet bar en BUNDEN timeout,
+    inte bara att det fungerar."""
+    client = _client(aioclient_mock)
+    sedda: dict = {}
+
+    async def _spion(method, path, **kwargs):
+        sedda.update(kwargs)
+        return {"link_token": "wpl_abc"}
+
+    client._request = _spion
+    assert await client.mint_link("tok-1") == "wpl_abc"
+    tmo = sedda.get("timeout")
+    assert tmo is not None, "mint_link skickade ingen timeout - default 300 s galler da"
+    assert tmo.total is not None and tmo.total <= 30, f"otillracklig grans: {tmo.total}"
+
+
+@pytest.mark.asyncio
+async def test_mint_claim_code_skickar_bunden_timeout(aioclient_mock) -> None:
+    """Samma grans pa systermetoden: anvandaren star i options-dialogen och
+    vantar pa en kod. Systerdrift har varit det atervandande felet i det har
+    arbetet - de tva mintarna ska ha samma bundna vantan."""
+    client = _client(aioclient_mock)
+    sedda: dict = {}
+
+    async def _spion(method, path, **kwargs):
+        sedda.update(kwargs)
+        return {"code": "ABCD-EFGH"}
+
+    client._request = _spion
+    assert await client.mint_claim_code("tok-1") == "ABCD-EFGH"
+    tmo = sedda.get("timeout")
+    assert tmo is not None, "mint_claim_code skickade ingen timeout"
+    assert tmo.total is not None and tmo.total <= 30, f"otillracklig grans: {tmo.total}"

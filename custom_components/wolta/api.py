@@ -9,6 +9,25 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+# Bounded timeout for the two link/claim mints. HA's shared session sets no
+# ClientTimeout, so aiohttp's default applies: total=300 s, sock_connect=30 s
+# (measured against the installed aiohttp, not assumed). That is far too long for
+# either of these calls:
+#   - mint_link runs as the FIRST thing in async_setup_entry and is optional by
+#     design (it degrades to the cached or tokenless link). Without a bound, a
+#     blackholed connection stalls integration setup for up to five minutes, and
+#     the cost is paid again on every ConfigEntryNotReady retry. A broken-IPv6
+#     network burns 30 s per connect attempt before falling back to the A record
+#     (wolta.se is Cloudflare-fronted and publishes AAAA).
+#   - mint_claim_code runs while the user is staring at an options dialog waiting
+#     for a code.
+# Ten seconds is generous for a small POST and still bounded well under
+# sock_connect. A timeout raises asyncio.TimeoutError, which IS the builtin
+# TimeoutError on 3.11+ and is therefore already handled by both call sites'
+# except clauses - mint_link degrades to None, mint_claim_code re-raises as
+# WoltaApiError. No new failure mode, only a bounded wait.
+MINT_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
 # NPM/nginx defaults can be as low as 1 MB). ~5000 15-min rows ≈ 0.8 MB → passes
@@ -267,7 +286,10 @@ class WoltaApiClient:
         WoltaApiError, så ett smalare except hade läckt ut och fällt entryn – precis det
         anropskedjan ska förhindra."""
         try:
-            data = await self._request("POST", "/profile/link", headers=self._auth(token))
+            data = await self._request(
+                "POST", "/profile/link", headers=self._auth(token),
+                timeout=MINT_TIMEOUT,
+            )
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             # Debug, not warning/error: this degrades silently by design (see
             # docstring above) - the log line only exists so "why is the Visit
@@ -308,7 +330,8 @@ class WoltaApiClient:
         """
         try:
             data = await self._request(
-                "POST", "/profile/claim-code", headers=self._auth(token)
+                "POST", "/profile/claim-code", headers=self._auth(token),
+                timeout=MINT_TIMEOUT,
             )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise WoltaApiError(f"Network error minting claim code: {err}") from err
