@@ -280,10 +280,26 @@ class WoltaApiClient:
         code to type in on wolta.se, and a silently swallowed error would just show
         a blank form with nothing to act on. The caller is expected to turn a raised
         WoltaApiError into an abort(reason="cannot_connect").
+
+        Everything it raises must land in that ONE WoltaApiError family, so the
+        caller's single `except WoltaApiError` stays sufficient:
+          - An empty/unparseable 2xx body (_request returns None, api.py:90-96 - same
+            gap mint_link's isinstance guard exists for immediately above) or a body
+            without "code" would otherwise TypeError on the subscript below.
+          - A real offline failure (DNS, connection refused, timeout) raises
+            aiohttp.ClientError/TimeoutError from inside self._session.request(...),
+            BEFORE _request gets a chance to turn it into a WoltaApiError - the same
+            gap mint_link's except tuple exists for (see its docstring, and
+            coordinator.py:386/:552 for the same pattern).
         """
-        data = await self._request(
-            "POST", "/profile/claim-code", headers=self._auth(token)
-        )
+        try:
+            data = await self._request(
+                "POST", "/profile/claim-code", headers=self._auth(token)
+            )
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise WoltaApiError(f"Network error minting claim code: {err}") from err
+        if not isinstance(data, dict) or "code" not in data:
+            raise WoltaApiError(f"Unexpected claim-code response: {data!r}")
         return data["code"]
 
     async def delete(self, token: str) -> None:

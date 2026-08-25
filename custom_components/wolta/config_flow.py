@@ -74,7 +74,6 @@ from .const import (
     MIN_BATTERY_KW,
     MIN_BATTERY_KWH,
     SUPPORTED_ZONES,
-    WOLTA_API_BASE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -999,7 +998,7 @@ class WoltaOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data={})
         session = async_get_clientsession(self.hass)
-        client = WoltaApiClient(session, base_url=WOLTA_API_BASE)
+        client = WoltaApiClient(session)
         try:
             code = await client.mint_claim_code(self.config_entry.data[CONF_TOKEN])
         except WoltaApiError as err:

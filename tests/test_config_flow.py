@@ -1985,6 +1985,79 @@ async def test_options_kopplingskod_fel_ger_abort(hass: HomeAssistant) -> None:
     assert result["reason"] == "cannot_connect"
 
 
+@pytest.mark.asyncio
+async def test_options_kopplingskod_tom_kropp_ger_abort(
+    hass: HomeAssistant, aioclient_mock
+) -> None:
+    """Task 13-reviewfynd: ett 2xx-svar utan body fick TypeErrora ut ur flowet
+    (data["code"] på None) i stället för att avbryta rent. Testar mot den RIKTIGA
+    WoltaApiClient (inte en mockad mint_claim_code) så att api.py:s vakt faktiskt
+    körs - en mockad metod hade dolt regressionen helt."""
+    from custom_components.wolta.api import WoltaApiClient
+    from custom_components.wolta.const import WOLTA_API_BASE
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-empty-body")
+    entry.add_to_hass(hass)
+    aioclient_mock.post(
+        f"{WOLTA_API_BASE}/api/v1/profile/claim-code", status=200, text="")
+    real_client = WoltaApiClient(aioclient_mock.create_session({}), base_url=WOLTA_API_BASE)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=real_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_options_kopplingskod_natverksfel_ger_abort(
+    hass: HomeAssistant, aioclient_mock
+) -> None:
+    """Task 13-reviewfynd: ett riktigt offline-läge (DNS/anslutningsfel) kastas av
+    self._session.request(...) INNAN _request hinner konvertera det till en
+    WoltaApiError - ett smalt `except WoltaApiError` i flowet läckte det ut som en
+    oskyddad aiohttp.ClientConnectorError. Samma verkliga-klient-uppställning som
+    testet ovan, så api.py:s except-gren faktiskt körs."""
+    import aiohttp
+    from custom_components.wolta.api import WoltaApiClient
+    from custom_components.wolta.const import WOLTA_API_BASE
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_TOKEN: "tok", CONF_ZONE: ZONE,
+                             CONF_BATTERY_KWH: 10.0, CONF_BATTERY_KW: 5.0,
+                             CONF_EFF: 0.9, **STEP_ENTITIES_DATA},
+        unique_id="claim-network-fail")
+    entry.add_to_hass(hass)
+    connection_key = aiohttp.client_reqrep.ConnectionKey(
+        host="wolta.se", port=443, is_ssl=True, ssl=None,
+        proxy=None, proxy_auth=None, proxy_headers_hash=None)
+    aioclient_mock.post(
+        f"{WOLTA_API_BASE}/api/v1/profile/claim-code",
+        exc=aiohttp.ClientConnectorError(
+            connection_key=connection_key, os_error=OSError("offline")))
+    real_client = WoltaApiClient(aioclient_mock.create_session({}), base_url=WOLTA_API_BASE)
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=real_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "account_link"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
 # ---------------------------------------------------------------------------
 # Delad profil-sync (B6): meny, koppla befintlig profil, flödesomordning,
 # auto-prefill (zon/eff/datum/invert)
