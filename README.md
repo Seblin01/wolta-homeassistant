@@ -1,6 +1,6 @@
 # Wolta for Home Assistant
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz)
 [![GitHub release](https://img.shields.io/github/v/release/Seblin01/wolta-homeassistant)](https://github.com/Seblin01/wolta-homeassistant/releases)
 [![License: MIT](https://img.shields.io/github/license/Seblin01/wolta-homeassistant)](LICENSE)
 [![Validate](https://github.com/Seblin01/wolta-homeassistant/actions/workflows/validate.yml/badge.svg)](https://github.com/Seblin01/wolta-homeassistant/actions/workflows/validate.yml)
@@ -51,20 +51,18 @@ there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
 ## Installation via HACS
 
+Wolta is in the HACS default store, so no custom repository is needed.
+
 One-click (opens HACS on your instance with this repository preloaded):
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Seblin01&repository=wolta-homeassistant&category=integration)
 
-Or add it manually:
+Or from the HACS panel:
 
 1. In Home Assistant, open **HACS** (install it first if needed).
-2. Open the three-dot menu (top right) → **Custom repositories**.
-3. Paste `https://github.com/Seblin01/wolta-homeassistant`, choose category **Integration**, and select **Add**.
-4. Search for **Wolta** in HACS and select **Download**.
-5. Restart Home Assistant.
-6. Go to **Settings** → **Devices & Services** → **Add Integration** and search for **Wolta**.
-
-> Once Wolta is accepted into the HACS default store, you can find it by searching **Wolta** in HACS directly, without adding a custom repository.
+2. Search for **Wolta** and select **Download**.
+3. Restart Home Assistant.
+4. Go to **Settings** → **Devices & Services** → **Add Integration** and search for **Wolta**.
 
 ## Manual installation
 
