@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from custom_components.wolta import stats
 from custom_components.wolta.stats import (
     aggregate_5min_to_15min,
     merge_streams,
@@ -516,3 +517,141 @@ def test_analysis_clamps_eff():
 def test_analysis_no_history():
     out = analyze_battery_history(0.0, 0.0, None, _NOW)
     assert out == {"eff": None, "purchase_date": None, "invert_suspected": False}
+
+
+# ---------------------------------------------------------------------------
+# flagged_quarters (external control: any-overlap rule)
+# ---------------------------------------------------------------------------
+
+
+def test_flagged_quarters_nagon_del_regeln():
+    """En session :07-:19 spanner tva kvarter - bada flaggas (spec B4)."""
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "off"), (t(7), "on"), (t(19), "off")]
+    q = stats.flagged_quarters(points, end=t(30))
+    assert q == {t(0), t(15)}
+
+
+def test_flagged_quarters_unavailable_ar_off():
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "unavailable"), (t(5), "unknown")]
+    assert stats.flagged_quarters(points, end=t(30)) == set()
+
+
+def test_flagged_quarters_on_till_fonsterslut():
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(20), "on")]
+    assert stats.flagged_quarters(points, end=t(50)) == {t(15), t(30), t(45)}
+
+
+# ---------------------------------------------------------------------------
+# merge_streams – external control flagging
+# ---------------------------------------------------------------------------
+
+
+def test_merge_streams_flaggar_och_emitterar_vilokvarter():
+    qt1 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    qt2 = datetime(2026, 8, 1, 10, 15, tzinfo=timezone.utc)
+    rows = stats.merge_streams(
+        batt_in={qt1: 0.5}, batt_out={}, grid_in={qt2: 0.2}, grid_out={}, solar={},
+        external={qt1, qt2})
+    # qt2 saknar batteriaktivitet men ar flaggat (tvingad vila ar ocksa extern styrning)
+    # -> emitteras med sina ovriga strommar (grid_import 0.2) och flaggan.
+    assert [r["ts"] for r in rows] == [qt1.isoformat(), qt2.isoformat()]
+    assert all(r["external_control"] is True for r in rows)
+    assert rows[1]["grid_import_kwh"] == 0.2
+
+
+def test_merge_streams_utan_external_ar_ofdrandrad():
+    qt1 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    rows = stats.merge_streams(batt_in={qt1: 0.5}, batt_out={}, grid_in={}, grid_out={},
+                               solar={}, external=None)
+    assert rows[0]["external_control"] is False
+
+
+# ---------------------------------------------------------------------------
+# async_fetch_states – recorder STATES reader (states table, not statistics)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchStates:
+    """async_fetch_states reads the recorder's states table (short retention,
+    purge_keep_days) via history.get_significant_states through the executor."""
+
+    @pytest.mark.asyncio
+    async def test_reads_states_via_executor(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["fn"] = fn
+            return fn()
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+        from homeassistant.components.recorder import history as history_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        t0 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 8, 1, 10, 7, tzinfo=timezone.utc)
+
+        class _FakeState:
+            def __init__(self, last_changed, state):
+                self.last_changed = last_changed
+                self.state = state
+
+        fake_result = {
+            "binary_sensor.flex": [
+                _FakeState(t0, "off"),
+                _FakeState(t1, "on"),
+            ]
+        }
+
+        def _fake_get_significant_states(hass, start, end, entity_ids, **kwargs):
+            captured["call_args"] = (start, end, entity_ids, kwargs)
+            return fake_result
+
+        monkeypatch.setattr(
+            history_mod, "get_significant_states", _fake_get_significant_states
+        )
+
+        hass = MagicMock()
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
+
+        assert result == [(t0, "off"), (t1, "on")]
+        call_start, call_end, call_entity_ids, kwargs = captured["call_args"]
+        assert call_start == start
+        assert call_end == end
+        assert call_entity_ids == ["binary_sensor.flex"]
+        assert kwargs.get("include_start_time_state") is True
+        assert kwargs.get("significant_changes_only") is False
+
+    @pytest.mark.asyncio
+    async def test_missing_entity_returns_empty_list(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        async def _fake_executor_job(fn, *args):
+            return fn()
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+        from homeassistant.components.recorder import history as history_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+        monkeypatch.setattr(
+            history_mod, "get_significant_states", lambda *a, **k: {}
+        )
+
+        hass = MagicMock()
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
+        assert result == []

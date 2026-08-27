@@ -119,12 +119,18 @@ def merge_streams(
     grid_in: dict[datetime, float] | None,
     grid_out: dict[datetime, float] | None,
     solar: dict[datetime, float] | None,
+    external: set[datetime] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
-    The union of timestamps present in *batt_in* and *batt_out* defines the set
-    of valid quarters.  Any quarter where neither battery stream has data is
-    excluded from the output.  Missing values in any stream default to 0.0.
+    The union of timestamps present in *batt_in*, *batt_out* and *external*
+    defines the set of valid quarters. A quarter flagged in *external* is
+    always emitted, even with no battery activity: a flex session forcing the
+    battery to stand still produces no battery energy, but the forced idle is
+    still external control and must reach the backend (spec 2026-08-26 B4/B5)
+    – dropping such quarters would silently lose the flag. Any other quarter
+    where neither battery stream has data is excluded. Missing values in any
+    stream default to 0.0.
 
     Args:
         batt_in:   dict[datetime, float] – battery charge energy per quarter.
@@ -133,6 +139,9 @@ def merge_streams(
         grid_out:  dict[datetime, float] – grid export per quarter.
         solar:     dict[datetime, float] – solar generation per quarter (may be
                    None or empty when the user has no solar).
+        external:  set[datetime] – quarters flagged by flagged_quarters() as
+                   externally controlled (may be None when no sensor is
+                   configured; then every row's external_control is False).
 
     Returns:
         List of row dicts with keys:
@@ -143,6 +152,7 @@ def merge_streams(
             solar_kwh
             grid_import_kwh
             grid_export_kwh
+            external_control    – bool, True when the quarter is in *external*
         Rows are sorted chronologically by ``ts``.
     """
     _batt_in = batt_in or {}
@@ -150,9 +160,12 @@ def merge_streams(
     _grid_in = grid_in or {}
     _grid_out = grid_out or {}
     _solar = solar or {}
+    _external = external or set()
 
-    # Only emit rows where at least one battery stream has a value
-    valid_quarters = _batt_in.keys() | _batt_out.keys()
+    # Only emit rows where at least one battery stream has a value – except a
+    # flagged quarter, which is emitted regardless (forced idle is still
+    # external control; see docstring).
+    valid_quarters = _batt_in.keys() | _batt_out.keys() | _external
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
@@ -170,10 +183,14 @@ def merge_streams(
             "solar_kwh": _nn(_solar.get(qt, 0.0)),
             "grid_import_kwh": _nn(_grid_in.get(qt, 0.0)),
             "grid_export_kwh": _nn(_grid_out.get(qt, 0.0)),
+            "external_control": qt in _external,
         }
         # A row above the cap (meter reset spike or wrong unit on the sensor) would
         # 422 the whole batch server-side – drop the row instead of losing everything.
-        if any(v > _BACKEND_MAX_KWH for k, v in row.items() if k != "ts"):
+        # external_control is a bool flag, not an energy field – exclude it from the cap check.
+        if any(
+            v > _BACKEND_MAX_KWH for k, v in row.items() if k not in ("ts", "external_control")
+        ):
             dropped += 1
             continue
         rows.append(row)
@@ -186,6 +203,27 @@ def merge_streams(
             _BACKEND_MAX_KWH,
         )
     return rows
+
+
+def flagged_quarters(
+    points: list[tuple[datetime, str]], end: datetime
+) -> set[datetime]:
+    """900-second buckets where the sensor was 'on' for ANY part of the bucket
+    (any-overlap rule, spec 2026-08-26 B4 – the error direction is 'missed penalty',
+    never 'wrong penalty'). ``points`` are (timestamp, state) state-change points in
+    chronological order; each state holds until the next point (or ``end``).
+    'unavailable'/'unknown' count as off – absence of signal never flags."""
+    flagged: set[datetime] = set()
+    for i, (ts, state) in enumerate(points):
+        if state != "on":
+            continue
+        stop = points[i + 1][0] if i + 1 < len(points) else end
+        unix = int(ts.timestamp())
+        q = datetime.fromtimestamp(unix - unix % 900, tz=timezone.utc)
+        while q < stop:
+            flagged.add(q)
+            q += timedelta(seconds=900)
+    return flagged
 
 
 # ---------------------------------------------------------------------------
@@ -315,3 +353,27 @@ async def async_fetch_lifetime(
             if first_ts is None or ts < first_ts:
                 first_ts = ts
     return _sum(batt_in_ids), _sum(batt_out_ids), first_ts
+
+
+async def async_fetch_states(
+    hass: Any, entity_id: str, start: datetime, end: datetime
+) -> list[tuple[datetime, str]]:
+    """State-change points for one entity from the recorder's states table.
+
+    Unlike async_fetch_change (long-term statistics, years of retention) this reads
+    recorder STATES, whose retention is purge_keep_days (default ~10 days). The window
+    is therefore DYNAMIC by construction: we ask for the full range and get whatever
+    retention holds (spec B5) – older energy rows simply stay unflagged."""
+    from homeassistant.components.recorder import get_instance  # noqa: PLC0415
+    from homeassistant.components.recorder import history  # noqa: PLC0415
+
+    def _job():
+        return history.get_significant_states(
+            hass, start, end, [entity_id],
+            include_start_time_state=True,
+            significant_changes_only=False,
+            no_attributes=True,
+        )
+
+    result = await get_instance(hass).async_add_executor_job(_job)
+    return [(s.last_changed, s.state) for s in result.get(entity_id, [])]
