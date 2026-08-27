@@ -49,6 +49,7 @@ from .const import (
     DOMAIN,
     WOLTA_API_BASE,
 )
+from . import stats
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
@@ -467,10 +468,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return "batt_in"
         return stream
 
+    async def _external_quarters(self, start: datetime, end: datetime) -> set[datetime]:
+        """Flagged 15-min quarters from the selected binary sensor's state history.
+
+        No sensor selected -> empty set (every row's external_control stays False,
+        and the recorder's states table is never queried - a needless DB read on
+        every cycle for the whole fleet would be a real regression). A read failure
+        must NOT fail the upload cycle: better an unflagged upload (a missed
+        neutralization is repaired by the next healing pass) than no upload at all.
+        """
+        if not self._external_entity:
+            return set()
+        try:
+            points = await stats.async_fetch_states(
+                self.hass, self._external_entity, start, end)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "External-control history read failed; uploading unflagged",
+                exc_info=True,
+            )
+            return set()
+        return stats.flagged_quarters(points, end)
+
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
         start = now - timedelta(days=_BACKFILL_DAYS)
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+
+        external = await self._external_quarters(start, now)
 
         # Fetch hourly LTS for the long window (start → short_term_start)
         lts_data = await async_fetch_change(
@@ -512,10 +537,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 **self._sum_stream(lts_data, "solar", split_hour_to_quarters),
                 **self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
             },
+            external=external,
         )
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
+        external = await self._external_quarters(start, now)
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
@@ -529,10 +556,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             grid_in=self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
             grid_out=self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
             solar=self._sum_stream(lts_data, "solar", split_hour_to_quarters),
+            external=external,
         )
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
+        external = await self._external_quarters(start, now)
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
@@ -546,6 +575,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             grid_in=self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
             grid_out=self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
             solar=self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
+            external=external,
         )
 
     # ------------------------------------------------------------------

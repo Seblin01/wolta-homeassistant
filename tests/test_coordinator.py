@@ -1780,3 +1780,149 @@ async def test_measured_params_skipped_for_preliminary_grade(hass, mock_entry):
     results["betyg"]["preliminary"] = True
     c._evaluate_measured_params(results)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# External control: coordinator wiring across all three fetch modes
+# (spec 2026-08-26 / task 13). _external_quarters() is the single choke point:
+# no sensor selected -> the recorder's states table must never be queried, and
+# a read failure must never fail the upload cycle (upload unflagged instead -
+# the next healing pass repairs a missed neutralization; a failed cycle loses
+# a whole upload).
+# ---------------------------------------------------------------------------
+
+_EXT_ENTITY = "binary_sensor.grid_rewards_active"
+# A flex session from :07 to :19 past the hour any-overlaps TWO 15-min quarters
+# (:00-:15 and :15-:30) under the any-overlap rule in stats.flagged_quarters.
+_SESSION_HOUR = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+_SESSION_POINTS = [
+    (_SESSION_HOUR + timedelta(minutes=7), "on"),
+    (_SESSION_HOUR + timedelta(minutes=19), "off"),
+]
+_FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
+
+_EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                                     "sensor.grid_out", "sensor.solar")}
+
+
+async def _run_fetch_mode(coordinator, mode: str):
+    """Invoke one of the three row-fetching coroutines with its own realistic window."""
+    if mode == "backfill":
+        return await coordinator._backfill_rows(NOW)
+    if mode == "heal":
+        return await coordinator._heal_rows(NOW - timedelta(days=15), NOW)
+    return await coordinator._incremental_rows(NOW - timedelta(hours=2), NOW)
+
+
+def _mode_expected_start(mode: str):
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS
+
+    if mode == "backfill":
+        return NOW - timedelta(days=_BACKFILL_DAYS)
+    if mode == "heal":
+        return NOW - timedelta(days=15)
+    return NOW - timedelta(hours=2)
+
+
+@pytest.mark.asyncio
+async def test_external_quarters_no_entity_skips_recorder(hass: HomeAssistant, mock_entry):
+    """No _external_entity -> async_fetch_states must never be awaited, empty set back."""
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    assert coordinator._external_entity is None
+
+    mock_fetch = AsyncMock(side_effect=AssertionError("must not query recorder states"))
+    with patch("custom_components.wolta.stats.async_fetch_states", mock_fetch):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    mock_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_quarters_read_failure_returns_empty_and_logs(
+    hass: HomeAssistant, mock_entry, caplog
+):
+    """A recorder read failure must be swallowed - not propagated - and logged as a
+    warning: an unflagged upload is repaired by the next healing pass, whereas a
+    raised exception here would fail the entire upload cycle (no data at all)."""
+    import logging
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    with (
+        caplog.at_level(logging.WARNING, logger="custom_components.wolta.coordinator"),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(side_effect=RuntimeError("recorder unavailable"))),
+    ):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    assert "External-control history read failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["backfill", "heal", "incremental"])
+async def test_fetch_modes_flag_external_control_quarters(
+    hass: HomeAssistant, mock_entry, mode
+):
+    """All three fetch modes (full backfill, gap healing, incremental tick) must flag
+    the same external-control session, each looking up its own time window - a flag
+    that only landed on one path would make neutralization depend on upload timing."""
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    fetch_states = AsyncMock(return_value=_SESSION_POINTS)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              return_value=dict(_EMPTY_BATT_STATS)),
+        patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
+    ):
+        rows = await _run_fetch_mode(coordinator, mode)
+
+    by_ts = {row["ts"]: row for row in rows}
+    for qt in _FLAGGED_QUARTERS:
+        row = by_ts.get(qt.isoformat())
+        assert row is not None, f"{mode}: quarter {qt.isoformat()} was not uploaded"
+        assert row["external_control"] is True, f"{mode}: quarter {qt.isoformat()} not flagged"
+
+    fetch_states.assert_awaited_once()
+    passed_hass, passed_entity, passed_start, passed_end = fetch_states.await_args.args
+    assert passed_entity == _EXT_ENTITY
+    assert passed_end == NOW
+    assert passed_start == _mode_expected_start(mode), (
+        f"{mode}: must look up its OWN window, not another mode's"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["backfill", "heal", "incremental"])
+async def test_fetch_modes_skip_recorder_when_no_entity_selected(
+    hass: HomeAssistant, mock_entry, mode
+):
+    """No external_control_entity configured (the fleet default) -> the recorder's
+    states table must NEVER be queried (an unconditional extra DB read per cycle for
+    every uninterested user would be a real regression), and every uploaded row keeps
+    external_control False - byte-identical to the pre-feature output."""
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    assert coordinator._external_entity is None
+
+    battery_ts = {"hour": NOW - timedelta(days=10), "5minute": NOW - timedelta(minutes=30)}
+
+    async def mock_fetch(h, ids, start, end, period):
+        row = {"start": battery_ts[period].timestamp(), "change": 0.4}
+        return {"sensor.batt_in": [row], "sensor.batt_out": [], "sensor.grid_in": [],
+                "sensor.grid_out": [], "sensor.solar": []}
+
+    fetch_states = AsyncMock(side_effect=AssertionError("must not query recorder states"))
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+        patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
+    ):
+        rows = await _run_fetch_mode(coordinator, mode)
+
+    fetch_states.assert_not_awaited()
+    assert rows, f"{mode}: expected at least one uploaded row from the battery data"
+    assert all(row["external_control"] is False for row in rows)

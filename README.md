@@ -130,6 +130,27 @@ A correction recalculates the grade and the economics against the new price seri
 
 **Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The full history is re-uploaded from the new sensors and the grade recomputed — no need to remove the integration.
 
+## External control (Grid Rewards and similar flex-market services)
+
+Some services take temporary direct control of your battery in exchange for compensation — Tibber's Grid Rewards is one example, and other flex-market programs work the same way. While such a service is dispatching your battery, the household isn't making its own price decisions, so those intervals shouldn't be judged as good or bad price calls in the optimisation grade — they are excluded from the grade's comparison instead.
+
+**What the picker does.** Both the setup flow's entity step and **Configure → Settings** afterwards offer an optional **External control active** field: point it at a `binary_sensor` that is `on` for exactly as long as a flex service has control of the battery. The integration reads that sensor's Home Assistant state history and marks the corresponding 15-minute intervals so the backend can neutralise them. Leaving the field empty — the default — changes nothing: no extra sensor is read, and every interval is graded exactly as it was before this feature existed.
+
+**How far back flagging reaches.** Your energy data (battery, grid, solar) is backfilled a full year regardless of this setting. The *flag* is different: it comes from Home Assistant's recorder **state history**, whose retention is governed by `recorder.purge_keep_days` (10 days by default) — far shorter than the long-term statistics your energy data is read from. In practice, on first setup only the most recent `purge_keep_days` can be flagged; older energy rows upload unflagged even if the flex service was active back then. From then on, flagging keeps pace with every new upload as long as the sensor stays configured.
+
+**Known limitation: standby/reserve periods.** Flex-market programs typically hold a slice of capacity in reserve between active dispatch sessions, ready to call on the battery again. If your binary sensor only reports `on` during an actual dispatch — not during the standing-by periods around it — those idle stretches are **not** flagged, even though the reserved capacity was unavailable for your own price optimisation and still affects the grade. There is no way to tell "resting because the price is bad" apart from "resting because a flex program has it reserved" unless the sensor itself reflects the reservation.
+
+**A practical pattern:** most flex-market services expose their own status entity (a text/enum sensor whose value is something like `GridRewardDelivering` while dispatching). Rather than hunting for a ready-made `binary_sensor`, create a [template binary sensor](https://www.home-assistant.io/integrations/template/) derived from it and point the picker there, for example:
+
+```yaml
+template:
+  - binary_sensor:
+      - name: "Flex control active"
+        state: "{{ states('sensor.your_control_status_sensor') == 'GridRewardDelivering' }}"
+```
+
+Adjust the source entity and state value to whatever your own integration exposes. If that same source entity also distinguishes standby/reserve from active dispatch, folding those states into the template narrows the limitation above.
+
 ## Troubleshooting
 
 **Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
