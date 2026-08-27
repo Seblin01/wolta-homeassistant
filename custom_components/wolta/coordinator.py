@@ -31,6 +31,7 @@ from .const import (
     CONF_EFFICIENCY_ISSUE_IGNORED,
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -169,6 +170,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Visningsläge (bundna anläggningar): polla bara resultat - rör aldrig
         # statistikläsning, PUT /data eller recompute-kadensen. Se const.CONF_VIEW_ONLY.
         self._view_only: bool = bool(entry.data.get(CONF_VIEW_ONLY))
+        # Vendor-neutral flex-market flag (spec 2026-08-26): a binary_sensor that is
+        # 'on' while the battery is externally controlled (e.g. derived from a Tibber
+        # Grid Rewards state sensor). Client-local, never PATCHed to the server -
+        # see const.CONF_EXTERNAL_CONTROL for the full rationale.
+        self._external_entity: str | None = entry.data.get(CONF_EXTERNAL_CONTROL) or None
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -311,7 +317,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # server-side history is rebuilt from the new sensors. Same self-heal
             # pattern as applied_invert above; first-time recording (upgrade) leaves
             # the bookmark untouched.
-            entities_now = json.dumps(self._entity_map, sort_keys=True)
+            # external_control-nyckeln ingår BARA när sensorn är vald: annars ändras
+            # fingerprintet för varje befintlig installation vid uppgradering → onödig
+            # full re-backfill för hela flottan.
+            _fp_map = dict(self._entity_map)
+            if self._external_entity:
+                _fp_map["external_control"] = [self._external_entity]
+            entities_now = json.dumps(_fp_map, sort_keys=True)
             applied_entities = self._state.get("applied_entities")
             if applied_entities is None:
                 self._state["applied_entities"] = entities_now

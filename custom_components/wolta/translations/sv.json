@@ -91,7 +91,11 @@
           "batt_out": "Batteriets urladdningsenergi",
           "grid_in": "Elförbrukning från nätet",
           "grid_out": "Elexport till nätet",
-          "solar": "Solproduktionsenergi (valfri)"
+          "solar": "Solproduktionsenergi (valfri)",
+          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)"
+        },
+        "data_description": {
+          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget."
         }
       },
       "privacy": {
@@ -179,9 +183,12 @@
           "batt_out": "Batteriets urladdningsenergi",
           "grid_in": "Elförbrukning från nätet",
           "grid_out": "Elexport till nätet",
-          "solar": "Solproduktionsenergi (valfri)"
+          "solar": "Solproduktionsenergi (valfri)",
+          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)"
         },
-        "data_description": {}
+        "data_description": {
+          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget."
+        }
       },
       "view_only": {
         "title": "Lägg till i visningsläge",

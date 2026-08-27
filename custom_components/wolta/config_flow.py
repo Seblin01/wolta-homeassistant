@@ -48,6 +48,7 @@ from .const import (
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -577,6 +578,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_SOLAR,
                     default=defaults.get(CONF_SOLAR, vol.UNDEFINED),
                 ): _energy_entity_selector(),
+                vol.Optional(
+                    CONF_EXTERNAL_CONTROL,
+                    default=defaults.get(CONF_EXTERNAL_CONTROL, vol.UNDEFINED),
+                ): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
             }
         )
 
@@ -600,6 +605,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             share = user_input.get(CONF_SHARE, DEFAULT_SHARE)
             zone = self._plant_data[CONF_ZONE]
             solar = self._entities_data.get(CONF_SOLAR)
+            # Client-local upload transformation (same nature as invert_battery below):
+            # empty string (cleared selector) normalises to absence, never PATCHed to
+            # the server.
+            external_control = self._entities_data.get(CONF_EXTERNAL_CONTROL) or None
             cost_sek: float | None = self._plant_data.get(CONF_COST_SEK) or None
             purchase_date: str | None = self._plant_data.get(CONF_PURCHASE_DATE) or None
             # Tariff fields (and reserve_pct) use a plain .get() (NOT `.get() or None`
@@ -701,6 +710,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 entry_data[CONF_INVERT_BATTERY] = bool(
                     self._plant_data.get(CONF_INVERT_BATTERY, False)
                 )
+                if external_control:
+                    entry_data[CONF_EXTERNAL_CONTROL] = external_control
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",
@@ -752,6 +763,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_GRID_IN: user_input[CONF_GRID_IN],
                     CONF_GRID_OUT: user_input[CONF_GRID_OUT],
                     CONF_SOLAR: user_input.get(CONF_SOLAR) or [],
+                    CONF_EXTERNAL_CONTROL: user_input.get(CONF_EXTERNAL_CONTROL) or None,
                 }
                 # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
                 # full re-backfill skriver över historiken från de nya sensorerna.
@@ -759,7 +771,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         defaults = {
             k: entry.data.get(k)
-            for k in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR)
+            for k in (
+                CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR,
+                CONF_EXTERNAL_CONTROL,
+            )
         }
         schema = vol.Schema(
             {
@@ -770,6 +785,20 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_SOLAR, default=defaults[CONF_SOLAR] or vol.UNDEFINED
                 ): _energy_entity_selector(),
+                # No `default=`, unlike the streams above: this is a single-value
+                # EntitySelector (not `multiple`), which has no valid "empty" value to
+                # fall back to - a `default=` pointing at the stored sensor would make
+                # the field un-clearable (voluptuous re-fills it whenever the frontend
+                # omits the key, which is exactly what clearing an optional field does).
+                # `suggested_value` only pre-fills the form for display, same pattern
+                # as CONF_PURCHASE_DATE in the plant step above.
+                vol.Optional(
+                    CONF_EXTERNAL_CONTROL,
+                    description=(
+                        {"suggested_value": defaults[CONF_EXTERNAL_CONTROL]}
+                        if defaults[CONF_EXTERNAL_CONTROL] else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
             }
         )
         return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
@@ -798,6 +827,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         }
         if self._entities_data.get(CONF_SOLAR):
             entry_data[CONF_SOLAR] = self._entities_data[CONF_SOLAR]
+        if self._entities_data.get(CONF_EXTERNAL_CONTROL):
+            entry_data[CONF_EXTERNAL_CONTROL] = self._entities_data[CONF_EXTERNAL_CONTROL]
         for key in (
             CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW,
             CONF_NAMEPLATE_KW, CONF_EFF,

@@ -79,6 +79,11 @@ CONF_EFFICIENCY_ISSUE_IGNORED = "efficiency_issue_ignored"
 # Läslänken (spec 2026-08-24): en CACHE av senaste lyckade mint, aldrig sanningskällan.
 # Servern äger länken; integrationen mintar vid varje setup (idempotent) och skriver över.
 CONF_LINK_TOKEN = "link_token"
+# Extern styrning (spec 2026-08-26): binary_sensor som är 'on' när batteriet flex-styrs
+# externt (t.ex. härledd ur Tibber Grid Rewards-integrationens tillståndssensor).
+# KLIENTLOKAL nyckel (samma art som CONF_INVERT_BATTERY): en uppladdningstransformation,
+# inte ett profilfält – PATCH:as aldrig till servern, hålls utanför _PROFILE_SYNC_KEYS.
+CONF_EXTERNAL_CONTROL = "external_control_entity"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

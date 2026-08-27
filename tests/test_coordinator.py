@@ -16,6 +16,7 @@ from custom_components.wolta.api import WoltaAuthError, WoltaRateLimitError
 from custom_components.wolta.const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_SOLAR,
@@ -1165,6 +1166,127 @@ async def test_entity_fingerprint_first_recording_keeps_bookmark(hass, mock_entr
 
     assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
     assert "applied_entities" in coordinator._state
+
+
+# ---------------------------------------------------------------------------
+# External control (spec 2026-08-26): optional binary_sensor picker.
+# Client-local key (same nature as CONF_INVERT_BATTERY) - the coordinator's
+# fingerprint must only include it when a sensor is actually selected, so an
+# upgrading fleet with no sensor configured never sees a fingerprint change.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coordinator_reads_external_control_entity(hass: HomeAssistant, mock_entry):
+    """A configured external_control_entity is exposed as coordinator._external_entity."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity == "binary_sensor.grid_rewards_active"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_external_control_entity_absent_is_none(
+    hass: HomeAssistant, mock_entry
+):
+    """No key in entry.data (every pre-existing entry) -> None, not KeyError."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_external_control_empty_string_is_none(
+    hass: HomeAssistant, mock_entry
+):
+    """An empty string (cleared field) normalises to None, same as an absent key."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: ""}
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity is None
+
+
+@pytest.mark.asyncio
+async def test_entity_fingerprint_changes_when_external_control_added(
+    hass: HomeAssistant, mock_entry
+):
+    """Selecting an external-control sensor must trigger the same self-heal
+    bookmark reset as changing any other entity selection (issue #1 pattern)."""
+    import json as _json
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    # Fingerprint format from before this feature existed - no external_control key.
+    pre_existing_fingerprint = _json.dumps({
+        "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
+        "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
+        "solar": ["sensor.solar"],
+    }, sort_keys=True)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": pre_existing_fingerprint})
+        await coordinator._async_update_data()
+
+    assert "last_uploaded_ts" not in coordinator._state
+    assert coordinator._state["applied_entities"] != pre_existing_fingerprint
+    client.recompute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entity_fingerprint_unchanged_on_upgrade_without_external_control(
+    hass: HomeAssistant, mock_entry
+):
+    """An existing installation with NO external_control sensor configured must not
+    see its fingerprint change on upgrade - the key is omitted entirely when unset,
+    otherwise every installed integration would re-backfill a year of history the
+    moment it updates."""
+    import json as _json
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    pre_upgrade_fingerprint = _json.dumps({
+        "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
+        "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
+        "solar": ["sensor.solar"],
+    }, sort_keys=True)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        # mock_entry.data is ENTRY_DATA (no CONF_EXTERNAL_CONTROL key) - the upgrade case.
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": pre_upgrade_fingerprint})
+        await coordinator._async_update_data()
+
+    assert coordinator._state.get("last_uploaded_ts") == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == pre_upgrade_fingerprint
 
 
 @pytest.mark.asyncio
