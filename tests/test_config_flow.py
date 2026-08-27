@@ -323,6 +323,67 @@ async def test_full_flow_without_external_control_entity(hass: HomeAssistant) ->
     assert CONF_EXTERNAL_CONTROL not in data or not data.get(CONF_EXTERNAL_CONTROL)
 
 
+@pytest.mark.asyncio
+async def test_entities_step_clearing_external_control_after_error_sticks(
+    hass: HomeAssistant,
+) -> None:
+    """F3: a cleared single-value picker must stay cleared across a re-render.
+
+    The setup step re-shows the form with `defaults = user_input` after a validation
+    error. Declared with `default=`, voluptuous re-fills the key whenever the frontend
+    omits it - and omitting the key is exactly what clearing an optional field does -
+    so the entry would be created with a sensor the user explicitly removed. The
+    multi-select stream fields are immune (multiple=True submits [] instead of
+    omitting), which is why only this field needs `suggested_value`.
+    """
+    mock_client = _mock_client()
+    first_try = {
+        **STEP_ENTITIES_DATA,
+        CONF_GRID_IN: [],  # invalid -> forces the re-render
+        CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
+    }
+    # The frontend OMITS a cleared optional key rather than sending an empty value.
+    second_try = dict(STEP_ENTITIES_DATA)
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=first_try
+        )
+        assert result["step_id"] == "entities"
+        assert result["errors"].get(CONF_GRID_IN) == "required_sensor"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=second_try
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert not result["data"].get(CONF_EXTERNAL_CONTROL), (
+        "the cleared external-control sensor was silently restored"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tariff override fields (plan 35 / task 4)
 # ---------------------------------------------------------------------------

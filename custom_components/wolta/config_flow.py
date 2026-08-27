@@ -578,9 +578,19 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_SOLAR,
                     default=defaults.get(CONF_SOLAR, vol.UNDEFINED),
                 ): _energy_entity_selector(),
+                # No `default=`, unlike the streams above - same reason as in the
+                # reconfigure step: this is a single-value EntitySelector (not
+                # `multiple`), so it has no valid "empty" value, and a `default=`
+                # makes it un-clearable. After a validation error this form re-renders
+                # with `defaults = user_input`; the user clears the picker, the
+                # frontend OMITS the key, and voluptuous puts the stale entity right
+                # back. `suggested_value` only pre-fills the form for display.
                 vol.Optional(
                     CONF_EXTERNAL_CONTROL,
-                    default=defaults.get(CONF_EXTERNAL_CONTROL, vol.UNDEFINED),
+                    description=(
+                        {"suggested_value": defaults[CONF_EXTERNAL_CONTROL]}
+                        if defaults.get(CONF_EXTERNAL_CONTROL) else None
+                    ),
                 ): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
             }
         )

@@ -544,6 +544,33 @@ def test_flagged_quarters_on_till_fonsterslut():
     assert stats.flagged_quarters(points, end=t(50)) == {t(15), t(30), t(45)}
 
 
+def test_flagged_quarters_klampas_till_fonsterstart():
+    """F4: the backfill path is the only caller with an UNALIGNED start
+    (now - 365 days). The start-time-state row from include_start_time_state
+    carries its own (much older) timestamp, which floors to the quarter BEFORE
+    the window - a quarter the caller never asked about, uploaded as an all-zero
+    row that overwrites whatever the previous backfill stored there."""
+    start = datetime(2026, 8, 1, 13, 52, 17, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 1, 14, 30, tzinfo=timezone.utc)
+    points = [(datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc), "on")]
+
+    q = stats.flagged_quarters(points, end=end, start=start)
+
+    assert datetime(2026, 8, 1, 13, 45, tzinfo=timezone.utc) not in q
+    assert q == {
+        datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 1, 14, 15, tzinfo=timezone.utc),
+    }
+
+
+def test_flagged_quarters_aligned_start_behaller_startkvarteret():
+    """Heal/incremental starts come from the bookmark and are quarter boundaries -
+    clamping must not eat the first quarter there."""
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "on")]
+    assert stats.flagged_quarters(points, end=t(30), start=t(0)) == {t(0), t(15)}
+
+
 # ---------------------------------------------------------------------------
 # merge_streams – external control flagging
 # ---------------------------------------------------------------------------
@@ -567,6 +594,88 @@ def test_merge_streams_utan_external_ar_ofdrandrad():
     rows = stats.merge_streams(batt_in={qt1: 0.5}, batt_out={}, grid_in={}, grid_out={},
                                solar={}, external=None)
     assert rows[0]["external_control"] is False
+
+
+# ---------------------------------------------------------------------------
+# merge_streams – statistics frontier (F1)
+#
+# HA only compiles statistics for COMPLETED periods, so every energy stream
+# stops short of `now`, while the flag (read from the recorder's STATES table)
+# reaches right up to `now`. A flagged quarter emitted BEYOND the newest quarter
+# that carries statistics uploads real energy as 0.0 and drags the coordinator's
+# bookmark (rows[-1]["ts"]) past it, so the next cycle never re-reads it: the
+# zeros stick server-side forever and feed economy + observed_* parameters.
+# ---------------------------------------------------------------------------
+
+
+def _q(hour: int, minute: int) -> datetime:
+    return datetime(2026, 8, 1, hour, minute, tzinfo=timezone.utc)
+
+
+def test_merge_streams_flaggat_kvarter_bortom_frontier_emitteras_ej():
+    """The heal scenario: LTS reaches 11:45, the flag reaches 12:45.
+
+    Quarters 12:00-12:45 must NOT be emitted - they would upload as all-zero rows
+    and move the bookmark to 12:45, permanently zeroing the real charge/discharge
+    that the recorder had not yet compiled.
+    """
+    frontier = _q(11, 45)
+    batt_in = {_q(11, 30): 0.4, frontier: 0.6}
+    external = {_q(11, 30), frontier, _q(12, 0), _q(12, 15), _q(12, 30), _q(12, 45)}
+
+    rows = stats.merge_streams(
+        batt_in=batt_in, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external=external,
+    )
+
+    assert [r["ts"] for r in rows] == [_q(11, 30).isoformat(), frontier.isoformat()]
+    # The bookmark the coordinator would persist must not pass the real data.
+    assert rows[-1]["ts"] == frontier.isoformat()
+
+
+def test_merge_streams_flaggat_vilokvarter_inom_frontier_emitteras():
+    """The deliberate earlier decision stands: forced idle inside the frontier is
+    still external control and must reach the backend, even with no battery
+    activity and no energy in ANY stream for that quarter."""
+    rows = stats.merge_streams(
+        batt_in={_q(10, 0): 0.5}, batt_out={}, grid_in={}, grid_out={},
+        solar={_q(10, 45): 0.9},
+        external={_q(10, 15), _q(10, 30)},
+    )
+
+    assert [r["ts"] for r in rows] == [
+        _q(10, 0).isoformat(), _q(10, 15).isoformat(), _q(10, 30).isoformat()
+    ]
+    idle = rows[1]
+    assert idle["external_control"] is True
+    assert idle["batt_charged_kwh"] == 0.0
+    assert idle["batt_discharged_kwh"] == 0.0
+
+
+def test_merge_streams_frontier_raknas_pa_alla_strommar():
+    """A quarter with solar/grid data but no battery activity is still within the
+    frontier - the boundary is the newest quarter carrying ANY statistics, not the
+    newest battery quarter."""
+    rows = stats.merge_streams(
+        batt_in={_q(9, 0): 0.5}, batt_out={}, grid_in={}, grid_out={},
+        solar={_q(9, 45): 1.2},
+        external={_q(9, 30), _q(10, 0)},
+    )
+
+    ts = [r["ts"] for r in rows]
+    assert _q(9, 30).isoformat() in ts, "inside the solar-defined frontier"
+    assert _q(10, 0).isoformat() not in ts, "beyond every stream's newest quarter"
+
+
+def test_merge_streams_flagga_utan_nagon_statistik_ger_inga_rader():
+    """No statistics at all -> no honest frontier exists. Every flagged row would be
+    all-zero, which is exactly the failure mode above, so nothing is emitted and the
+    bookmark stays put until real data arrives."""
+    rows = stats.merge_streams(
+        batt_in={}, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external={_q(10, 0), _q(10, 15)},
+    )
+    assert rows == []
 
 
 # ---------------------------------------------------------------------------

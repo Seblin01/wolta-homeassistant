@@ -488,7 +488,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 exc_info=True,
             )
             return set()
-        return stats.flagged_quarters(points, end)
+        return stats.flagged_quarters(points, end, start=start)
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

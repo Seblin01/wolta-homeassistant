@@ -113,6 +113,31 @@ def sum_quarter_dicts(dicts: list[dict[datetime, float]]) -> dict[datetime, floa
     return result
 
 
+def _statistics_frontier(
+    *streams: dict[datetime, float],
+) -> datetime | None:
+    """Newest quarter for which ANY energy stream carries a statistics value.
+
+    Home Assistant only compiles statistics for COMPLETED periods, so every energy
+    stream always stops short of ``now``. The external-control flag does not: it is
+    read from the recorder's STATES table and reaches right up to ``now``. Emitting a
+    flagged quarter past the newest compiled quarter would upload real (not yet
+    compiled) charge/discharge/grid energy as 0.0 AND drag the coordinator's bookmark
+    (``rows[-1]["ts"]``) past it – the next cycle then starts after those quarters and
+    never re-reads them, so the zeros stick server-side forever and feed the economy
+    and the ``observed_*`` measured parameters.
+
+    ALL streams count, not only the battery ones: a quarter where only solar or grid
+    moved is still inside the compiled window, and a flagged quarter there is
+    legitimate forced idle.
+
+    Returns None when no stream holds anything at all. There is then no honest
+    boundary to clip against and every flagged row would be all-zero – exactly the
+    failure above – so the caller emits nothing and lets the bookmark stay put.
+    """
+    return max((max(s) for s in streams if s), default=None)
+
+
 def merge_streams(
     batt_in: dict[datetime, float] | None,
     batt_out: dict[datetime, float] | None,
@@ -131,6 +156,9 @@ def merge_streams(
     – dropping such quarters would silently lose the flag. Any other quarter
     where neither battery stream has data is excluded. Missing values in any
     stream default to 0.0.
+
+    Flagged quarters are CLIPPED to the statistics frontier – the newest quarter
+    for which any energy stream carries a value. See ``_statistics_frontier``.
 
     Args:
         batt_in:   dict[datetime, float] – battery charge energy per quarter.
@@ -164,8 +192,12 @@ def merge_streams(
 
     # Only emit rows where at least one battery stream has a value – except a
     # flagged quarter, which is emitted regardless (forced idle is still
-    # external control; see docstring).
-    valid_quarters = _batt_in.keys() | _batt_out.keys() | _external
+    # external control; see docstring) as long as it is within the frontier.
+    frontier = _statistics_frontier(_batt_in, _batt_out, _grid_in, _grid_out, _solar)
+    external_in_frontier = (
+        {qt for qt in _external if qt <= frontier} if frontier is not None else set()
+    )
+    valid_quarters = _batt_in.keys() | _batt_out.keys() | external_in_frontier
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
@@ -206,13 +238,25 @@ def merge_streams(
 
 
 def flagged_quarters(
-    points: list[tuple[datetime, str]], end: datetime
+    points: list[tuple[datetime, str]],
+    end: datetime,
+    start: datetime | None = None,
 ) -> set[datetime]:
     """900-second buckets where the sensor was 'on' for ANY part of the bucket
     (any-overlap rule, spec 2026-08-26 B4 – the error direction is 'missed penalty',
     never 'wrong penalty'). ``points`` are (timestamp, state) state-change points in
     chronological order; each state holds until the next point (or ``end``).
-    'unavailable'/'unknown' count as off – absence of signal never flags."""
+    'unavailable'/'unknown' count as off – absence of signal never flags.
+
+    ``start`` is the requested window start; quarters beginning before it are dropped.
+    ``get_significant_states(include_start_time_state=True)`` returns a synthetic
+    first point carrying the state's ORIGINAL ``last_changed``, which can lie long
+    before the window. Flooring that to a 900-second boundary would otherwise return
+    the quarter BEFORE the window (start 13:52:17 → 13:45) and emit an all-zero row
+    for a quarter the caller never asked about, overwriting whatever was stored there.
+    Heal/incremental starts come from the bookmark and are already quarter boundaries,
+    so clamping is a no-op for them; the backfill path (``now - 365 days``) is the
+    only unaligned caller. ``None`` disables the clamp."""
     flagged: set[datetime] = set()
     for i, (ts, state) in enumerate(points):
         if state != "on":
@@ -221,7 +265,8 @@ def flagged_quarters(
         unix = int(ts.timestamp())
         q = datetime.fromtimestamp(unix - unix % 900, tz=timezone.utc)
         while q < stop:
-            flagged.add(q)
+            if start is None or q >= start:
+                flagged.add(q)
             q += timedelta(seconds=900)
     return flagged
 

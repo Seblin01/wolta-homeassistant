@@ -1804,6 +1804,18 @@ _FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
 _EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                                      "sensor.grid_out", "sensor.solar")}
 
+# Statistics that reach PAST the flex session (one hour before NOW, i.e. an hour after
+# the session). Without this the flagged quarters would sit beyond the statistics
+# frontier and merge_streams would - correctly - drop them (see _statistics_frontier):
+# HA has not compiled anything, so there is no window to flag inside. Grid-only rows
+# also prove the frontier spans ALL streams, not just the battery ones, and that a
+# flagged quarter with no battery activity of its own still reaches the backend.
+_FRONTIER_HOUR = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+_GRID_ONLY_STATS = {
+    **_EMPTY_BATT_STATS,
+    "sensor.grid_in": [{"start": _FRONTIER_HOUR.timestamp(), "change": 0.3}],
+}
+
 
 async def _run_fetch_mode(coordinator, mode: str):
     """Invoke one of the three row-fetching coroutines with its own realistic window."""
@@ -1876,7 +1888,7 @@ async def test_fetch_modes_flag_external_control_quarters(
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.async_fetch_change",
-              return_value=dict(_EMPTY_BATT_STATS)),
+              return_value=dict(_GRID_ONLY_STATS)),
         patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
     ):
         rows = await _run_fetch_mode(coordinator, mode)
@@ -1894,6 +1906,50 @@ async def test_fetch_modes_flag_external_control_quarters(
     assert passed_start == _mode_expected_start(mode), (
         f"{mode}: must look up its OWN window, not another mode's"
     )
+
+
+@pytest.mark.asyncio
+async def test_heal_does_not_flag_past_statistics_frontier(
+    hass: HomeAssistant, mock_entry
+):
+    """F1 regression, end to end on the heal path.
+
+    The integration has been down for two weeks; the flex sensor was 'on' across the
+    gap so the flag reaches right up to NOW (12:00), while hourly LTS only exists up
+    to the 10:00 hour (quarters 10:00-10:45). Emitting the flagged 11:00-11:45
+    quarters would upload real charge/discharge/grid energy as 0.0 and set the
+    coordinator's bookmark (rows[-1]["ts"]) to 11:45, so the next cycle starts after
+    them and the zeros stick server-side forever.
+    """
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    start = NOW - timedelta(days=14)
+    last_hour = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    frontier = last_hour + timedelta(minutes=45)
+    lts = {
+        **_EMPTY_BATT_STATS,
+        "sensor.batt_in": [{"start": last_hour.timestamp(), "change": 1.2}],
+    }
+    # Sensor 'on' from the start of the gap all the way to NOW.
+    points = [(start, "on")]
+
+    with (
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value=lts),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(return_value=points)),
+    ):
+        rows = await coordinator._heal_rows(start, NOW)
+
+    assert rows, "the compiled hour must still upload"
+    assert rows[-1]["ts"] == frontier.isoformat(), (
+        "the bookmark must not advance past the newest compiled quarter"
+    )
+    beyond = [r["ts"] for r in rows if datetime.fromisoformat(r["ts"]) > frontier]
+    assert beyond == [], f"flagged quarters emitted past the frontier: {beyond}"
+    # The half of the behaviour that must NOT regress: quarters inside the frontier
+    # are still flagged, including ones with no battery activity of their own.
+    assert all(r["external_control"] is True for r in rows)
 
 
 @pytest.mark.asyncio
