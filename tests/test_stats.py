@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -563,6 +564,59 @@ def test_flagged_quarters_klampas_till_fonsterstart():
     }
 
 
+def _flagged_quarters_reference(points, end, start=None):
+    """Naive reference: walk every quarter from the floored point and discard the ones
+    before `start`. The implementation skips ahead instead (a long-held 'on' yields a
+    point whose last_changed can be years old); this pins the two to the same output."""
+    out = set()
+    for i, (ts, state) in enumerate(points):
+        if state != "on":
+            continue
+        stop = points[i + 1][0] if i + 1 < len(points) else end
+        unix = int(ts.timestamp())
+        q = datetime.fromtimestamp(unix - unix % 900, tz=timezone.utc)
+        while q < stop:
+            if start is None or q >= start:
+                out.add(q)
+            q += timedelta(seconds=900)
+    return out
+
+
+def test_flagged_quarters_matchar_naiv_referens():
+    """The skip-ahead must be a pure optimisation: identical output on aligned and
+    unaligned starts, on no start at all, and on a point far outside the window."""
+    rnd = random.Random(11)
+    base = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for case in range(200):
+        n = rnd.randrange(1, 6)
+        offsets = sorted(rnd.randrange(0, 6 * 3600) for _ in range(n))
+        points = [
+            (base + timedelta(seconds=o), rnd.choice(["on", "off", "unavailable"]))
+            for o in offsets
+        ]
+        end = base + timedelta(seconds=6 * 3600 + rnd.randrange(0, 3600))
+        for start in (
+            None,
+            base,                                             # aligned
+            base + timedelta(seconds=rnd.randrange(0, 7200)),  # unaligned
+            base - timedelta(days=900),                        # far before the points
+        ):
+            assert stats.flagged_quarters(points, end, start=start) == \
+                _flagged_quarters_reference(points, end, start), f"case {case}"
+
+
+def test_flagged_quarters_gammal_punkt_ger_bara_fonstrets_kvarter():
+    """A sensor 'on' since long before the window: the retained state point carries a
+    years-old last_changed, but only the window's own quarters may come back."""
+    start = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    ancient = start - timedelta(days=900)
+
+    q = stats.flagged_quarters([(ancient, "on")], end, start=start)
+
+    assert q == {start + timedelta(minutes=m) for m in (0, 15, 30, 45)}
+
+
 def test_flagged_quarters_aligned_start_behaller_startkvarteret():
     """Heal/incremental starts come from the bookmark and are quarter boundaries -
     clamping must not eat the first quarter there."""
@@ -579,11 +633,14 @@ def test_flagged_quarters_aligned_start_behaller_startkvarteret():
 def test_merge_streams_flaggar_och_emitterar_vilokvarter():
     qt1 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
     qt2 = datetime(2026, 8, 1, 10, 15, tzinfo=timezone.utc)
+    # qt2 ar tvingad vila: batteriet star still, men sensorn ar INSPELAD, sa recordern
+    # kompilerar en rad med change=0.0 och kvarten ar redan en nyckel i batt_in.
+    # (Tidigare bar detta test den falska premissen att en vilokvart SAKNAR
+    # batteristatistik och darfor maste slappas in pa natstrommens bevis - se
+    # test_merge_streams_flagga_utan_batteristatistik_fabricerar_inga_rader.)
     rows = stats.merge_streams(
-        batt_in={qt1: 0.5}, batt_out={}, grid_in={qt2: 0.2}, grid_out={}, solar={},
-        external={qt1, qt2})
-    # qt2 saknar batteriaktivitet men ar flaggat (tvingad vila ar ocksa extern styrning)
-    # -> emitteras med sina ovriga strommar (grid_import 0.2) och flaggan.
+        batt_in={qt1: 0.5, qt2: 0.0}, batt_out={}, grid_in={qt2: 0.2}, grid_out={},
+        solar={}, external={qt1, qt2})
     assert [r["ts"] for r in rows] == [qt1.isoformat(), qt2.isoformat()]
     assert all(r["external_control"] is True for r in rows)
     assert rows[1]["grid_import_kwh"] == 0.2
@@ -617,6 +674,10 @@ def test_merge_streams_utan_external_ar_ofdrandrad():
 
 def _q(hour: int, minute: int) -> datetime:
     return datetime(2026, 8, 1, hour, minute, tzinfo=timezone.utc)
+
+
+_QS = [datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(minutes=15 * i)
+       for i in range(48)]
 
 
 def test_merge_streams_flaggat_kvarter_bortom_sista_statistiken_emitteras_ej():
@@ -697,17 +758,16 @@ def test_merge_streams_hallen_on_over_recorder_lucka_ger_bara_kompilerade_kvarte
     assert zeroed == [], f"{len(zeroed)} all-zero rows would zero real energy"
 
 
-def test_merge_streams_flaggat_vilokvarter_med_kompilerad_statistik_emitteras():
-    """The deliberate earlier decision stands: forced idle is still external control
-    and must reach the backend even with no BATTERY activity.
+def test_merge_streams_tvingad_vila_har_egen_batteristatistik_och_emitteras():
+    """Forced idle needs NO special case: a held-still battery is still a RECORDED
+    sensor, so the recorder compiles a row with change=0.0 and the quarter is already
+    a key in batt_in/batt_out. It was emitted before this branch existed and still is.
 
-    Post-C1 the quarter must carry compiled statistics from SOME stream - which a
-    real forced-idle quarter does: the house keeps drawing from the grid while the
-    battery is held still. 'No battery activity' is the case that must keep working;
-    'no data at all' is the case that must not.
+    This is the premise the 'any stream may prove it' rule was built on, and it was
+    wrong - see test_merge_streams_flagga_kan_aldrig_lagga_till_rader.
     """
     rows = stats.merge_streams(
-        batt_in={_q(10, 0): 0.5}, batt_out={},
+        batt_in={_q(10, 0): 0.5, _q(10, 15): 0.0, _q(10, 30): 0.0}, batt_out={},
         grid_in={_q(10, 0): 0.1, _q(10, 15): 0.3, _q(10, 30): 0.25}, grid_out={},
         solar={},
         external={_q(10, 15), _q(10, 30)},
@@ -723,24 +783,58 @@ def test_merge_streams_flaggat_vilokvarter_med_kompilerad_statistik_emitteras():
     assert idle["grid_import_kwh"] == 0.3
 
 
-def test_merge_streams_kompilerat_kvarter_kan_bevisas_av_valfri_strom():
-    """The proof of compilation may come from ANY of the five streams, not just the
-    battery ones - a solar-only quarter is still a compiled quarter."""
+def test_merge_streams_flagga_utan_batteristatistik_fabricerar_inga_rader():
+    """The battery sensor is missing for these quarters - unavailable, not yet
+    installed, or not recorded - while the grid meter has a full year of history.
+
+    Emitting the flagged quarters on the strength of the GRID stream writes
+    batt_charged = batt_discharged = 0.0 for quarters in which the battery was never
+    observed. That 0.0 is not a measurement, it is a fabrication, and it lands
+    server-side where nothing was uploaded before.
+    """
     rows = stats.merge_streams(
-        batt_in={_q(9, 0): 0.5}, batt_out={}, grid_in={}, grid_out={},
-        solar={_q(9, 30): 1.2},
-        external={_q(9, 30), _q(9, 45)},
+        batt_in={_q(11, 0): 0.4}, batt_out={}, grid_in={
+            _q(9, 0): 0.2, _q(9, 15): 0.2, _q(9, 30): 0.2, _q(9, 45): 0.2,
+            _q(10, 0): 0.2, _q(11, 0): 0.3,
+        }, grid_out={}, solar={},
+        external={_q(9, 0), _q(9, 15), _q(9, 30), _q(9, 45), _q(10, 0), _q(11, 0)},
     )
 
-    ts = [r["ts"] for r in rows]
-    assert _q(9, 30).isoformat() in ts, "proven compiled by the solar stream"
-    assert _q(9, 45).isoformat() not in ts, "no stream compiled this quarter"
+    assert [r["ts"] for r in rows] == [_q(11, 0).isoformat()], (
+        "only the quarter the battery was actually recorded in"
+    )
+
+
+def test_merge_streams_flagga_kan_aldrig_lagga_till_rader():
+    """The invariant that replaces three rounds of reformulation: the flag MARKS
+    already-valid quarters and can never add one.
+
+    Valid quarters are exactly the battery timestamps, with or without a flag. Any
+    rule that lets a non-battery stream admit a flagged quarter necessarily emits
+    rows whose battery fields are fabricated zeros.
+    """
+    marked = 0
+    for ext_density in (0.0, 0.3, 1.0):
+        for seed in range(60):
+            rnd = random.Random((seed, ext_density).__hash__())
+            def mk(p):
+                return {q: round(rnd.uniform(0, 3), 3)
+                        for q in _QS if rnd.random() < p}
+            a, b, c, d, e = mk(0.3), mk(0.3), mk(0.6), mk(0.4), mk(0.5)
+            ext = {q for q in _QS if rnd.random() < ext_density}
+
+            with_flag = stats.merge_streams(a, b, c, d, e, external=ext)
+            without = stats.merge_streams(a, b, c, d, e, external=None)
+
+            assert [r["ts"] for r in with_flag] == [r["ts"] for r in without], (
+                "the flag changed WHICH quarters are emitted"
+            )
+            marked += sum(1 for r in with_flag if r["external_control"])
+    assert marked > 0, "the flag must still mark rows, or this proves nothing"
 
 
 def test_merge_streams_flagga_utan_nagon_statistik_ger_inga_rader():
-    """No statistics at all -> nothing is proven compiled. Every flagged row would be
-    all-zero, which is exactly the failure mode above, so nothing is emitted and the
-    bookmark stays put until real data arrives."""
+    """No statistics at all -> nothing to mark, nothing emitted."""
     rows = stats.merge_streams(
         batt_in={}, batt_out={}, grid_in={}, grid_out={}, solar={},
         external={_q(10, 0), _q(10, 15)},

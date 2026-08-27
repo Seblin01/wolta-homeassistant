@@ -13,6 +13,7 @@ StatisticsRow shape (subset used here):
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
@@ -113,46 +114,6 @@ def sum_quarter_dicts(dicts: list[dict[datetime, float]]) -> dict[datetime, floa
     return result
 
 
-def _compiled_quarters(
-    *streams: dict[datetime, float],
-) -> set[datetime]:
-    """Quarters the recorder has actually compiled statistics for.
-
-    A quarter's presence as a KEY in any stream is the proof: ``statistics_during_period``
-    returns a row per compiled period, and both aggregation functions above create the
-    bucket even when ``change`` is 0 or None. Absence means the recorder compiled
-    nothing there – HA was down, the period is not finished yet, or it predates the
-    data.
-
-    Why the flag has to be tested against this set. The external-control flag comes
-    from the recorder's STATES table and is HELD FORWARD from the last known state
-    point until the next one (see ``flagged_quarters``); the start-time-state row
-    carries an old ``last_changed``, so one stale 'on' row keeps the flag asserted
-    across an arbitrarily long stretch – the whole heal window, which is at least nine
-    days by construction. Emitting a flagged quarter with nothing compiled uploads
-    real charge/discharge/grid energy as 0.0 AND drags the coordinator's bookmark
-    (``rows[-1]["ts"]``) onto it: the next cycle starts after those quarters and never
-    re-reads them, so the zeros stick server-side forever and feed the economy and the
-    ``observed_*`` measured parameters.
-
-    This replaces an earlier "statistics frontier" (a global max over all streams,
-    tested as ``qt <= frontier``). That only closed the gap ABOVE the newest compiled
-    quarter; every INNER gap – below the max but with no statistics – still passed and
-    emitted all-zero rows, which is the same defect one step inwards. Per-quarter
-    proof closes both with a single test, so the frontier is not kept as a separate
-    concept.
-
-    ALL streams count, not only the battery ones: a compiled quarter where only grid
-    or solar moved is exactly what forced idle looks like – the house keeps drawing
-    from the grid while the flex service holds the battery still – and that quarter
-    must still reach the backend.
-    """
-    compiled: set[datetime] = set()
-    for stream in streams:
-        compiled |= stream.keys()
-    return compiled
-
-
 def merge_streams(
     batt_in: dict[datetime, float] | None,
     batt_out: dict[datetime, float] | None,
@@ -163,19 +124,37 @@ def merge_streams(
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
-    Valid quarters are the timestamps present in *batt_in* or *batt_out*, plus the
-    quarters flagged in *external* that the recorder actually COMPILED statistics for
-    – i.e. that are a key in at least one of the five streams.
+    Valid quarters are exactly the timestamps present in *batt_in* or *batt_out*.
+    *external* MARKS those rows; it can never add one. Missing values in any stream
+    default to 0.0.
 
-    A flagged quarter is emitted even with no battery activity: a flex session forcing
-    the battery to stand still produces no battery energy, but the forced idle is still
-    external control and must reach the backend (spec 2026-08-26 B4/B5) – dropping
-    those would silently lose the flag. A flagged quarter with no compiled statistics
-    anywhere is NOT emitted, however: the flag is held forward from the last known
-    state point and can span stretches the recorder never compiled, where every field
-    would fall to 0.0 and overwrite real energy server-side (see
-    ``_compiled_quarters``). Any other quarter where neither battery stream has data is
-    excluded. Missing values in any stream default to 0.0.
+    Why the flag cannot admit a quarter of its own – this rule has been written three
+    times and the next reader should not have to rediscover it:
+
+    Forced idle needs no exception. A flex session holding the battery still produces
+    no battery *energy*, but the battery sensor is still RECORDED: HA's statistics
+    compiler reads sum-sensor history from ``start - timedelta.resolution`` with
+    ``significant_changes_only=False``, so an unchanged counter still yields a valid
+    state in the period and a row with ``change = 0.0``. Both aggregation functions
+    above create the bucket for such a row, so a genuine forced-idle quarter is
+    already a key in *batt_in*/*batt_out* and was emitted before this feature existed.
+
+    What the flag would add is therefore never forced idle. Set-wise,
+    ``external - (batt_in | batt_out)`` is exactly the quarters where battery
+    statistics are ABSENT: the sensor was unavailable (an unavailable state loses its
+    ``state_class``, so no row is compiled at all), not yet installed, or not
+    recorded. Emitting those writes ``batt_charged = batt_discharged = 0.0`` for
+    quarters in which the battery was never observed – not a measurement but a
+    fabrication – and it lands server-side where nothing was uploaded before, with the
+    coordinator's bookmark (``rows[-1]["ts"]``) dragged past it so the next cycle
+    never re-reads it. A one-month-old battery behind a year-old grid meter with the
+    flag on produces ~32 000 such rows; a three-day sensor dropout produces 288 a day.
+
+    Earlier attempts, for the record: admitting a flagged quarter unconditionally
+    (zeroed real energy above the compiled range), then clipping to a global "frontier"
+    = max over all streams (closed only the gap above it, not the inner ones), then
+    requiring compiled statistics from ANY of the five streams (built on the false
+    forced-idle premise above, and so admitted exactly the fabricated quarters).
 
     Args:
         batt_in:   dict[datetime, float] – battery charge energy per quarter.
@@ -207,13 +186,11 @@ def merge_streams(
     _solar = solar or {}
     _external = external or set()
 
-    # Only emit rows where at least one battery stream has a value – except a
-    # flagged quarter, which is emitted regardless of battery activity (forced idle
-    # is still external control; see docstring) PROVIDED the recorder compiled
-    # statistics for that very quarter. See _compiled_quarters for why the flag
-    # cannot be trusted on its own.
-    compiled = _compiled_quarters(_batt_in, _batt_out, _grid_in, _grid_out, _solar)
-    valid_quarters = _batt_in.keys() | _batt_out.keys() | (_external & compiled)
+    # Emit exactly the quarters the battery streams carry. The flag MARKS these rows;
+    # it can never add one. Read the docstring before widening this – the rule has
+    # been reformulated three times and each attempt to let the flag admit a quarter
+    # of its own reintroduced fabricated zeros.
+    valid_quarters = _batt_in.keys() | _batt_out.keys()
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
@@ -279,10 +256,16 @@ def flagged_quarters(
             continue
         stop = points[i + 1][0] if i + 1 < len(points) else end
         unix = int(ts.timestamp())
-        q = datetime.fromtimestamp(unix - unix % 900, tz=timezone.utc)
+        q_unix = unix - unix % 900
+        if start is not None and q_unix < (start_unix := start.timestamp()):
+            # Skip straight to the first quarter at or after the window start rather
+            # than walking – and discarding – every quarter before it. A sensor that
+            # has been 'on' for a long time yields a point whose last_changed can be
+            # years old, and that walk is pure event-loop cost on every update cycle.
+            q_unix += 900 * math.ceil((start_unix - q_unix) / 900)
+        q = datetime.fromtimestamp(q_unix, tz=timezone.utc)
         while q < stop:
-            if start is None or q >= start:
-                flagged.add(q)
+            flagged.add(q)
             q += timedelta(seconds=900)
     return flagged
 

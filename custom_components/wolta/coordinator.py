@@ -473,22 +473,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         No sensor selected -> empty set (every row's external_control stays False,
         and the recorder's states table is never queried - a needless DB read on
-        every cycle for the whole fleet would be a real regression). A read failure
-        must NOT fail the upload cycle: better an unflagged upload (a missed
-        neutralization is repaired by the next healing pass) than no upload at all.
+        every cycle for the whole fleet would be a real regression).
+
+        A failure here must NOT fail the upload cycle: an unflagged upload beats no
+        upload at all. Be clear about what that costs, though - it is NOT
+        self-healing. Nothing re-reads quarters below the bookmark; the incremental
+        and heal paths both start there, so quarters uploaded unflagged stay
+        unflagged until something resets the bookmark (an entity-fingerprint change,
+        i.e. the user re-picking sensors, which triggers a full re-backfill). The
+        error direction is still the safe one - those quarters are graded normally
+        rather than wrongly neutralised - but the flag is lost for them, not deferred.
+
+        Both the recorder read and the bucketing are inside the try so the guarantee
+        above actually holds for the whole operation: flagged_quarters is pure, but
+        leaving it outside would mean a malformed point list still killed the cycle,
+        which is exactly what this method promises not to do.
         """
         if not self._external_entity:
             return set()
         try:
             points = await stats.async_fetch_states(
                 self.hass, self._external_entity, start, end)
+            return stats.flagged_quarters(points, end, start=start)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.warning(
                 "External-control history read failed; uploading unflagged",
                 exc_info=True,
             )
             return set()
-        return stats.flagged_quarters(points, end, start=start)
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

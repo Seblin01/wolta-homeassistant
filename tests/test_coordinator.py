@@ -1804,17 +1804,19 @@ _FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
 _EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                                      "sensor.grid_out", "sensor.solar")}
 
-# Compiled statistics covering the flex session's own quarters. The flag alone is not
-# enough for a row to be emitted: merge_streams requires the recorder to have compiled
-# statistics for that very quarter, otherwise a held-forward flag would upload all-zero
-# rows (see _compiled_quarters). Grid-only rows are also the realistic shape of forced
-# idle - the house keeps drawing from the grid while the battery is held still - so
-# this doubles as proof that the compilation evidence may come from a NON-battery
-# stream and that a flagged quarter with no battery activity still reaches the backend.
+# Compiled BATTERY statistics covering the flex session's own quarters. The flag alone
+# never makes a row: merge_streams emits exactly the quarters the battery streams carry
+# and the flag only marks them. change=0.0 is the realistic shape of forced idle - the
+# battery is held still but the sensor is still recorded, so the recorder compiles a
+# row and the quarter is a key - which is why forced idle needs no special case.
 # Two rows so the 5-minute path (incremental) covers both flagged quarters; the hourly
 # path (backfill/heal) spreads either row across all four quarters of the hour anyway.
-_SESSION_GRID_STATS = {
+_SESSION_BATT_STATS = {
     **_EMPTY_BATT_STATS,
+    "sensor.batt_in": [
+        {"start": _SESSION_HOUR.timestamp(), "change": 0.0},
+        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.0},
+    ],
     "sensor.grid_in": [
         {"start": _SESSION_HOUR.timestamp(), "change": 0.3},
         {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.4},
@@ -1879,6 +1881,33 @@ async def test_external_quarters_read_failure_returns_empty_and_logs(
 
 
 @pytest.mark.asyncio
+async def test_external_quarters_bucketing_failure_also_degrades_softly(
+    hass: HomeAssistant, mock_entry, caplog
+):
+    """The soft-degrade guarantee covers the BUCKETING too, not just the DB read.
+
+    flagged_quarters is pure, but it sits inside the same try: a malformed point list
+    (here a row with no last_changed at all) must not be the one thing that kills the
+    whole upload cycle, since that is precisely what this method promises not to do.
+    Previously the call sat outside the try and would have propagated.
+    """
+    import logging
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    with (
+        caplog.at_level(logging.WARNING, logger="custom_components.wolta.coordinator"),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(return_value=[(None, "on")])),
+    ):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    assert "External-control history read failed" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["backfill", "heal", "incremental"])
 async def test_fetch_modes_flag_external_control_quarters(
     hass: HomeAssistant, mock_entry, mode
@@ -1893,7 +1922,7 @@ async def test_fetch_modes_flag_external_control_quarters(
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.async_fetch_change",
-              return_value=dict(_SESSION_GRID_STATS)),
+              return_value=dict(_SESSION_BATT_STATS)),
         patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
     ):
         rows = await _run_fetch_mode(coordinator, mode)
