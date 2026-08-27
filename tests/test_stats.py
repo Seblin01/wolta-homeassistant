@@ -624,6 +624,14 @@ class TestFetchStates:
         end = datetime(2026, 8, 2, tzinfo=timezone.utc)
         result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
 
+        # Guard the event-loop safety, not just the result: the recorder call must
+        # go through the executor, never run directly on the event loop. Without
+        # this assertion a regression that calls history.get_significant_states()
+        # inline would still populate captured["call_args"] via the monkeypatch
+        # and the test would pass despite blocking the loop.
+        instance.async_add_executor_job.assert_awaited_once()
+        assert callable(captured["fn"])
+
         assert result == [(t0, "off"), (t1, "on")]
         call_start, call_end, call_entity_ids, kwargs = captured["call_args"]
         assert call_start == start

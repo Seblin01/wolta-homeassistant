@@ -282,8 +282,9 @@ async def async_fetch_change(
 ) -> dict[str, list[StatisticsRow]]:
     """Fetch statistics from the HA recorder using the executor thread.
 
-    This is the *only* function in this module that imports from
-    ``homeassistant``; the rest are pure and testable without an HA runtime.
+    This and ``async_fetch_states`` are the only functions in this module that
+    import from ``homeassistant``; the rest are pure and testable without an
+    HA runtime.
 
     ``statistics_during_period`` is a blocking DB call and must be executed
     via ``get_instance(hass).async_add_executor_job`` to avoid blocking the
