@@ -163,19 +163,19 @@ def merge_streams(
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
-    The union of timestamps present in *batt_in*, *batt_out* and *external*
-    defines the set of valid quarters. A quarter flagged in *external* is
-    always emitted, even with no battery activity: a flex session forcing the
-    battery to stand still produces no battery energy, but the forced idle is
-    still external control and must reach the backend (spec 2026-08-26 B4/B5)
-    – dropping such quarters would silently lose the flag. Any other quarter
-    where neither battery stream has data is excluded. Missing values in any
-    stream default to 0.0.
+    Valid quarters are the timestamps present in *batt_in* or *batt_out*, plus the
+    quarters flagged in *external* that the recorder actually COMPILED statistics for
+    – i.e. that are a key in at least one of the five streams.
 
-    A flagged quarter is only emitted when the recorder has COMPILED statistics for
-    that quarter, i.e. it is a key in at least one of the five streams. The flag is
-    held forward from the last known state point and can span stretches with no
-    statistics at all; see ``_compiled_quarters``.
+    A flagged quarter is emitted even with no battery activity: a flex session forcing
+    the battery to stand still produces no battery energy, but the forced idle is still
+    external control and must reach the backend (spec 2026-08-26 B4/B5) – dropping
+    those would silently lose the flag. A flagged quarter with no compiled statistics
+    anywhere is NOT emitted, however: the flag is held forward from the last known
+    state point and can span stretches the recorder never compiled, where every field
+    would fall to 0.0 and overwrite real energy server-side (see
+    ``_compiled_quarters``). Any other quarter where neither battery stream has data is
+    excluded. Missing values in any stream default to 0.0.
 
     Args:
         batt_in:   dict[datetime, float] – battery charge energy per quarter.
@@ -424,8 +424,24 @@ async def async_fetch_states(
 
     Unlike async_fetch_change (long-term statistics, years of retention) this reads
     recorder STATES, whose retention is purge_keep_days (default ~10 days). The window
-    is therefore DYNAMIC by construction: we ask for the full range and get whatever
-    retention holds (spec B5) – older energy rows simply stay unflagged."""
+    is DYNAMIC by construction: we ask for the full range and get whatever retention
+    holds (spec B5).
+
+    Do NOT read that as "the flag can only reach purge_keep_days back". It cannot be
+    bounded that way, and assuming it could is exactly the reasoning error that once
+    emitted 1 340 rows of which 1 336 were all-zero. ``include_start_time_state=True``
+    adds a synthetic first point for the state in effect AT ``start``, and every point
+    carries its ORIGINAL ``last_changed``, which may lie far outside the window.
+    ``flagged_quarters`` holds each state forward until the next point (clamping to
+    ``start``), so ONE retained 'on' row flags every quarter back to the query's
+    ``start`` – up to a year on the backfill path. Purged history produces no state
+    points, so it does not interrupt that hold; it only decides which state gets
+    carried, usually the 'off' the sensor was last recorded in.
+
+    What bounds the upload is therefore NOT this function and must not be reintroduced
+    here as a window assumption: ``merge_streams`` emits a flagged quarter only when
+    the recorder compiled statistics for that very quarter. The bound lives where the
+    evidence lives."""
     from homeassistant.components.recorder import get_instance  # noqa: PLC0415
     from homeassistant.components.recorder import history  # noqa: PLC0415
 

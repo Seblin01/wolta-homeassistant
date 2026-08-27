@@ -684,6 +684,12 @@ def test_merge_streams_hallen_on_over_recorder_lucka_ger_bara_kompilerade_kvarte
 
     assert [r["ts"] for r in rows] == sorted(k.isoformat() for k in batt_in)
     assert len(rows) == 4, f"expected only the one compiled hour, got {len(rows)}"
+    # The ts list above is the real guard. The all-zero check below is a PROXY for it,
+    # not the invariant: an all-zero row is not forbidden in itself - a genuinely
+    # compiled quarter in which all five sensors moved by exactly 0.0 is legitimate and
+    # must upload as zeros. It only bites here because this fixture's compiled quarters
+    # carry non-zero values, so any zero row could only have come from an uncompiled
+    # one. Do not turn it into a general rule.
     zeroed = [
         r for r in rows
         if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))

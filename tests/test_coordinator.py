@@ -1962,7 +1962,10 @@ async def test_heal_emits_only_quarters_with_compiled_statistics(
     assert [r["ts"] for r in rows] == expected, (
         f"expected exactly the 4 compiled quarters, got {len(rows)} rows"
     )
-    # No row may be an all-zero placeholder: that IS the failure mode.
+    # A PROXY for the assertion above, not the invariant: an all-zero row is not
+    # forbidden in itself - a genuinely compiled quarter where all five sensors moved
+    # by exactly 0.0 is legitimate and must upload as zeros. It bites here only because
+    # this fixture's compiled quarters carry non-zero values.
     zeroed = [
         r["ts"] for r in rows
         if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))
