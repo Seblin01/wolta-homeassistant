@@ -1804,16 +1804,21 @@ _FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
 _EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                                      "sensor.grid_out", "sensor.solar")}
 
-# Statistics that reach PAST the flex session (one hour before NOW, i.e. an hour after
-# the session). Without this the flagged quarters would sit beyond the statistics
-# frontier and merge_streams would - correctly - drop them (see _statistics_frontier):
-# HA has not compiled anything, so there is no window to flag inside. Grid-only rows
-# also prove the frontier spans ALL streams, not just the battery ones, and that a
-# flagged quarter with no battery activity of its own still reaches the backend.
-_FRONTIER_HOUR = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-_GRID_ONLY_STATS = {
+# Compiled statistics covering the flex session's own quarters. The flag alone is not
+# enough for a row to be emitted: merge_streams requires the recorder to have compiled
+# statistics for that very quarter, otherwise a held-forward flag would upload all-zero
+# rows (see _compiled_quarters). Grid-only rows are also the realistic shape of forced
+# idle - the house keeps drawing from the grid while the battery is held still - so
+# this doubles as proof that the compilation evidence may come from a NON-battery
+# stream and that a flagged quarter with no battery activity still reaches the backend.
+# Two rows so the 5-minute path (incremental) covers both flagged quarters; the hourly
+# path (backfill/heal) spreads either row across all four quarters of the hour anyway.
+_SESSION_GRID_STATS = {
     **_EMPTY_BATT_STATS,
-    "sensor.grid_in": [{"start": _FRONTIER_HOUR.timestamp(), "change": 0.3}],
+    "sensor.grid_in": [
+        {"start": _SESSION_HOUR.timestamp(), "change": 0.3},
+        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.4},
+    ],
 }
 
 
@@ -1888,7 +1893,7 @@ async def test_fetch_modes_flag_external_control_quarters(
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.async_fetch_change",
-              return_value=dict(_GRID_ONLY_STATS)),
+              return_value=dict(_SESSION_GRID_STATS)),
         patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
     ):
         rows = await _run_fetch_mode(coordinator, mode)
@@ -1909,29 +1914,42 @@ async def test_fetch_modes_flag_external_control_quarters(
 
 
 @pytest.mark.asyncio
-async def test_heal_does_not_flag_past_statistics_frontier(
+async def test_heal_emits_only_quarters_with_compiled_statistics(
     hass: HomeAssistant, mock_entry
 ):
-    """F1 regression, end to end on the heal path.
+    """F1 + C1 regression, end to end on the heal path.
 
-    The integration has been down for two weeks; the flex sensor was 'on' across the
-    gap so the flag reaches right up to NOW (12:00), while hourly LTS only exists up
-    to the 10:00 hour (quarters 10:00-10:45). Emitting the flagged 11:00-11:45
-    quarters would upload real charge/discharge/grid energy as 0.0 and set the
-    coordinator's bookmark (rows[-1]["ts"]) to 11:45, so the next cycle starts after
-    them and the zeros stick server-side forever.
+    The integration has been down for two weeks; the flex sensor's last recorded
+    state is a stale 'on', which async_fetch_states hands back with its ORIGINAL
+    last_changed, so the flag is held across the entire 14-day window. Hourly LTS
+    exists for exactly one hour (10:00, i.e. quarters 10:00-10:45).
+
+    Only those four quarters may be emitted. Everything else - the two weeks below
+    them AND the 11:00-11:45 quarters above them - would upload real
+    charge/discharge/grid energy as 0.0, and the bookmark (rows[-1]["ts"]) would
+    land on the last of them, so the next cycle starts after the zeros and they
+    stick server-side forever.
+
+    This asserts the exact row SET, not just its endpoints: an earlier version of
+    this guard checked only "rows exist", "the last one is the newest compiled
+    quarter" and "nothing lies beyond" - all of which pass on a 1 340-row result
+    where 1 336 rows are all-zero. `all(external_control is True)` cannot tell the
+    intended forced-idle quarters from the false ones either, since both are
+    flagged. Count and form are what make this guard bite.
     """
     mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
     coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
 
     start = NOW - timedelta(days=14)
-    last_hour = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
-    frontier = last_hour + timedelta(minutes=45)
+    compiled_hour = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    expected = [
+        (compiled_hour + timedelta(minutes=m)).isoformat() for m in (0, 15, 30, 45)
+    ]
     lts = {
         **_EMPTY_BATT_STATS,
-        "sensor.batt_in": [{"start": last_hour.timestamp(), "change": 1.2}],
+        "sensor.batt_in": [{"start": compiled_hour.timestamp(), "change": 1.2}],
     }
-    # Sensor 'on' from the start of the gap all the way to NOW.
+    # One stale 'on' row, held forward across the whole window by flagged_quarters.
     points = [(start, "on")]
 
     with (
@@ -1941,14 +1959,16 @@ async def test_heal_does_not_flag_past_statistics_frontier(
     ):
         rows = await coordinator._heal_rows(start, NOW)
 
-    assert rows, "the compiled hour must still upload"
-    assert rows[-1]["ts"] == frontier.isoformat(), (
-        "the bookmark must not advance past the newest compiled quarter"
+    assert [r["ts"] for r in rows] == expected, (
+        f"expected exactly the 4 compiled quarters, got {len(rows)} rows"
     )
-    beyond = [r["ts"] for r in rows if datetime.fromisoformat(r["ts"]) > frontier]
-    assert beyond == [], f"flagged quarters emitted past the frontier: {beyond}"
-    # The half of the behaviour that must NOT regress: quarters inside the frontier
-    # are still flagged, including ones with no battery activity of their own.
+    # No row may be an all-zero placeholder: that IS the failure mode.
+    zeroed = [
+        r["ts"] for r in rows
+        if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))
+    ]
+    assert zeroed == [], f"all-zero rows would zero real energy: {zeroed}"
+    # The half that must NOT regress: the compiled quarters are still flagged.
     assert all(r["external_control"] is True for r in rows)
 
 

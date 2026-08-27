@@ -597,14 +597,21 @@ def test_merge_streams_utan_external_ar_ofdrandrad():
 
 
 # ---------------------------------------------------------------------------
-# merge_streams – statistics frontier (F1)
+# merge_streams – a flagged quarter needs COMPILED statistics (F1 + C1)
 #
-# HA only compiles statistics for COMPLETED periods, so every energy stream
-# stops short of `now`, while the flag (read from the recorder's STATES table)
-# reaches right up to `now`. A flagged quarter emitted BEYOND the newest quarter
-# that carries statistics uploads real energy as 0.0 and drags the coordinator's
-# bookmark (rows[-1]["ts"]) past it, so the next cycle never re-reads it: the
-# zeros stick server-side forever and feed economy + observed_* parameters.
+# HA only compiles statistics for completed periods AND only for periods the
+# recorder was actually running, while the flag - read from the recorder's STATES
+# table - is held forward from the last known state point and can therefore span
+# arbitrary stretches with no statistics at all (HA down, purge horizon, the
+# start-time-state row). A flagged quarter emitted where nothing was compiled
+# uploads real energy as 0.0 and drags the coordinator's bookmark
+# (rows[-1]["ts"]) past it, so the next cycle never re-reads it: the zeros stick
+# server-side forever and feed economy + observed_* parameters.
+#
+# The rule is one line: emit a flagged quarter only when that quarter exists as a
+# key in at least one of the five streams - proof the recorder compiled it. This
+# closes the gap ABOVE the newest compiled quarter and every gap INSIDE the range
+# with the same test; a global max/frontier only closed the former (C1).
 # ---------------------------------------------------------------------------
 
 
@@ -612,34 +619,91 @@ def _q(hour: int, minute: int) -> datetime:
     return datetime(2026, 8, 1, hour, minute, tzinfo=timezone.utc)
 
 
-def test_merge_streams_flaggat_kvarter_bortom_frontier_emitteras_ej():
+def test_merge_streams_flaggat_kvarter_bortom_sista_statistiken_emitteras_ej():
     """The heal scenario: LTS reaches 11:45, the flag reaches 12:45.
 
     Quarters 12:00-12:45 must NOT be emitted - they would upload as all-zero rows
     and move the bookmark to 12:45, permanently zeroing the real charge/discharge
     that the recorder had not yet compiled.
     """
-    frontier = _q(11, 45)
-    batt_in = {_q(11, 30): 0.4, frontier: 0.6}
-    external = {_q(11, 30), frontier, _q(12, 0), _q(12, 15), _q(12, 30), _q(12, 45)}
+    newest = _q(11, 45)
+    batt_in = {_q(11, 30): 0.4, newest: 0.6}
+    external = {_q(11, 30), newest, _q(12, 0), _q(12, 15), _q(12, 30), _q(12, 45)}
 
     rows = stats.merge_streams(
         batt_in=batt_in, batt_out={}, grid_in={}, grid_out={}, solar={},
         external=external,
     )
 
-    assert [r["ts"] for r in rows] == [_q(11, 30).isoformat(), frontier.isoformat()]
+    assert [r["ts"] for r in rows] == [_q(11, 30).isoformat(), newest.isoformat()]
     # The bookmark the coordinator would persist must not pass the real data.
-    assert rows[-1]["ts"] == frontier.isoformat()
+    assert rows[-1]["ts"] == newest.isoformat()
 
 
-def test_merge_streams_flaggat_vilokvarter_inom_frontier_emitteras():
-    """The deliberate earlier decision stands: forced idle inside the frontier is
-    still external control and must reach the backend, even with no battery
-    activity and no energy in ANY stream for that quarter."""
+def test_merge_streams_flaggat_kvarter_i_inre_lucka_emitteras_ej():
+    """C1: a flagged quarter INSIDE the compiled range but with no statistics of
+    its own must be dropped too.
+
+    A global max frontier passed these - they sit below the newest compiled quarter
+    - and emitted them with all five energy fields at 0.0. That is the same F1
+    failure moved from above the frontier to inside it. Here the recorder compiled
+    10:00 and 11:00 and nothing between (HA was down, or the states are older than
+    the purge horizon).
+    """
+    batt_in = {_q(10, 0): 0.4, _q(11, 0): 0.5}
+    external = {_q(10, 0), _q(10, 15), _q(10, 30), _q(10, 45), _q(11, 0)}
+
     rows = stats.merge_streams(
-        batt_in={_q(10, 0): 0.5}, batt_out={}, grid_in={}, grid_out={},
-        solar={_q(10, 45): 0.9},
+        batt_in=batt_in, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external=external,
+    )
+
+    assert [r["ts"] for r in rows] == [_q(10, 0).isoformat(), _q(11, 0).isoformat()]
+
+
+def test_merge_streams_hallen_on_over_recorder_lucka_ger_bara_kompilerade_kvarter():
+    """The real-world shape of C1, driven through flagged_quarters like production.
+
+    async_fetch_states returns `last_changed`, and the include_start_time_state row
+    carries an OLD one, so a single stale 'on' row holds the flag across the whole
+    heal window (>= 9 days by construction). Only the quarters the recorder actually
+    compiled may be emitted - otherwise two weeks of real operation upload as zeros
+    and get neutralised in the grade on the strength of one old state row.
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    start = now - timedelta(days=14)
+    compiled_hour = now - timedelta(hours=2)
+
+    flagged = stats.flagged_quarters([(start, "on")], now, start=start)
+    assert len(flagged) > 1000, "the held-on flag must really span the window"
+
+    batt_in = stats.split_hour_to_quarters(
+        [{"start": compiled_hour.timestamp(), "change": 1.2}]
+    )
+    rows = stats.merge_streams(batt_in, {}, {}, {}, {}, external=flagged)
+
+    assert [r["ts"] for r in rows] == sorted(k.isoformat() for k in batt_in)
+    assert len(rows) == 4, f"expected only the one compiled hour, got {len(rows)}"
+    zeroed = [
+        r for r in rows
+        if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))
+    ]
+    assert zeroed == [], f"{len(zeroed)} all-zero rows would zero real energy"
+
+
+def test_merge_streams_flaggat_vilokvarter_med_kompilerad_statistik_emitteras():
+    """The deliberate earlier decision stands: forced idle is still external control
+    and must reach the backend even with no BATTERY activity.
+
+    Post-C1 the quarter must carry compiled statistics from SOME stream - which a
+    real forced-idle quarter does: the house keeps drawing from the grid while the
+    battery is held still. 'No battery activity' is the case that must keep working;
+    'no data at all' is the case that must not.
+    """
+    rows = stats.merge_streams(
+        batt_in={_q(10, 0): 0.5}, batt_out={},
+        grid_in={_q(10, 0): 0.1, _q(10, 15): 0.3, _q(10, 30): 0.25}, grid_out={},
+        solar={},
         external={_q(10, 15), _q(10, 30)},
     )
 
@@ -650,25 +714,25 @@ def test_merge_streams_flaggat_vilokvarter_inom_frontier_emitteras():
     assert idle["external_control"] is True
     assert idle["batt_charged_kwh"] == 0.0
     assert idle["batt_discharged_kwh"] == 0.0
+    assert idle["grid_import_kwh"] == 0.3
 
 
-def test_merge_streams_frontier_raknas_pa_alla_strommar():
-    """A quarter with solar/grid data but no battery activity is still within the
-    frontier - the boundary is the newest quarter carrying ANY statistics, not the
-    newest battery quarter."""
+def test_merge_streams_kompilerat_kvarter_kan_bevisas_av_valfri_strom():
+    """The proof of compilation may come from ANY of the five streams, not just the
+    battery ones - a solar-only quarter is still a compiled quarter."""
     rows = stats.merge_streams(
         batt_in={_q(9, 0): 0.5}, batt_out={}, grid_in={}, grid_out={},
-        solar={_q(9, 45): 1.2},
-        external={_q(9, 30), _q(10, 0)},
+        solar={_q(9, 30): 1.2},
+        external={_q(9, 30), _q(9, 45)},
     )
 
     ts = [r["ts"] for r in rows]
-    assert _q(9, 30).isoformat() in ts, "inside the solar-defined frontier"
-    assert _q(10, 0).isoformat() not in ts, "beyond every stream's newest quarter"
+    assert _q(9, 30).isoformat() in ts, "proven compiled by the solar stream"
+    assert _q(9, 45).isoformat() not in ts, "no stream compiled this quarter"
 
 
 def test_merge_streams_flagga_utan_nagon_statistik_ger_inga_rader():
-    """No statistics at all -> no honest frontier exists. Every flagged row would be
+    """No statistics at all -> nothing is proven compiled. Every flagged row would be
     all-zero, which is exactly the failure mode above, so nothing is emitted and the
     bookmark stays put until real data arrives."""
     rows = stats.merge_streams(
