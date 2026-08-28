@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import calendar
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from custom_components.wolta import stats
 from custom_components.wolta.stats import (
     aggregate_5min_to_15min,
     merge_streams,
@@ -516,3 +518,421 @@ def test_analysis_clamps_eff():
 def test_analysis_no_history():
     out = analyze_battery_history(0.0, 0.0, None, _NOW)
     assert out == {"eff": None, "purchase_date": None, "invert_suspected": False}
+
+
+# ---------------------------------------------------------------------------
+# flagged_quarters (external control: any-overlap rule)
+# ---------------------------------------------------------------------------
+
+
+def test_flagged_quarters_nagon_del_regeln():
+    """En session :07-:19 spanner tva kvarter - bada flaggas (spec B4)."""
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "off"), (t(7), "on"), (t(19), "off")]
+    q = stats.flagged_quarters(points, end=t(30))
+    assert q == {t(0), t(15)}
+
+
+def test_flagged_quarters_unavailable_ar_off():
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "unavailable"), (t(5), "unknown")]
+    assert stats.flagged_quarters(points, end=t(30)) == set()
+
+
+def test_flagged_quarters_on_till_fonsterslut():
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(20), "on")]
+    assert stats.flagged_quarters(points, end=t(50)) == {t(15), t(30), t(45)}
+
+
+def test_flagged_quarters_klampas_till_fonsterstart():
+    """F4: the backfill path is the only caller with an UNALIGNED start
+    (now - 365 days). The start-time-state row from include_start_time_state
+    carries its own (much older) timestamp, which floors to the quarter BEFORE
+    the window - a quarter the caller never asked about, uploaded as an all-zero
+    row that overwrites whatever the previous backfill stored there."""
+    start = datetime(2026, 8, 1, 13, 52, 17, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 1, 14, 30, tzinfo=timezone.utc)
+    points = [(datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc), "on")]
+
+    q = stats.flagged_quarters(points, end=end, start=start)
+
+    assert datetime(2026, 8, 1, 13, 45, tzinfo=timezone.utc) not in q
+    assert q == {
+        datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 1, 14, 15, tzinfo=timezone.utc),
+    }
+
+
+def _flagged_quarters_reference(points, end, start=None):
+    """Naive reference: walk every quarter from the floored point and discard the ones
+    before `start`. The implementation skips ahead instead (a long-held 'on' yields a
+    point whose last_changed can be years old); this pins the two to the same output."""
+    out = set()
+    for i, (ts, state) in enumerate(points):
+        if state != "on":
+            continue
+        stop = points[i + 1][0] if i + 1 < len(points) else end
+        unix = int(ts.timestamp())
+        q = datetime.fromtimestamp(unix - unix % 900, tz=timezone.utc)
+        while q < stop:
+            if start is None or q >= start:
+                out.add(q)
+            q += timedelta(seconds=900)
+    return out
+
+
+def test_flagged_quarters_matchar_naiv_referens():
+    """The skip-ahead must be a pure optimisation: identical output on aligned and
+    unaligned starts, on no start at all, and on a point far outside the window."""
+    rnd = random.Random(11)
+    base = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for case in range(200):
+        n = rnd.randrange(1, 6)
+        offsets = sorted(rnd.randrange(0, 6 * 3600) for _ in range(n))
+        points = [
+            (base + timedelta(seconds=o), rnd.choice(["on", "off", "unavailable"]))
+            for o in offsets
+        ]
+        end = base + timedelta(seconds=6 * 3600 + rnd.randrange(0, 3600))
+        for start in (
+            None,
+            base,                                             # aligned
+            base + timedelta(seconds=rnd.randrange(0, 7200)),  # unaligned
+            base - timedelta(days=900),                        # far before the points
+        ):
+            assert stats.flagged_quarters(points, end, start=start) == \
+                _flagged_quarters_reference(points, end, start), f"case {case}"
+
+
+def test_flagged_quarters_gammal_punkt_ger_bara_fonstrets_kvarter():
+    """A sensor 'on' since long before the window: the retained state point carries a
+    years-old last_changed, but only the window's own quarters may come back."""
+    start = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    ancient = start - timedelta(days=900)
+
+    q = stats.flagged_quarters([(ancient, "on")], end, start=start)
+
+    assert q == {start + timedelta(minutes=m) for m in (0, 15, 30, 45)}
+
+
+def test_flagged_quarters_aligned_start_behaller_startkvarteret():
+    """Heal/incremental starts come from the bookmark and are quarter boundaries -
+    clamping must not eat the first quarter there."""
+    t = lambda m: datetime(2026, 8, 1, 10, m, tzinfo=timezone.utc)  # noqa: E731
+    points = [(t(0), "on")]
+    assert stats.flagged_quarters(points, end=t(30), start=t(0)) == {t(0), t(15)}
+
+
+# ---------------------------------------------------------------------------
+# merge_streams – external control flagging
+# ---------------------------------------------------------------------------
+
+
+def test_merge_streams_flaggar_och_emitterar_vilokvarter():
+    qt1 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    qt2 = datetime(2026, 8, 1, 10, 15, tzinfo=timezone.utc)
+    # qt2 ar tvingad vila: batteriet star still, men sensorn ar INSPELAD, sa recordern
+    # kompilerar en rad med change=0.0 och kvarten ar redan en nyckel i batt_in.
+    # (Tidigare bar detta test den falska premissen att en vilokvart SAKNAR
+    # batteristatistik och darfor maste slappas in pa natstrommens bevis - se
+    # test_merge_streams_flagga_utan_batteristatistik_fabricerar_inga_rader.)
+    rows = stats.merge_streams(
+        batt_in={qt1: 0.5, qt2: 0.0}, batt_out={}, grid_in={qt2: 0.2}, grid_out={},
+        solar={}, external={qt1, qt2})
+    assert [r["ts"] for r in rows] == [qt1.isoformat(), qt2.isoformat()]
+    assert all(r["external_control"] is True for r in rows)
+    assert rows[1]["grid_import_kwh"] == 0.2
+
+
+def test_merge_streams_utan_external_ar_ofdrandrad():
+    qt1 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    rows = stats.merge_streams(batt_in={qt1: 0.5}, batt_out={}, grid_in={}, grid_out={},
+                               solar={}, external=None)
+    assert rows[0]["external_control"] is False
+
+
+# ---------------------------------------------------------------------------
+# merge_streams – a flagged quarter needs COMPILED statistics (F1 + C1)
+#
+# HA only compiles statistics for completed periods AND only for periods the
+# recorder was actually running, while the flag - read from the recorder's STATES
+# table - is held forward from the last known state point and can therefore span
+# arbitrary stretches with no statistics at all (HA down, purge horizon, the
+# start-time-state row). A flagged quarter emitted where nothing was compiled
+# uploads real energy as 0.0 and drags the coordinator's bookmark
+# (rows[-1]["ts"]) past it, so the next cycle never re-reads it: the zeros stick
+# server-side forever and feed economy + observed_* parameters.
+#
+# The rule is one line: emit a flagged quarter only when that quarter exists as a
+# key in at least one of the five streams - proof the recorder compiled it. This
+# closes the gap ABOVE the newest compiled quarter and every gap INSIDE the range
+# with the same test; a global max/frontier only closed the former (C1).
+# ---------------------------------------------------------------------------
+
+
+def _q(hour: int, minute: int) -> datetime:
+    return datetime(2026, 8, 1, hour, minute, tzinfo=timezone.utc)
+
+
+_QS = [datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(minutes=15 * i)
+       for i in range(48)]
+
+
+def test_merge_streams_flaggat_kvarter_bortom_sista_statistiken_emitteras_ej():
+    """The heal scenario: LTS reaches 11:45, the flag reaches 12:45.
+
+    Quarters 12:00-12:45 must NOT be emitted - they would upload as all-zero rows
+    and move the bookmark to 12:45, permanently zeroing the real charge/discharge
+    that the recorder had not yet compiled.
+    """
+    newest = _q(11, 45)
+    batt_in = {_q(11, 30): 0.4, newest: 0.6}
+    external = {_q(11, 30), newest, _q(12, 0), _q(12, 15), _q(12, 30), _q(12, 45)}
+
+    rows = stats.merge_streams(
+        batt_in=batt_in, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external=external,
+    )
+
+    assert [r["ts"] for r in rows] == [_q(11, 30).isoformat(), newest.isoformat()]
+    # The bookmark the coordinator would persist must not pass the real data.
+    assert rows[-1]["ts"] == newest.isoformat()
+
+
+def test_merge_streams_flaggat_kvarter_i_inre_lucka_emitteras_ej():
+    """C1: a flagged quarter INSIDE the compiled range but with no statistics of
+    its own must be dropped too.
+
+    A global max frontier passed these - they sit below the newest compiled quarter
+    - and emitted them with all five energy fields at 0.0. That is the same F1
+    failure moved from above the frontier to inside it. Here the recorder compiled
+    10:00 and 11:00 and nothing between (HA was down, or the states are older than
+    the purge horizon).
+    """
+    batt_in = {_q(10, 0): 0.4, _q(11, 0): 0.5}
+    external = {_q(10, 0), _q(10, 15), _q(10, 30), _q(10, 45), _q(11, 0)}
+
+    rows = stats.merge_streams(
+        batt_in=batt_in, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external=external,
+    )
+
+    assert [r["ts"] for r in rows] == [_q(10, 0).isoformat(), _q(11, 0).isoformat()]
+
+
+def test_merge_streams_hallen_on_over_recorder_lucka_ger_bara_kompilerade_kvarter():
+    """The real-world shape of C1, driven through flagged_quarters like production.
+
+    async_fetch_states returns `last_changed`, and the include_start_time_state row
+    carries an OLD one, so a single stale 'on' row holds the flag across the whole
+    heal window (>= 9 days by construction). Only the quarters the recorder actually
+    compiled may be emitted - otherwise two weeks of real operation upload as zeros
+    and get neutralised in the grade on the strength of one old state row.
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    start = now - timedelta(days=14)
+    compiled_hour = now - timedelta(hours=2)
+
+    flagged = stats.flagged_quarters([(start, "on")], now, start=start)
+    assert len(flagged) > 1000, "the held-on flag must really span the window"
+
+    batt_in = stats.split_hour_to_quarters(
+        [{"start": compiled_hour.timestamp(), "change": 1.2}]
+    )
+    rows = stats.merge_streams(batt_in, {}, {}, {}, {}, external=flagged)
+
+    assert [r["ts"] for r in rows] == sorted(k.isoformat() for k in batt_in)
+    assert len(rows) == 4, f"expected only the one compiled hour, got {len(rows)}"
+    # The ts list above is the real guard. The all-zero check below is a PROXY for it,
+    # not the invariant: an all-zero row is not forbidden in itself - a genuinely
+    # compiled quarter in which all five sensors moved by exactly 0.0 is legitimate and
+    # must upload as zeros. It only bites here because this fixture's compiled quarters
+    # carry non-zero values, so any zero row could only have come from an uncompiled
+    # one. Do not turn it into a general rule.
+    zeroed = [
+        r for r in rows
+        if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))
+    ]
+    assert zeroed == [], f"{len(zeroed)} all-zero rows would zero real energy"
+
+
+def test_merge_streams_tvingad_vila_har_egen_batteristatistik_och_emitteras():
+    """Forced idle needs NO special case: a held-still battery is still a RECORDED
+    sensor, so the recorder compiles a row with change=0.0 and the quarter is already
+    a key in batt_in/batt_out. It was emitted before this branch existed and still is.
+
+    This is the premise the 'any stream may prove it' rule was built on, and it was
+    wrong - see test_merge_streams_flagga_kan_aldrig_lagga_till_rader.
+    """
+    rows = stats.merge_streams(
+        batt_in={_q(10, 0): 0.5, _q(10, 15): 0.0, _q(10, 30): 0.0}, batt_out={},
+        grid_in={_q(10, 0): 0.1, _q(10, 15): 0.3, _q(10, 30): 0.25}, grid_out={},
+        solar={},
+        external={_q(10, 15), _q(10, 30)},
+    )
+
+    assert [r["ts"] for r in rows] == [
+        _q(10, 0).isoformat(), _q(10, 15).isoformat(), _q(10, 30).isoformat()
+    ]
+    idle = rows[1]
+    assert idle["external_control"] is True
+    assert idle["batt_charged_kwh"] == 0.0
+    assert idle["batt_discharged_kwh"] == 0.0
+    assert idle["grid_import_kwh"] == 0.3
+
+
+def test_merge_streams_flagga_utan_batteristatistik_fabricerar_inga_rader():
+    """The battery sensor is missing for these quarters - unavailable, not yet
+    installed, or not recorded - while the grid meter has a full year of history.
+
+    Emitting the flagged quarters on the strength of the GRID stream writes
+    batt_charged = batt_discharged = 0.0 for quarters in which the battery was never
+    observed. That 0.0 is not a measurement, it is a fabrication, and it lands
+    server-side where nothing was uploaded before.
+    """
+    rows = stats.merge_streams(
+        batt_in={_q(11, 0): 0.4}, batt_out={}, grid_in={
+            _q(9, 0): 0.2, _q(9, 15): 0.2, _q(9, 30): 0.2, _q(9, 45): 0.2,
+            _q(10, 0): 0.2, _q(11, 0): 0.3,
+        }, grid_out={}, solar={},
+        external={_q(9, 0), _q(9, 15), _q(9, 30), _q(9, 45), _q(10, 0), _q(11, 0)},
+    )
+
+    assert [r["ts"] for r in rows] == [_q(11, 0).isoformat()], (
+        "only the quarter the battery was actually recorded in"
+    )
+
+
+def test_merge_streams_flagga_kan_aldrig_lagga_till_rader():
+    """The invariant that replaces three rounds of reformulation: the flag MARKS
+    already-valid quarters and can never add one.
+
+    Valid quarters are exactly the battery timestamps, with or without a flag. Any
+    rule that lets a non-battery stream admit a flagged quarter necessarily emits
+    rows whose battery fields are fabricated zeros.
+    """
+    marked = 0
+    for ext_density in (0.0, 0.3, 1.0):
+        for seed in range(60):
+            rnd = random.Random((seed, ext_density).__hash__())
+            def mk(p):
+                return {q: round(rnd.uniform(0, 3), 3)
+                        for q in _QS if rnd.random() < p}
+            a, b, c, d, e = mk(0.3), mk(0.3), mk(0.6), mk(0.4), mk(0.5)
+            ext = {q for q in _QS if rnd.random() < ext_density}
+
+            with_flag = stats.merge_streams(a, b, c, d, e, external=ext)
+            without = stats.merge_streams(a, b, c, d, e, external=None)
+
+            assert [r["ts"] for r in with_flag] == [r["ts"] for r in without], (
+                "the flag changed WHICH quarters are emitted"
+            )
+            marked += sum(1 for r in with_flag if r["external_control"])
+    assert marked > 0, "the flag must still mark rows, or this proves nothing"
+
+
+def test_merge_streams_flagga_utan_nagon_statistik_ger_inga_rader():
+    """No statistics at all -> nothing to mark, nothing emitted."""
+    rows = stats.merge_streams(
+        batt_in={}, batt_out={}, grid_in={}, grid_out={}, solar={},
+        external={_q(10, 0), _q(10, 15)},
+    )
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# async_fetch_states – recorder STATES reader (states table, not statistics)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchStates:
+    """async_fetch_states reads the recorder's states table (short retention,
+    purge_keep_days) via history.get_significant_states through the executor."""
+
+    @pytest.mark.asyncio
+    async def test_reads_states_via_executor(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["fn"] = fn
+            return fn()
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+        from homeassistant.components.recorder import history as history_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        t0 = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 8, 1, 10, 7, tzinfo=timezone.utc)
+
+        class _FakeState:
+            def __init__(self, last_changed, state):
+                self.last_changed = last_changed
+                self.state = state
+
+        fake_result = {
+            "binary_sensor.flex": [
+                _FakeState(t0, "off"),
+                _FakeState(t1, "on"),
+            ]
+        }
+
+        def _fake_get_significant_states(hass, start, end, entity_ids, **kwargs):
+            captured["call_args"] = (start, end, entity_ids, kwargs)
+            return fake_result
+
+        monkeypatch.setattr(
+            history_mod, "get_significant_states", _fake_get_significant_states
+        )
+
+        hass = MagicMock()
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
+
+        # Guard the event-loop safety, not just the result: the recorder call must
+        # go through the executor, never run directly on the event loop. Without
+        # this assertion a regression that calls history.get_significant_states()
+        # inline would still populate captured["call_args"] via the monkeypatch
+        # and the test would pass despite blocking the loop.
+        instance.async_add_executor_job.assert_awaited_once()
+        assert callable(captured["fn"])
+
+        assert result == [(t0, "off"), (t1, "on")]
+        call_start, call_end, call_entity_ids, kwargs = captured["call_args"]
+        assert call_start == start
+        assert call_end == end
+        assert call_entity_ids == ["binary_sensor.flex"]
+        assert kwargs.get("include_start_time_state") is True
+        assert kwargs.get("significant_changes_only") is False
+
+    @pytest.mark.asyncio
+    async def test_missing_entity_returns_empty_list(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        async def _fake_executor_job(fn, *args):
+            return fn()
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+        from homeassistant.components.recorder import history as history_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+        monkeypatch.setattr(
+            history_mod, "get_significant_states", lambda *a, **k: {}
+        )
+
+        hass = MagicMock()
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
+        assert result == []

@@ -230,6 +230,20 @@ def _capacity_hint_attr(results: dict) -> dict[str, Any]:
     return {"capacity_hint": hint}
 
 
+def _external_control_attr(results: dict) -> dict[str, Any]:
+    """external_control (spec 2026-08-26): the backend's ADDITIVE block on results.betyg,
+    present only when at least one interval in the grade's window was flagged as
+    externally controlled by a flex-market service (e.g. Tibber Grid Rewards). Omitted
+    entirely (not None) for an unflagged plant and for every payload cached before this
+    backend deploy - same absent-vs-false contract as _capacity_hint_attr above, and the
+    same lesson as the annual["factor"] KeyError (<= v0.27.0): a truthy-but-keyless block
+    check here would kill this sensor for every user on an older backend/cache."""
+    ext = (results.get("betyg") or {}).get("external_control")
+    if ext is None:
+        return {}
+    return {"external_control": ext}
+
+
 def _measured_params_attr(results: dict) -> dict[str, Any]:
     """Measured battery parameters: capacity/power/efficiency as the uploaded meter data
     actually shows them (the observed_* dicts, in the payload since the v0.12.0
@@ -318,6 +332,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),
                 **_measured_params_attr(data.results),
+                **_external_control_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}

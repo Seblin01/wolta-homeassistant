@@ -91,7 +91,11 @@
           "batt_out": "Battery discharge energy",
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
-          "solar": "Solar production energy (optional)"
+          "solar": "Solar production energy (optional)",
+          "external_control_entity": "External control active (binary sensor, optional)"
+        },
+        "data_description": {
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
         }
       },
       "privacy": {
@@ -179,9 +183,12 @@
           "batt_out": "Battery discharge energy",
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
-          "solar": "Solar production energy (optional)"
+          "solar": "Solar production energy (optional)",
+          "external_control_entity": "External control active (binary sensor, optional)"
         },
-        "data_description": {}
+        "data_description": {
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
+        }
       },
       "view_only": {
         "title": "Add in view-only mode",
@@ -249,6 +256,7 @@
           },
           "economy": {
             "name": "Economy",
+            "description": "Entered a combined price for the whole plant (solar + battery) on wolta.se? Then the purchase price is managed there, and the price field is hidden here.",
             "data": {
               "cost_sek": "What you paid for the battery (kr) – battery only",
               "purchase_date": "Purchase date"

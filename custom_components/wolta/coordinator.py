@@ -31,6 +31,7 @@ from .const import (
     CONF_EFFICIENCY_ISSUE_IGNORED,
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -48,6 +49,7 @@ from .const import (
     DOMAIN,
     WOLTA_API_BASE,
 )
+from . import stats
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
@@ -169,6 +171,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Visningsläge (bundna anläggningar): polla bara resultat - rör aldrig
         # statistikläsning, PUT /data eller recompute-kadensen. Se const.CONF_VIEW_ONLY.
         self._view_only: bool = bool(entry.data.get(CONF_VIEW_ONLY))
+        # Vendor-neutral flex-market flag (spec 2026-08-26): a binary_sensor that is
+        # 'on' while the battery is externally controlled (e.g. derived from a Tibber
+        # Grid Rewards state sensor). Client-local, never PATCHed to the server -
+        # see const.CONF_EXTERNAL_CONTROL for the full rationale.
+        self._external_entity: str | None = entry.data.get(CONF_EXTERNAL_CONTROL) or None
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -311,7 +318,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # server-side history is rebuilt from the new sensors. Same self-heal
             # pattern as applied_invert above; first-time recording (upgrade) leaves
             # the bookmark untouched.
-            entities_now = json.dumps(self._entity_map, sort_keys=True)
+            # external_control-nyckeln ingår BARA när sensorn är vald: annars ändras
+            # fingerprintet för varje befintlig installation vid uppgradering → onödig
+            # full re-backfill för hela flottan.
+            _fp_map = dict(self._entity_map)
+            if self._external_entity:
+                _fp_map["external_control"] = [self._external_entity]
+            entities_now = json.dumps(_fp_map, sort_keys=True)
             applied_entities = self._state.get("applied_entities")
             if applied_entities is None:
                 self._state["applied_entities"] = entities_now
@@ -455,10 +468,46 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return "batt_in"
         return stream
 
+    async def _external_quarters(self, start: datetime, end: datetime) -> set[datetime]:
+        """Flagged 15-min quarters from the selected binary sensor's state history.
+
+        No sensor selected -> empty set (every row's external_control stays False,
+        and the recorder's states table is never queried - a needless DB read on
+        every cycle for the whole fleet would be a real regression).
+
+        A failure here must NOT fail the upload cycle: an unflagged upload beats no
+        upload at all. Be clear about what that costs, though - it is NOT
+        self-healing. Nothing re-reads quarters below the bookmark; the incremental
+        and heal paths both start there, so quarters uploaded unflagged stay
+        unflagged until something resets the bookmark (an entity-fingerprint change,
+        i.e. the user re-picking sensors, which triggers a full re-backfill). The
+        error direction is still the safe one - those quarters are graded normally
+        rather than wrongly neutralised - but the flag is lost for them, not deferred.
+
+        Both the recorder read and the bucketing are inside the try so the guarantee
+        above actually holds for the whole operation: flagged_quarters is pure, but
+        leaving it outside would mean a malformed point list still killed the cycle,
+        which is exactly what this method promises not to do.
+        """
+        if not self._external_entity:
+            return set()
+        try:
+            points = await stats.async_fetch_states(
+                self.hass, self._external_entity, start, end)
+            return stats.flagged_quarters(points, end, start=start)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "External-control history read failed; uploading unflagged",
+                exc_info=True,
+            )
+            return set()
+
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
         start = now - timedelta(days=_BACKFILL_DAYS)
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+
+        external = await self._external_quarters(start, now)
 
         # Fetch hourly LTS for the long window (start → short_term_start)
         lts_data = await async_fetch_change(
@@ -500,10 +549,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 **self._sum_stream(lts_data, "solar", split_hour_to_quarters),
                 **self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
             },
+            external=external,
         )
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
+        external = await self._external_quarters(start, now)
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
@@ -517,10 +568,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             grid_in=self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
             grid_out=self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
             solar=self._sum_stream(lts_data, "solar", split_hour_to_quarters),
+            external=external,
         )
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
+        external = await self._external_quarters(start, now)
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
@@ -534,6 +587,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             grid_in=self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
             grid_out=self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
             solar=self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
+            external=external,
         )
 
     # ------------------------------------------------------------------

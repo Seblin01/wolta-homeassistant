@@ -91,7 +91,11 @@
           "batt_out": "Battery discharge energy",
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
-          "solar": "Solar production energy (optional)"
+          "solar": "Solar production energy (optional)",
+          "external_control_entity": "External control active (binary sensor, optional)"
+        },
+        "data_description": {
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
         }
       },
       "privacy": {
@@ -179,9 +183,12 @@
           "batt_out": "Battery discharge energy",
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
-          "solar": "Solar production energy (optional)"
+          "solar": "Solar production energy (optional)",
+          "external_control_entity": "External control active (binary sensor, optional)"
         },
-        "data_description": {}
+        "data_description": {
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
+        }
       },
       "view_only": {
         "title": "Add in view-only mode",

@@ -1071,3 +1071,47 @@ def test_measured_battery_value_none_when_score_on_missing():
         }
     }
     assert _measured_battery_value(results) is None
+
+
+# ---------------------------------------------------------------------------
+# external_control on optimeringsbetyg (spec 2026-08-26): the backend's ADDITIVE
+# block (results.betyg.external_control), present only while at least one
+# interval in the window was flagged. Must be key-safe - this exact block shape
+# is new, and the sensor has been bitten before by an unguarded lookup on an
+# optional payload block (annual["factor"] KeyError, <= v0.27.0).
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_external_control():
+    """When betyg carries the external_control block, the grade sensor exposes
+    it verbatim as a structured attribute."""
+    results = {
+        **RESULTS_FULL,
+        "betyg": {
+            **RESULTS_FULL["betyg"],
+            "external_control": {
+                "share": 0.12,
+                "period_cost_sek": -45.6,
+                "corpus_cap": 0.3,
+            },
+        },
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("external_control") == {
+        "share": 0.12,
+        "period_cost_sek": -45.6,
+        "corpus_cap": 0.3,
+    }
+
+
+def test_optimeringsbetyg_omits_external_control_when_absent():
+    """Unflagged plant (no session in the window) or a payload cached before this
+    backend deploy -> the block is entirely absent, not None, and the sensor must
+    render without error (no KeyError on an unguarded lookup)."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    assert "external_control" not in attrs
+    # native_value/available must also not raise for this same payload
+    assert s.native_value is not None
+    assert s.available is True

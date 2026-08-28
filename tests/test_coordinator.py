@@ -16,6 +16,7 @@ from custom_components.wolta.api import WoltaAuthError, WoltaRateLimitError
 from custom_components.wolta.const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_SOLAR,
@@ -1167,6 +1168,127 @@ async def test_entity_fingerprint_first_recording_keeps_bookmark(hass, mock_entr
     assert "applied_entities" in coordinator._state
 
 
+# ---------------------------------------------------------------------------
+# External control (spec 2026-08-26): optional binary_sensor picker.
+# Client-local key (same nature as CONF_INVERT_BATTERY) - the coordinator's
+# fingerprint must only include it when a sensor is actually selected, so an
+# upgrading fleet with no sensor configured never sees a fingerprint change.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coordinator_reads_external_control_entity(hass: HomeAssistant, mock_entry):
+    """A configured external_control_entity is exposed as coordinator._external_entity."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity == "binary_sensor.grid_rewards_active"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_external_control_entity_absent_is_none(
+    hass: HomeAssistant, mock_entry
+):
+    """No key in entry.data (every pre-existing entry) -> None, not KeyError."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_external_control_empty_string_is_none(
+    hass: HomeAssistant, mock_entry
+):
+    """An empty string (cleared field) normalises to None, same as an absent key."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: ""}
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._external_entity is None
+
+
+@pytest.mark.asyncio
+async def test_entity_fingerprint_changes_when_external_control_added(
+    hass: HomeAssistant, mock_entry
+):
+    """Selecting an external-control sensor must trigger the same self-heal
+    bookmark reset as changing any other entity selection (issue #1 pattern)."""
+    import json as _json
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    # Fingerprint format from before this feature existed - no external_control key.
+    pre_existing_fingerprint = _json.dumps({
+        "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
+        "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
+        "solar": ["sensor.solar"],
+    }, sort_keys=True)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": pre_existing_fingerprint})
+        await coordinator._async_update_data()
+
+    assert "last_uploaded_ts" not in coordinator._state
+    assert coordinator._state["applied_entities"] != pre_existing_fingerprint
+    client.recompute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entity_fingerprint_unchanged_on_upgrade_without_external_control(
+    hass: HomeAssistant, mock_entry
+):
+    """An existing installation with NO external_control sensor configured must not
+    see its fingerprint change on upgrade - the key is omitted entirely when unset,
+    otherwise every installed integration would re-backfill a year of history the
+    moment it updates."""
+    import json as _json
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    pre_upgrade_fingerprint = _json.dumps({
+        "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
+        "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
+        "solar": ["sensor.solar"],
+    }, sort_keys=True)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        # mock_entry.data is ENTRY_DATA (no CONF_EXTERNAL_CONTROL key) - the upgrade case.
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": pre_upgrade_fingerprint})
+        await coordinator._async_update_data()
+
+    assert coordinator._state.get("last_uploaded_ts") == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == pre_upgrade_fingerprint
+
+
 @pytest.mark.asyncio
 async def test_profile_sync_skipped_during_fast_poll(hass: HomeAssistant, mock_entry):
     """Under fast-poll (60 s medan server-jobb pågår) hoppas profil-syncen över."""
@@ -1658,3 +1780,257 @@ async def test_measured_params_skipped_for_preliminary_grade(hass, mock_entry):
     results["betyg"]["preliminary"] = True
     c._evaluate_measured_params(results)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# External control: coordinator wiring across all three fetch modes
+# (spec 2026-08-26 / task 13). _external_quarters() is the single choke point:
+# no sensor selected -> the recorder's states table must never be queried, and
+# a read failure must never fail the upload cycle (upload unflagged instead -
+# the next healing pass repairs a missed neutralization; a failed cycle loses
+# a whole upload).
+# ---------------------------------------------------------------------------
+
+_EXT_ENTITY = "binary_sensor.grid_rewards_active"
+# A flex session from :07 to :19 past the hour any-overlaps TWO 15-min quarters
+# (:00-:15 and :15-:30) under the any-overlap rule in stats.flagged_quarters.
+_SESSION_HOUR = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+_SESSION_POINTS = [
+    (_SESSION_HOUR + timedelta(minutes=7), "on"),
+    (_SESSION_HOUR + timedelta(minutes=19), "off"),
+]
+_FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
+
+_EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                                     "sensor.grid_out", "sensor.solar")}
+
+# Compiled BATTERY statistics covering the flex session's own quarters. The flag alone
+# never makes a row: merge_streams emits exactly the quarters the battery streams carry
+# and the flag only marks them. change=0.0 is the realistic shape of forced idle - the
+# battery is held still but the sensor is still recorded, so the recorder compiles a
+# row and the quarter is a key - which is why forced idle needs no special case.
+# Two rows so the 5-minute path (incremental) covers both flagged quarters; the hourly
+# path (backfill/heal) spreads either row across all four quarters of the hour anyway.
+_SESSION_BATT_STATS = {
+    **_EMPTY_BATT_STATS,
+    "sensor.batt_in": [
+        {"start": _SESSION_HOUR.timestamp(), "change": 0.0},
+        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.0},
+    ],
+    "sensor.grid_in": [
+        {"start": _SESSION_HOUR.timestamp(), "change": 0.3},
+        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.4},
+    ],
+}
+
+
+async def _run_fetch_mode(coordinator, mode: str):
+    """Invoke one of the three row-fetching coroutines with its own realistic window."""
+    if mode == "backfill":
+        return await coordinator._backfill_rows(NOW)
+    if mode == "heal":
+        return await coordinator._heal_rows(NOW - timedelta(days=15), NOW)
+    return await coordinator._incremental_rows(NOW - timedelta(hours=2), NOW)
+
+
+def _mode_expected_start(mode: str):
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS
+
+    if mode == "backfill":
+        return NOW - timedelta(days=_BACKFILL_DAYS)
+    if mode == "heal":
+        return NOW - timedelta(days=15)
+    return NOW - timedelta(hours=2)
+
+
+@pytest.mark.asyncio
+async def test_external_quarters_no_entity_skips_recorder(hass: HomeAssistant, mock_entry):
+    """No _external_entity -> async_fetch_states must never be awaited, empty set back."""
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    assert coordinator._external_entity is None
+
+    mock_fetch = AsyncMock(side_effect=AssertionError("must not query recorder states"))
+    with patch("custom_components.wolta.stats.async_fetch_states", mock_fetch):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    mock_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_quarters_read_failure_returns_empty_and_logs(
+    hass: HomeAssistant, mock_entry, caplog
+):
+    """A recorder read failure must be swallowed - not propagated - and logged as a
+    warning: an unflagged upload is repaired by the next healing pass, whereas a
+    raised exception here would fail the entire upload cycle (no data at all)."""
+    import logging
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    with (
+        caplog.at_level(logging.WARNING, logger="custom_components.wolta.coordinator"),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(side_effect=RuntimeError("recorder unavailable"))),
+    ):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    assert "External-control history read failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_external_quarters_bucketing_failure_also_degrades_softly(
+    hass: HomeAssistant, mock_entry, caplog
+):
+    """The soft-degrade guarantee covers the BUCKETING too, not just the DB read.
+
+    flagged_quarters is pure, but it sits inside the same try: a malformed point list
+    (here a row with no last_changed at all) must not be the one thing that kills the
+    whole upload cycle, since that is precisely what this method promises not to do.
+    Previously the call sat outside the try and would have propagated.
+    """
+    import logging
+
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    with (
+        caplog.at_level(logging.WARNING, logger="custom_components.wolta.coordinator"),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(return_value=[(None, "on")])),
+    ):
+        result = await coordinator._external_quarters(NOW - timedelta(days=1), NOW)
+
+    assert result == set()
+    assert "External-control history read failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["backfill", "heal", "incremental"])
+async def test_fetch_modes_flag_external_control_quarters(
+    hass: HomeAssistant, mock_entry, mode
+):
+    """All three fetch modes (full backfill, gap healing, incremental tick) must flag
+    the same external-control session, each looking up its own time window - a flag
+    that only landed on one path would make neutralization depend on upload timing."""
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    fetch_states = AsyncMock(return_value=_SESSION_POINTS)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              return_value=dict(_SESSION_BATT_STATS)),
+        patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
+    ):
+        rows = await _run_fetch_mode(coordinator, mode)
+
+    by_ts = {row["ts"]: row for row in rows}
+    for qt in _FLAGGED_QUARTERS:
+        row = by_ts.get(qt.isoformat())
+        assert row is not None, f"{mode}: quarter {qt.isoformat()} was not uploaded"
+        assert row["external_control"] is True, f"{mode}: quarter {qt.isoformat()} not flagged"
+
+    fetch_states.assert_awaited_once()
+    passed_hass, passed_entity, passed_start, passed_end = fetch_states.await_args.args
+    assert passed_entity == _EXT_ENTITY
+    assert passed_end == NOW
+    assert passed_start == _mode_expected_start(mode), (
+        f"{mode}: must look up its OWN window, not another mode's"
+    )
+
+
+@pytest.mark.asyncio
+async def test_heal_emits_only_quarters_with_compiled_statistics(
+    hass: HomeAssistant, mock_entry
+):
+    """F1 + C1 regression, end to end on the heal path.
+
+    The integration has been down for two weeks; the flex sensor's last recorded
+    state is a stale 'on', which async_fetch_states hands back with its ORIGINAL
+    last_changed, so the flag is held across the entire 14-day window. Hourly LTS
+    exists for exactly one hour (10:00, i.e. quarters 10:00-10:45).
+
+    Only those four quarters may be emitted. Everything else - the two weeks below
+    them AND the 11:00-11:45 quarters above them - would upload real
+    charge/discharge/grid energy as 0.0, and the bookmark (rows[-1]["ts"]) would
+    land on the last of them, so the next cycle starts after the zeros and they
+    stick server-side forever.
+
+    This asserts the exact row SET, not just its endpoints: an earlier version of
+    this guard checked only "rows exist", "the last one is the newest compiled
+    quarter" and "nothing lies beyond" - all of which pass on a 1 340-row result
+    where 1 336 rows are all-zero. `all(external_control is True)` cannot tell the
+    intended forced-idle quarters from the false ones either, since both are
+    flagged. Count and form are what make this guard bite.
+    """
+    mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: _EXT_ENTITY}
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+
+    start = NOW - timedelta(days=14)
+    compiled_hour = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    expected = [
+        (compiled_hour + timedelta(minutes=m)).isoformat() for m in (0, 15, 30, 45)
+    ]
+    lts = {
+        **_EMPTY_BATT_STATS,
+        "sensor.batt_in": [{"start": compiled_hour.timestamp(), "change": 1.2}],
+    }
+    # One stale 'on' row, held forward across the whole window by flagged_quarters.
+    points = [(start, "on")]
+
+    with (
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value=lts),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              AsyncMock(return_value=points)),
+    ):
+        rows = await coordinator._heal_rows(start, NOW)
+
+    assert [r["ts"] for r in rows] == expected, (
+        f"expected exactly the 4 compiled quarters, got {len(rows)} rows"
+    )
+    # A PROXY for the assertion above, not the invariant: an all-zero row is not
+    # forbidden in itself - a genuinely compiled quarter where all five sensors moved
+    # by exactly 0.0 is legitimate and must upload as zeros. It bites here only because
+    # this fixture's compiled quarters carry non-zero values.
+    zeroed = [
+        r["ts"] for r in rows
+        if all(v == 0.0 for k, v in r.items() if k not in ("ts", "external_control"))
+    ]
+    assert zeroed == [], f"all-zero rows would zero real energy: {zeroed}"
+    # The half that must NOT regress: the compiled quarters are still flagged.
+    assert all(r["external_control"] is True for r in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["backfill", "heal", "incremental"])
+async def test_fetch_modes_skip_recorder_when_no_entity_selected(
+    hass: HomeAssistant, mock_entry, mode
+):
+    """No external_control_entity configured (the fleet default) -> the recorder's
+    states table must NEVER be queried (an unconditional extra DB read per cycle for
+    every uninterested user would be a real regression), and every uploaded row keeps
+    external_control False - byte-identical to the pre-feature output."""
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    assert coordinator._external_entity is None
+
+    battery_ts = {"hour": NOW - timedelta(days=10), "5minute": NOW - timedelta(minutes=30)}
+
+    async def mock_fetch(h, ids, start, end, period):
+        row = {"start": battery_ts[period].timestamp(), "change": 0.4}
+        return {"sensor.batt_in": [row], "sensor.batt_out": [], "sensor.grid_in": [],
+                "sensor.grid_out": [], "sensor.solar": []}
+
+    fetch_states = AsyncMock(side_effect=AssertionError("must not query recorder states"))
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+        patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
+    ):
+        rows = await _run_fetch_mode(coordinator, mode)
+
+    fetch_states.assert_not_awaited()
+    assert rows, f"{mode}: expected at least one uploaded row from the battery data"
+    assert all(row["external_control"] is False for row in rows)

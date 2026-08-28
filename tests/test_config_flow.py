@@ -28,6 +28,7 @@ from custom_components.wolta.const import (
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -231,6 +232,156 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.CREATE_ENTRY
     data = result["data"]
     assert CONF_SOLAR not in data or not data.get(CONF_SOLAR)
+
+
+# ---------------------------------------------------------------------------
+# External control (spec 2026-08-26): optional binary_sensor picker, client-local
+# (same nature as CONF_INVERT_BATTERY - an upload transformation, never PATCHed to
+# the server, so it stays out of _PROFILE_SYNC_KEYS).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_external_control_entity(hass: HomeAssistant) -> None:
+    """Setup flow accepts a selected binary sensor and stores it in entry.data."""
+    mock_client = _mock_client()
+    entities_with_external = {
+        **STEP_ENTITIES_DATA,
+        CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=entities_with_external
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_EXTERNAL_CONTROL] == "binary_sensor.grid_rewards_active"
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_external_control_entity(hass: HomeAssistant) -> None:
+    """Flow works unchanged when the field is left empty - key absent, so the
+    coordinator sees None (not an empty string)."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.wolta.config_flow.async_get_clientsession",
+        ),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    assert CONF_EXTERNAL_CONTROL not in data or not data.get(CONF_EXTERNAL_CONTROL)
+
+
+@pytest.mark.asyncio
+async def test_entities_step_clearing_external_control_after_error_sticks(
+    hass: HomeAssistant,
+) -> None:
+    """F3: a cleared single-value picker must stay cleared across a re-render.
+
+    The setup step re-shows the form with `defaults = user_input` after a validation
+    error. Declared with `default=`, voluptuous re-fills the key whenever the frontend
+    omits it - and omitting the key is exactly what clearing an optional field does -
+    so the entry would be created with a sensor the user explicitly removed. The
+    multi-select stream fields are immune (multiple=True submits [] instead of
+    omitting), which is why only this field needs `suggested_value`.
+    """
+    mock_client = _mock_client()
+    first_try = {
+        **STEP_ENTITIES_DATA,
+        CONF_GRID_IN: [],  # invalid -> forces the re-render
+        CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
+    }
+    # The frontend OMITS a cleared optional key rather than sending an empty value.
+    second_try = dict(STEP_ENTITIES_DATA)
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=first_try
+        )
+        assert result["step_id"] == "entities"
+        assert result["errors"].get(CONF_GRID_IN) == "required_sensor"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=second_try
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert not result["data"].get(CONF_EXTERNAL_CONTROL), (
+        "the cleared external-control sensor was silently restored"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2536,6 +2687,61 @@ async def test_reconfigure_requires_mandatory_streams(hass: HomeAssistant) -> No
         )
     assert result["type"] == FlowResultType.FORM
     assert result["errors"].get(CONF_BATT_IN) == "required_sensor"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_updates_external_control_entity(hass: HomeAssistant) -> None:
+    """Reconfigure stores a newly picked external-control sensor."""
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: ["sensor.battery_charge"],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+                CONF_SOLAR: ["sensor.solar"],
+                CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
+            },
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_EXTERNAL_CONTROL] == "binary_sensor.grid_rewards_active"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_clears_external_control_entity_when_left_empty(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing a previously-set sensor selection on reconfigure normalises back to
+    absence. The field uses `suggested_value` rather than `default=` (see the
+    comment in config_flow.py) precisely so that omitting the key - what the real
+    frontend does when an optional single-entity picker is cleared - is not
+    re-filled with the stale stored value by voluptuous."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_EXTERNAL_CONTROL: "binary_sensor.old_grid_rewards"}
+    )
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: ["sensor.battery_charge"],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+                CONF_SOLAR: ["sensor.solar"],
+            },
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert not updated.data.get(CONF_EXTERNAL_CONTROL)
 
 
 # ---------------------------------------------------------------------------
