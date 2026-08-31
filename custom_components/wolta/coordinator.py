@@ -99,9 +99,16 @@ _ISSUE_EFFICIENCY = "measured_efficiency"
 # Configure and no effect at all - indistinguishable from the feature working.
 _ISSUE_FLEX_NO_STATS = "flex_compensation_no_statistics"
 
-# Consecutive cycles with nothing read before the repair is raised. At the 6h slow
-# poll that is roughly a day - far past the few minutes a freshly added sensor needs
-# for its first statistics compile, so a correct setup never sees it.
+# Consecutive BAD cycles before the repair is raised - a cycle that read nothing, or
+# one whose PATCH the server rejected. At the 6h slow poll that is roughly a day -
+# far past the few minutes a freshly added sensor needs for its first statistics
+# compile, so a correct setup never sees it.
+#
+# The rejection leg exists because the compensation PATCH is a PERMANENT loop when it
+# fails: nothing is bookmarked, so the next cycle reads the same months and re-sends
+# the identical payload. A payload the server refuses is therefore refused forever,
+# and the empty-read leg cannot notice - there the mapping is non-empty, which is the
+# whole problem. Without this the sync dies silently and stays dead.
 _FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
@@ -559,24 +566,39 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         swallowed here too and left to results(), which owns the reauth path - same
         division of labour as the profile side-poll.
 
+        That self-healing is also the failure mode. Re-sending an identical payload is
+        recovery when the server was momentarily unavailable, and an infinite loop when
+        the server REFUSED the payload: the rejection then repeats forever, inside a
+        warning nobody reads. So a run of refusals raises the same repair an empty read
+        does (_note_flex_bad_cycle). The empty-read leg cannot cover that case - there
+        the mapping is non-empty.
+
         Reading NOTHING is a different outcome from reading a zero and is reported as
-        such: after _FLEX_EMPTY_CYCLES_BEFORE_ISSUE such cycles a repair goes up, and
-        it comes straight back down as soon as a figure arrives or the picker is
-        cleared. Silent no-op was the alternative, and it is indistinguishable from
-        the feature working.
+        such: after _FLEX_EMPTY_CYCLES_BEFORE_ISSUE bad cycles a repair goes up, and it
+        comes straight back down as soon as a cycle goes through or the picker is
+        cleared. Silent no-op was the alternative, and it is indistinguishable from the
+        feature working.
         """
         if not self._flex_entity:
             # Clearing the picker is a deliberate "stop doing this", not an
             # unresolved problem: the warning must not outlive the setting.
-            await self._clear_flex_empty_streak()
+            await self._clear_flex_bad_streak()
             return
         try:
             amounts = await stats.monthly_amounts(self.hass, self._flex_entity)
-            if not amounts:
-                # Nothing to claim - and nothing read is now a DISTINCT state from
-                # "the month was zero" (see monthly_amounts), so it can be reported.
-                await self._note_flex_empty_read()
-                return
+        except Exception:  # pylint: disable=broad-except
+            # A recorder read that blew up says nothing about the sensor - leave the
+            # streak where it is and try again next cycle.
+            _LOGGER.warning(
+                "Flex compensation read failed; retrying next cycle", exc_info=True
+            )
+            return
+        if not amounts:
+            # Nothing to claim - and nothing read is now a DISTINCT state from
+            # "the month was zero" (see monthly_amounts), so it can be reported.
+            await self._note_flex_bad_cycle()
+            return
+        try:
             await self.client.patch_profile(
                 self.token,
                 flex_compensation=[
@@ -584,15 +606,31 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     for month, amount in sorted(amounts.items())
                 ],
             )
+        except (WoltaAuthError, WoltaRateLimitError):
+            # Neither says anything about the compensation payload: reauth belongs to
+            # results() and a 429 clears itself. Warn and move on.
+            _LOGGER.warning(
+                "Flex compensation update failed; retrying next cycle", exc_info=True
+            )
+        except WoltaApiError:
+            # The server looked at THIS payload and refused it. An identical payload
+            # next cycle earns an identical refusal, forever - count it.
+            _LOGGER.warning(
+                "Flex compensation update rejected; retrying next cycle", exc_info=True
+            )
+            await self._note_flex_bad_cycle()
         except Exception:  # pylint: disable=broad-except
             _LOGGER.warning(
                 "Flex compensation update failed; retrying next cycle", exc_info=True
             )
         else:
-            await self._clear_flex_empty_streak()
+            await self._clear_flex_bad_streak()
 
-    async def _note_flex_empty_read(self) -> None:
-        """Count a cycle that read nothing; raise the repair once the streak holds.
+    async def _note_flex_bad_cycle(self) -> None:
+        """Count a cycle that got nothing through; raise the repair once the streak
+        holds. The two causes - nothing read, and a payload the server refused - share
+        one counter and one issue: they are mutually exclusive within a cycle and land
+        the user in the same place, no compensation reaching Wolta.
 
         Thresholded rather than immediate for the same reason _track_failure is: a
         sensor added seconds ago has no compiled statistics yet, and a repair that
@@ -613,7 +651,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             translation_placeholders={"entity_id": self._flex_entity or ""},
         )
 
-    async def _clear_flex_empty_streak(self) -> None:
+    async def _clear_flex_bad_streak(self) -> None:
         """Drop the streak and the repair. No-op unless a streak was recorded, so
         the fleet default (no sensor picked) costs nothing per cycle."""
         if self._state.pop("flex_empty_cycles", None) is None:

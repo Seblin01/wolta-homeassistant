@@ -674,14 +674,19 @@ class TestMonthlyAmounts:
         assert result == {"2026-07": 42.0}
 
     @pytest.mark.asyncio
-    async def test_missing_change_is_treated_as_zero_not_dropped(
+    async def test_null_change_is_omitted_not_reported_as_zero(
         self, monkeypatch, stockholm_tz
     ):
-        """HA emits change=None for a gap in a series it CAN measure - the key is
-        present, its value is null. That month exists and is reported as 0.0.
+        """``change: None`` is NOT a zero. The recorder sets it to None for exactly
+        the rows whose period ``sum`` is NULL (``_augment_result_with_change``,
+        HA 2026.8 recorder/statistics.py) - i.e. it could not compute that month's
+        delta at all.
 
-        Not to be confused with the rarer, more damaging case above, where the key
-        is missing entirely because the sensor carries no sum statistics at all."""
+        Reporting it as 0.0 would send an invented measurement upstream: the API's
+        coverage arithmetic counts a 0-kr month's DAYS, so one such month dilutes
+        ``compensation_period_sek`` and inflates ``compensation_coverage`` at the
+        same time, and the result is rendered as "read from your integration".
+        The month must be left unmentioned so the server keeps whatever it had."""
         from unittest.mock import MagicMock
 
         from custom_components.wolta import stats as stats_mod
@@ -698,7 +703,92 @@ class TestMonthlyAmounts:
             MagicMock(), "sensor.flex_compensation",
             now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
         )
-        assert result == {"2026-06": 0.0, "2026-07": 12.0}
+        assert result == {"2026-07": 12.0}, (
+            f"a null 'change' is an unreadable month, not 0 kr, got {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_negative_month_is_dropped_not_sent(
+        self, monkeypatch, stockholm_tz
+    ):
+        """A negative month must never reach the wire, or the sync dies for good.
+
+        ``state_class: total`` is allowed to decrease - a settlement correction, an
+        FCR-N down-regulation debit, a recomputed template value. The server
+        validates ``amount_sek >= 0`` and 422s the WHOLE patch, not the offending
+        month; the coordinator swallows that into a warning and re-sends the
+        identical payload next cycle, forever. One negative month would therefore
+        take every OTHER month's compensation with it, silently and permanently.
+
+        The healthy months in the same read must still go through - dropping the
+        whole mapping would be the same outage by a shorter route."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 5, 31, 22, tzinfo=timezone.utc).timestamp(),
+             "change": -120.0},
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 812.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 812.0}, (
+            f"a negative month 422s the whole patch forever, got {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_negativity_is_judged_on_the_month_total(
+        self, monkeypatch, stockholm_tz
+    ):
+        """Rows that cancel out WITHIN a month are not a negative month. The gate
+        runs on the summed total, after the per-month accumulation - judging it per
+        row would throw away a perfectly sendable month."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": -50.0},
+            {"start": datetime(2026, 7, 10, 12, tzinfo=timezone.utc).timestamp(),
+             "change": 200.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 150.0}
+
+    @pytest.mark.asyncio
+    async def test_a_zero_month_is_still_reported(
+        self, monkeypatch, stockholm_tz
+    ):
+        """The negative gate is ``>= 0``, not ``> 0``. A measured zero is a real
+        reading - a month the aggregator settled at nothing - and the server accepts
+        it. Only a NEGATIVE total is unsendable."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 0.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 0.0}
 
     @pytest.mark.asyncio
     async def test_unknown_entity_returns_empty_mapping(

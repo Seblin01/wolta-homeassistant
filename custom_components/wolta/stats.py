@@ -461,9 +461,11 @@ async def monthly_amounts(
                      by tests.
 
     Returns:
-        ``{"YYYY-MM": amount}`` for every month the recorder had a row for. Months
-        with no row are ABSENT rather than zero - absence means "we have nothing to
-        say about this month", which the server honours by leaving it untouched.
+        ``{"YYYY-MM": amount}`` for every month the recorder could measure a
+        NON-NEGATIVE total for. Months with no row, with an unreadable total, or
+        with a negative total are ABSENT rather than zero - absence means "we have
+        nothing to say about this month", which the server honours by leaving it
+        untouched.
     """
     from homeassistant.util import dt as dt_util  # noqa: PLC0415
 
@@ -478,23 +480,38 @@ async def monthly_amounts(
 
     out: dict[str, float] = {}
     for row in rows.get(entity_id, []):
-        # A row with NO "change" key at all is not a zero - it is the absence of a
-        # measurement, and the two must never be merged (C1). The recorder omits the
-        # key entirely for a sensor that carries no SUM statistics: it discards the
-        # sum column up front, runs the query with an empty `types`, and the rows
-        # come back as bare {"start", "end"} with nothing to augment. Folding those
-        # into 0.0 would hand the server a full mapping of invented zeroes, and
-        # Wolta would show "0 kr compensation" against a real foregone-spot cost -
-        # a number nobody measured, making flex look like a pure loss.
-        # `change: None` is the OTHER case (key present, gap in a measurable series)
-        # and is genuinely 0.0 for that month.
-        if "change" not in row:
+        # An UNREADABLE change is not a zero - it is the absence of a measurement,
+        # and the two must never be merged (C1). Both shapes mean "unreadable":
+        #   * key MISSING: the sensor carries no SUM statistics at all, so the
+        #     recorder discards the sum column up front, runs the query with an
+        #     empty `types`, and the rows come back as bare {"start", "end"} with
+        #     nothing to augment.
+        #   * key present but None: `_augment_result_with_change` sets it to None
+        #     for exactly the rows whose period `sum` is NULL (HA 2026.8
+        #     recorder/statistics.py) - the recorder could NOT compute that
+        #     month's delta. That is a gap, not a settled zero.
+        # Folding either into 0.0 would hand the server invented zeroes, and Wolta
+        # would show "0 kr compensation" against a real foregone-spot cost - a
+        # number nobody measured, making flex look like a pure loss. Worse, the
+        # coverage arithmetic in the API counts a 0-kr month's DAYS, so one
+        # invented zero dilutes compensation_period_sek and inflates
+        # compensation_coverage at the same time.
+        if row.get("change") is None:
             continue
         # row["start"] is unix-epoch (same reading as aggregate_5min_to_15min)
         local = dt_util.as_local(datetime.fromtimestamp(row["start"], tz=timezone.utc))
         key = f"{local.year:04d}-{local.month:02d}"
-        out[key] = out.get(key, 0.0) + (row["change"] or 0.0)
-    return out
+        out[key] = out.get(key, 0.0) + float(row["change"])
+
+    # A NEGATIVE month is dropped, and dropping it is what keeps the sync alive.
+    # `state_class: total` is allowed to decrease - a settlement correction, an
+    # FCR-N down-regulation debit or a recomputed template value all produce one -
+    # but the server validates amount_sek >= 0 and 422s the WHOLE patch, not the
+    # offending month. The coordinator swallows that into a warning and re-sends the
+    # identical payload next cycle, so a single negative month would kill every
+    # later month's sync silently and permanently. Judged on the month TOTAL, after
+    # summing: rows that cancel out within a month are not a negative month.
+    return {month: amount for month, amount in out.items() if amount >= 0}
 
 
 async def async_fetch_states(

@@ -2557,3 +2557,120 @@ async def test_flex_repair_id_is_per_entry(hass: HomeAssistant, mock_entry):
     coordinator = WoltaCoordinator(hass, mock_entry)
     assert coordinator._flex_issue_id == f"{_ISSUE_FLEX_NO_STATS}_{mock_entry.entry_id}"
     assert coordinator._flex_issue_id != _ISSUE_FLEX_NO_STATS
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_patch_raises_the_repair_after_the_threshold(
+    hass: HomeAssistant, mock_entry
+):
+    """A payload the server REFUSES is refused forever, and nothing else notices.
+
+    Nothing is bookmarked on this path, so the next cycle reads the same months and
+    sends the byte-identical payload - a permanent loop inside a warning nobody
+    reads. The empty-read leg cannot cover it: there the mapping is non-empty, which
+    is exactly the problem. Without this leg the compensation sync dies silently and
+    stays dead.
+    """
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    assert _FLEX_EMPTY_CYCLES_BEFORE_ISSUE == 3
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def _reject(token, **fields):
+        if "flex_compensation" in fields:
+            raise WoltaApiError("amount_sek maste vara >= 0", status=422)
+        return {}
+
+    client.patch_profile = AsyncMock(side_effect=_reject)
+
+    # Two rejected cycles - one short of the threshold: still quiet.
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 5.0}] * 2, cycles=2,
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id
+    ) is None, "the repair fired early - it will cry wolf on one flaky cycle"
+
+    # The third one trips it.
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 5.0}] * 3, cycles=3,
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._flex_issue_id)
+    assert issue is not None, (
+        "a PATCH the server keeps refusing must be surfaced - it never self-heals"
+    )
+    assert issue.translation_key == "flex_compensation_no_statistics"
+
+
+@pytest.mark.asyncio
+async def test_rejection_repair_clears_once_a_patch_goes_through(
+    hass: HomeAssistant, mock_entry
+):
+    """Same two-way contract as the empty-read leg: the warning must not outlive the
+    condition. Shares one counter and one issue with that leg because the two are
+    mutually exclusive within a cycle."""
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    calls = {"n": 0}
+
+    async def _reject_then_accept(token, **fields):
+        if "flex_compensation" not in fields:
+            return {}
+        calls["n"] += 1
+        if calls["n"] <= _FLEX_EMPTY_CYCLES_BEFORE_ISSUE:
+            raise WoltaApiError("nope", status=422)
+        return {}
+
+    client.patch_profile = AsyncMock(side_effect=_reject_then_accept)
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 5.0}] * (_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 1),
+        cycles=_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 1,
+    )
+
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_auth_and_rate_limit_do_not_count_toward_the_flex_repair(
+    hass: HomeAssistant, mock_entry
+):
+    """Neither says anything about the compensation payload. A 404 belongs to the
+    reauth path results() owns and a 429 clears itself, so blaming the user's sensor
+    for either would be a false diagnosis on a warning they cannot act on."""
+    from custom_components.wolta.api import WoltaAuthError
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def _auth_fail(token, **fields):
+        if "flex_compensation" in fields:
+            raise WoltaAuthError("token purged", status=404)
+        return {}
+
+    client.patch_profile = AsyncMock(side_effect=_auth_fail)
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 5.0}] * (_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 2),
+        cycles=_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 2,
+    )
+
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id
+    ) is None, "an auth failure must not be reported as a broken compensation sensor"
