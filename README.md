@@ -161,13 +161,40 @@ Excluding the flagged intervals keeps the grade fair, but it says nothing about 
 
 **The picker.** The same two places (setup flow's entity step and **Reconfigure**) offer an optional **Flex compensation, monthly** field. Point it at a sensor holding the compensation in SEK — CheckWatt, Tibber Grid Rewards and similar services usually expose one, and a [template sensor](https://www.home-assistant.io/integrations/template/) works just as well. Wolta reads the monthly total from long-term statistics rather than from the current state, so a sensor that resets at the start of each month is handled correctly.
 
+**Which sensor to pick.** Two integrations already expose something suitable:
+
+- **CheckWatt** — [`faanskit/ha-checkwatt`](https://github.com/faanskit/ha-checkwatt) publishes *Daily Net Income* and *Annual Net Income* (net after CheckWatt's and the installer's shares, in SEK). Either works: Wolta reads the *increase over the month*, so a daily sensor that resets every day and a yearly one that resets every year both add up to the same monthly figure.
+- **Tibber Grid Rewards** — the reward for the current month comes from Tibber's app API; [JohNan's Tibber integration](https://github.com/JohNan/home-assistant-tibber-data) exposes it as a month-to-date amount, which is exactly the figure Wolta wants.
+
+Whichever you pick, open **Developer tools → Statistics** and confirm the entity is listed there with a *sum* — that is the check that matters, not what the integration is called. A sensor missing from that list, or listed without a sum, is the `state_class` problem below.
+
 **The sensor must have `state_class: total` or `total_increasing`.** "Has long-term statistics" is not enough: a `state_class: measurement` sensor gets long-term statistics too, but only min/mean/max — there is no monthly sum to read, and Wolta would have nothing to send. If the sensor you pick yields nothing for about a day, a repair notice appears telling you so; it disappears on its own once a figure comes through or you clear the field. Wolta never invents a zero for a month it could not measure — showing "0 kr compensation" beside a real foregone-spot cost would make flex participation look like a pure loss on a number nobody measured.
 
 Once a cycle the integration reads the current month and the previous one and sends those two figures on. Last month is re-sent every cycle on purpose: aggregators often settle a month days after it ended, and an estimate that was frozen on first reading would stay wrong.
 
+**Only the current and previous month are read.** Home Assistant keeps long-term statistics indefinitely — they survive `purge_keep_days`, which only trims state history and the short-term statistics — but they start the day your compensation sensor started recording them. Wolta therefore reads two months and no further back: everything before that (and anything from before you installed the sensor) has to be entered by hand in the compensation card on wolta.se, where it is kept as a `manual` amount.
+
 **It never touches what you entered yourself.** Amounts you type into the compensation card on wolta.se are kept separately from the ones the sensor reports, and the integration only ever writes its own. Clearing the picker stops the reading; it does not delete the months already recorded — remove those on wolta.se if you want them gone.
 
 Leaving the field empty — the default — changes nothing: no extra sensor is read and nothing is sent.
+
+### What the figures do, and what they never do
+
+**The amounts never move your payback time or IRR.** They are shown next to the foregone spot value so you can see both halves of the flex trade, and that is all they do. Wolta's economy figures are deliberately computed without them: the compensation is paid outside the electricity bill, on a contract you can leave at any time, and reported per plant by the aggregator rather than measured by Wolta. Folding it into the return on the battery would make the investment case depend on a number nobody here can verify. The optimisation grade doesn't use them either — that side of the trade is handled by neutralising the flagged intervals, described above.
+
+**On the grade sensor: the `flex_compensation` attribute (v0.34.0+).** When the backend has something to say about compensation, `sensor.wolta_optimisation_grade` carries it as a structured attribute so you can build your own cards and automations on the figures:
+
+| Key | Meaning |
+| --- | --- |
+| `compensation_period_sek` | What the recorded amounts add up to over the grade's period. `null` when no amounts overlap it. |
+| `compensation_coverage` | The share of the period those amounts actually cover — one entered CheckWatt month against a three-year window is `0.03`, not a small payout. |
+| `estimate_period_sek` | `{low, high}`: what participation would plausibly have paid over the same period, from the aggregator's capacity prices and your bid size. A band, not a prediction. |
+| `estimate_coverage` | The share of the period the estimate could be computed for (missing price hours lower it). |
+| `source` | `manual` (you entered it on wolta.se), `sensor` (read from the picker above) or `estimate` (nothing recorded — the band is all there is). |
+| `aggregator` | The flex provider the estimate assumes. |
+| `bid_kw` | The bid size used, either yours or one derived from the battery's nameplate figures. |
+
+**Read the two coverage ratios before comparing the two amounts.** They have different bases on purpose: the estimate spans the whole grade window, the recorded amount only the months that exist. Putting a one-month payout next to a three-year estimate as if they were the same quantity is the mistake the ratios are there to prevent. The whole block is absent — not `null` — when there is nothing to say: no amounts, no aggregator, no bid, or a grade computed before this feature shipped.
 
 ## Troubleshooting
 

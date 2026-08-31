@@ -1115,3 +1115,81 @@ def test_optimeringsbetyg_omits_external_control_when_absent():
     # native_value/available must also not raise for this same payload
     assert s.native_value is not None
     assert s.available is True
+
+
+# ---------------------------------------------------------------------------
+# flex_compensation on optimeringsbetyg (spec 2026-08-28): the backend's ADDITIVE
+# block (results.betyg.flex_compensation) - what the flex participation paid,
+# measured or estimated, next to what it cost in foregone spot value. Same
+# absent-vs-None contract as external_control above, and the same key-safety
+# rule: the two amounts carry DIFFERENT bases (the estimate spans the whole grade
+# window, the measured amount only the months actually entered), so the coverage
+# ratios travel with them and the block must be handed over whole. A field-wise
+# rebuild here would drop whatever the backend adds next AND re-open the
+# annual["factor"] KeyError (<= v0.27.0) on an older backend or cached payload.
+# ---------------------------------------------------------------------------
+
+
+def test_optimeringsbetyg_exposes_flex_compensation():
+    """When betyg carries the flex_compensation block, the grade sensor exposes it
+    verbatim - nested estimate dict and all - as a structured attribute."""
+    block = {
+        "compensation_period_sek": 812.0,
+        "compensation_coverage": 0.08,
+        "estimate_period_sek": {"low": 4200.0, "high": 9100.0},
+        "estimate_coverage": 0.97,
+        "source": "manual",
+        "aggregator": "checkwatt",
+        "bid_kw": 12.5,
+    }
+    results = {
+        **RESULTS_FULL,
+        "betyg": {**RESULTS_FULL["betyg"], "flex_compensation": block},
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs.get("flex_compensation") == {
+        "compensation_period_sek": 812.0,
+        "compensation_coverage": 0.08,
+        "estimate_period_sek": {"low": 4200.0, "high": 9100.0},
+        "estimate_coverage": 0.97,
+        "source": "manual",
+        "aggregator": "checkwatt",
+        "bid_kw": 12.5,
+    }
+
+
+def test_optimeringsbetyg_passes_flex_compensation_through_unchanged():
+    """Verbatim means verbatim: a block whose shape we did not anticipate - an
+    estimate-only plant (no entered months, so no measured amount), plus a key this
+    client has never heard of - must arrive with nothing dropped, nothing invented
+    and no None-filled placeholders. This is what a field-wise `.get()` rebuild of
+    the block would silently fail, while the test above would still pass it."""
+    block = {
+        "estimate_period_sek": {"low": 1500.0, "high": 3300.0},
+        "estimate_coverage": 1.0,
+        "source": "estimate",
+        "aggregator": "tibber",
+        "bid_kw": 8.0,
+        "future_backend_field": "unknown-to-this-client",
+    }
+    results = {
+        **RESULTS_FULL,
+        "betyg": {**RESULTS_FULL["betyg"], "flex_compensation": block},
+    }
+    s = _sensor("optimeringsbetyg", results)
+    attrs = s.extra_state_attributes
+    assert attrs["flex_compensation"] == block
+    assert "compensation_period_sek" not in attrs["flex_compensation"]
+
+
+def test_optimeringsbetyg_omits_flex_compensation_when_absent():
+    """No compensation entered, no aggregator, no estimable bid - or any payload
+    cached before this backend deploy -> the block is entirely absent, not None,
+    and the sensor must render without error (no KeyError on an unguarded lookup)."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    attrs = s.extra_state_attributes
+    assert "flex_compensation" not in attrs
+    # native_value/available must also not raise for this same payload
+    assert s.native_value is not None
+    assert s.available is True
