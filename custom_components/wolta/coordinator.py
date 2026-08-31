@@ -92,6 +92,17 @@ _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
 _ISSUE_POWER = "measured_power"
 _ISSUE_EFFICIENCY = "measured_efficiency"
+# A picked compensation sensor that never yields a figure (spec 2026-08-28). The
+# usual cause is the wrong state_class: only `total`/`total_increasing` produce the
+# SUM statistics monthly_amounts reads, while `measurement` yields min/mean/max and
+# nothing this feature can use. Without this the user sees a filled-in field in
+# Configure and no effect at all - indistinguishable from the feature working.
+_ISSUE_FLEX_NO_STATS = "flex_compensation_no_statistics"
+
+# Consecutive cycles with nothing read before the repair is raised. At the 6h slow
+# poll that is roughly a day - far past the few minutes a freshly added sensor needs
+# for its first statistics compile, so a correct setup never sees it.
+_FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
 # from the meter, so we only propose adopting when we're confident the entered value is wrong).
@@ -182,6 +193,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # _external_entity this is NOT an upload transformation - it touches no
         # energy row, and therefore stays out of the entity fingerprint (B8).
         self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
+        # Per-entry issue id (the form _set_measured_issue already uses), NOT the
+        # shared id the two older non-fixable issues carry: with two Wolta entries a
+        # shared id would let a healthy plant delete a broken plant's warning - a
+        # false all-clear on the exact condition this repair exists to report.
+        self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -382,7 +398,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # Before _maybe_recompute: with a fresh compensation figure already on
             # the profile when the recompute is triggered, it does not have to wait
             # a whole cycle to show up.
-            await self._push_flex_compensation()
+            #
+            # Skipped during fast-poll for the same reason as the profile GET above,
+            # only more so: this is a WRITE plus a recorder month query, and the
+            # figure behind it is settled by an aggregator days after the month ends
+            # - there is nothing here that moves on a 60-second timescale. put_data
+            # is gated by `if rows:`, so ungated this would be the one call hitting
+            # the server every minute for as long as a server job runs.
+            if self.update_interval != _FAST_POLL:
+                await self._push_flex_compensation()
 
             await self._maybe_recompute(now)
 
@@ -534,13 +558,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         next cycle reads the same months again and re-sends them. Auth errors are
         swallowed here too and left to results(), which owns the reauth path - same
         division of labour as the profile side-poll.
+
+        Reading NOTHING is a different outcome from reading a zero and is reported as
+        such: after _FLEX_EMPTY_CYCLES_BEFORE_ISSUE such cycles a repair goes up, and
+        it comes straight back down as soon as a figure arrives or the picker is
+        cleared. Silent no-op was the alternative, and it is indistinguishable from
+        the feature working.
         """
         if not self._flex_entity:
+            # Clearing the picker is a deliberate "stop doing this", not an
+            # unresolved problem: the warning must not outlive the setting.
+            await self._clear_flex_empty_streak()
             return
         try:
             amounts = await stats.monthly_amounts(self.hass, self._flex_entity)
             if not amounts:
-                return  # nothing read -> nothing to claim
+                # Nothing to claim - and nothing read is now a DISTINCT state from
+                # "the month was zero" (see monthly_amounts), so it can be reported.
+                await self._note_flex_empty_read()
+                return
             await self.client.patch_profile(
                 self.token,
                 flex_compensation=[
@@ -552,6 +588,38 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.warning(
                 "Flex compensation update failed; retrying next cycle", exc_info=True
             )
+        else:
+            await self._clear_flex_empty_streak()
+
+    async def _note_flex_empty_read(self) -> None:
+        """Count a cycle that read nothing; raise the repair once the streak holds.
+
+        Thresholded rather than immediate for the same reason _track_failure is: a
+        sensor added seconds ago has no compiled statistics yet, and a repair that
+        fires on every fresh setup teaches people to dismiss it.
+        """
+        streak = int(self._state.get("flex_empty_cycles", 0)) + 1
+        self._state["flex_empty_cycles"] = streak
+        await self._store.async_save(self._state)
+        if streak < _FLEX_EMPTY_CYCLES_BEFORE_ISSUE:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._flex_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_FLEX_NO_STATS,
+            translation_placeholders={"entity_id": self._flex_entity or ""},
+        )
+
+    async def _clear_flex_empty_streak(self) -> None:
+        """Drop the streak and the repair. No-op unless a streak was recorded, so
+        the fleet default (no sensor picked) costs nothing per cycle."""
+        if self._state.pop("flex_empty_cycles", None) is None:
+            return
+        await self._store.async_save(self._state)
+        ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

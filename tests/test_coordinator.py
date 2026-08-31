@@ -2070,8 +2070,13 @@ def _fingerprint(**extra) -> str:
     return _json.dumps(base, sort_keys=True)
 
 
-async def _run_cycles(hass, mock_entry, client, monthly_side_effect, cycles: int = 1):
+async def _run_cycles(
+    hass, mock_entry, client, monthly_side_effect, cycles: int = 1,
+    fast_poll: bool = False,
+):
     """Run N incremental cycles with a patched monthly_amounts. Returns the coordinator."""
+    from custom_components.wolta.coordinator import _FAST_POLL
+
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                              "sensor.grid_out", "sensor.solar")}
 
@@ -2090,6 +2095,10 @@ async def _run_cycles(hass, mock_entry, client, monthly_side_effect, cycles: int
                          "applied_invert": False,
                          "applied_entities": _fingerprint()})
         for _ in range(cycles):
+            if fast_poll:
+                # _build_data resets the interval at the end of every cycle, so a
+                # fast-poll run has to be re-asserted before each one.
+                coordinator.update_interval = _FAST_POLL
             await coordinator._async_update_data()
     coordinator._monthly_mock = monthly
     return coordinator
@@ -2173,7 +2182,7 @@ async def test_flex_compensation_reads_the_picked_entity_on_the_default_window(
     import inspect
 
     assert (
-        inspect.signature(stats_mod.monthly_amounts).parameters["months_back"].default
+        inspect.signature(stats_mod.monthly_amounts).parameters["month_count"].default
         == 2
     )
 
@@ -2408,3 +2417,143 @@ async def test_view_only_entry_never_patches_flex_compensation(
 
     monthly.assert_not_awaited()
     assert _flex_payloads(client) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_compensation_skipped_during_fast_poll(
+    hass: HomeAssistant, mock_entry
+):
+    """I1. Fast-poll is 60 s while a server job runs. The profile GET is already
+    skipped there because nothing profile-related moves on that timescale - and this
+    is a WRITE plus a recorder month query, on a figure an aggregator settles days
+    after the month ends. put_data is gated by "if rows:", so without this gate the
+    compensation PATCH would be the only thing hitting the server every minute."""
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 812.0}],
+        fast_poll=True,
+    )
+
+    coordinator._monthly_mock.assert_not_awaited()
+    assert _flex_payloads(client) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_reads_raise_a_repair_after_the_threshold(
+    hass: HomeAssistant, mock_entry
+):
+    """I2. A picked sensor that yields nothing must not fail silently.
+
+    Without this the user sees a filled-in field in Configure and no effect
+    whatsoever - indistinguishable from the feature working. The threshold keeps it
+    from crying wolf on the ordinary case of statistics that have not compiled yet.
+    """
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    # Pinned to a LITERAL on purpose. Deriving the cycle counts below from the
+    # constant would make this test move with it: lowering the threshold to 1 would
+    # turn the "quiet" run into zero cycles and the assertion would pass vacuously.
+    # Changing the threshold should mean changing this line, deliberately.
+    assert _FLEX_EMPTY_CYCLES_BEFORE_ISSUE == 3
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    # Two empty cycles - one short of the threshold: still quiet.
+    coordinator = await _run_cycles(
+        hass, mock_entry, client, monthly_side_effect=[{}, {}], cycles=2,
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id
+    ) is None, "the repair fired early - it will cry wolf on every fresh setup"
+
+    # The third one trips it.
+    coordinator = await _run_cycles(
+        hass, mock_entry, client, monthly_side_effect=[{}, {}, {}], cycles=3,
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._flex_issue_id)
+    assert issue is not None, "a sensor that never yields a figure must be surfaced"
+    assert issue.translation_key == "flex_compensation_no_statistics"
+    assert issue.is_fixable is False
+
+
+@pytest.mark.asyncio
+async def test_repair_cleared_as_soon_as_an_amount_is_read(
+    hass: HomeAssistant, mock_entry
+):
+    """The user fixes their sensor -> the warning clears itself."""
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{}] * _FLEX_EMPTY_CYCLES_BEFORE_ISSUE + [{"2025-06": 5.0}],
+        cycles=_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 1,
+    )
+
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id) is None
+    assert _flex_payloads(client) == [
+        [{"month": "2025-06", "amount_sek": 5.0, "source": "sensor"}]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repair_cleared_when_the_picker_is_emptied(
+    hass: HomeAssistant, mock_entry
+):
+    """Clearing the field is a deliberate "stop doing this", not an unresolved
+    problem - the warning must not outlive the setting that caused it."""
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{}] * _FLEX_EMPTY_CYCLES_BEFORE_ISSUE,
+        cycles=_FLEX_EMPTY_CYCLES_BEFORE_ISSUE,
+    )
+    issue_id = coordinator._flex_issue_id
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    # The user clears the picker; the entry reloads and the counter survives in Store.
+    carried_state = dict(coordinator._state)
+    mock_entry.data = dict(ENTRY_DATA)
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client, store_state=carried_state)
+        await coordinator._async_update_data()
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_flex_repair_id_is_per_entry(hass: HomeAssistant, mock_entry):
+    """Two Wolta entries must not clear each other's warning. The non-fixable issues
+    that predate this one (upload_failure, profile_full) share a single id across
+    entries; the fixable ones already use the per-entry form, and so does this."""
+    from custom_components.wolta.coordinator import _ISSUE_FLEX_NO_STATS, WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    assert coordinator._flex_issue_id == f"{_ISSUE_FLEX_NO_STATS}_{mock_entry.entry_id}"
+    assert coordinator._flex_issue_id != _ISSUE_FLEX_NO_STATS

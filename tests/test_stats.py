@@ -539,7 +539,7 @@ class TestMonthlyAmounts:
         self._patch_fetch(monkeypatch, rows, captured)
 
         result = await stats_mod.monthly_amounts(
-            MagicMock(), "sensor.flex_compensation", months_back=3,
+            MagicMock(), "sensor.flex_compensation", month_count=3,
             now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
         )
 
@@ -616,12 +616,72 @@ class TestMonthlyAmounts:
         assert start.tzinfo is not None
 
     @pytest.mark.asyncio
+    async def test_rows_without_a_change_key_are_skipped(
+        self, monkeypatch, stockholm_tz
+    ):
+        """C1. A sensor with ``state_class: measurement`` has NO sum statistics, so
+        the recorder discards the sum column, runs the query with an empty ``types``
+        and never augments a ``change`` key onto the rows at all - they come back as
+        bare ``{"start", "end"}``.
+
+        Reading that as 0.0 would produce a NON-EMPTY mapping of invented zeroes,
+        which the coordinator would then PATCH every cycle: Wolta would show "0 kr
+        compensation" beside what the flex participation cost, making the whole
+        thing look like a pure loss on a number nobody measured. A row with no
+        ``change`` key is not a measurement of zero - it is the absence of a
+        measurement, and must leave the month unmentioned."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 5, 31, 22, tzinfo=timezone.utc).timestamp(),
+             "end": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp()},
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "end": datetime(2026, 7, 31, 22, tzinfo=timezone.utc).timestamp()},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {}, (
+            f"a row with no 'change' key is not a zero measurement, got {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_key_absent_on_one_month_only(
+        self, monkeypatch, stockholm_tz
+    ):
+        """The two cases must be separable per row, not per query: a month the
+        recorder could measure is reported, a month it could not is left out."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 5, 31, 22, tzinfo=timezone.utc).timestamp()},
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 42.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 42.0}
+
+    @pytest.mark.asyncio
     async def test_missing_change_is_treated_as_zero_not_dropped(
         self, monkeypatch, stockholm_tz
     ):
-        """HA emits change=None for gaps. The month still EXISTS (we read a row for
-        it), so it is reported - as 0.0, never as a missing key: a missing key means
-        "leave the server's value alone", which is a different statement."""
+        """HA emits change=None for a gap in a series it CAN measure - the key is
+        present, its value is null. That month exists and is reported as 0.0.
+
+        Not to be confused with the rarer, more damaging case above, where the key
+        is missing entirely because the sensor carries no sum statistics at all."""
         from unittest.mock import MagicMock
 
         from custom_components.wolta import stats as stats_mod

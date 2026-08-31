@@ -8,6 +8,10 @@
       "title": "Wolta-profilen är full",
       "description": "Din Wolta-profil har nått sin lagringsgräns (cirka 2,3 år av 15-minutersdata), så ny energidata kan inte längre laddas upp. Betyg och ekonomi fortsätter fungera på den lagrade historiken. För att börja om: ta bort integrationen och lägg till den igen."
     },
+    "flex_compensation_no_statistics": {
+      "title": "Wolta kan inte läsa din flexersättning",
+      "description": "Sensorn du valde för flexersättning ({entity_id}) ger inga månadssummor, så ingenting har skickats till Wolta.\n\nVanligaste orsaken är sensorns `state_class`. Wolta läser månadssumman ur långtidsstatistiken, som bara finns för `state_class: total` eller `total_increasing` — en `measurement`-sensor får visserligen långtidsstatistik, men bara min/medel/max, och därur går ingen månadssumma att läsa.\n\nVälj en annan sensor under Konfigurera om, eller lämna fältet tomt för att stänga av funktionen. Belopp du själv matat in på wolta.se påverkas inte i något av fallen."
+    },
     "measured_capacity": {
       "title": "Wolta mätte en annan batterikapacitet",
       "fix_flow": {
@@ -97,7 +101,7 @@
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
-          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha långtidsstatistik; belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
         }
       },
       "privacy": {
@@ -191,7 +195,7 @@
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
-          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha långtidsstatistik; belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
         }
       },
       "view_only": {

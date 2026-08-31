@@ -24,7 +24,11 @@ _LOGGER = logging.getLogger(__name__)
 # rows that would violate the cap are dropped client-side instead.
 _BACKEND_MAX_KWH = 500.0
 
-# Default unit normalization for every ENERGY read. Statistics are stored in the
+# Default unit normalization for every ENERGY read. Used as a default ARGUMENT
+# value below - it is read-only on both sides (we hand it to the recorder, which
+# only looks things up in it), so the usual mutable-default hazard does not bite.
+# If anything ever needs to vary it per call, copy at the call site rather than
+# mutating this dict. Statistics are stored in the
 # sensor's own unit, and a Wh sensor would otherwise give 1000x too-large values ->
 # 422 from the backend's le=500 validation (seen in prod 2026-07-05/06). Callers
 # reading a NON-energy quantity (currency, see monthly_amounts) must pass
@@ -416,7 +420,7 @@ async def async_fetch_lifetime(
 async def monthly_amounts(
     hass: Any,
     entity_id: str,
-    months_back: int = 2,
+    month_count: int = 2,
     now: datetime | None = None,
 ) -> dict[str, float]:
     """Per-calendar-month totals for a CURRENCY sensor, as ``{"2026-07": 812.0}``.
@@ -425,6 +429,13 @@ async def monthly_amounts(
     ...) reports through a Home Assistant sensor, so the coordinator can send it on
     as ``flex_compensation`` records instead of the user typing the figures into the
     web card by hand.
+
+    **The sensor must carry SUM statistics** - ``state_class: total`` or
+    ``total_increasing``. "Has long-term statistics" is not a sufficient test and
+    saying so in the help text was itself the bug: ``state_class: measurement``
+    produces long-term statistics too, but only min/mean/max, and this function then
+    reads nothing at all (see the loop below). An empty return is the honest answer
+    in that case; the coordinator raises a repair rather than sending zeroes.
 
     Three things this function is deliberately careful about:
 
@@ -442,10 +453,10 @@ async def monthly_amounts(
     Args:
         hass:        HomeAssistant instance.
         entity_id:   The currency sensor to read.
-        months_back: How many calendar months to read, COUNTING the current one
+        month_count: How many calendar months to read, counting the current one
                      (the default 2 = current month + the previous one: the current
                      month is still accruing and the previous one is only final once
-                     the aggregator has settled it).
+                     the aggregator has settled it). A COUNT, not an offset.
         now:         Reference time (defaults to the current local time). Injected
                      by tests.
 
@@ -458,19 +469,31 @@ async def monthly_amounts(
 
     local_now = dt_util.as_local(now) if now is not None else dt_util.now()
     tz = local_now.tzinfo
-    # Step back (months_back - 1) whole months from the first of the current month;
+    # Step back (month_count - 1) whole months from the first of the current month;
     # month arithmetic via a month index so December -> January crosses the year.
-    index = local_now.year * 12 + (local_now.month - 1) - (max(int(months_back), 1) - 1)
+    index = local_now.year * 12 + (local_now.month - 1) - (max(int(month_count), 1) - 1)
     start = datetime(index // 12, index % 12 + 1, 1, tzinfo=tz)
 
     rows = await async_fetch_change(hass, {entity_id}, start, None, "month", units=None)
 
     out: dict[str, float] = {}
     for row in rows.get(entity_id, []):
+        # A row with NO "change" key at all is not a zero - it is the absence of a
+        # measurement, and the two must never be merged (C1). The recorder omits the
+        # key entirely for a sensor that carries no SUM statistics: it discards the
+        # sum column up front, runs the query with an empty `types`, and the rows
+        # come back as bare {"start", "end"} with nothing to augment. Folding those
+        # into 0.0 would hand the server a full mapping of invented zeroes, and
+        # Wolta would show "0 kr compensation" against a real foregone-spot cost -
+        # a number nobody measured, making flex look like a pure loss.
+        # `change: None` is the OTHER case (key present, gap in a measurable series)
+        # and is genuinely 0.0 for that month.
+        if "change" not in row:
+            continue
         # row["start"] is unix-epoch (same reading as aggregate_5min_to_15min)
         local = dt_util.as_local(datetime.fromtimestamp(row["start"], tz=timezone.utc))
         key = f"{local.year:04d}-{local.month:02d}"
-        out[key] = out.get(key, 0.0) + (row.get("change") or 0.0)
+        out[key] = out.get(key, 0.0) + (row["change"] or 0.0)
     return out
 
 
