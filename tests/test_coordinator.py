@@ -12,11 +12,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from custom_components.wolta.api import WoltaAuthError, WoltaRateLimitError
+from custom_components.wolta.api import (
+    WoltaApiError,
+    WoltaAuthError,
+    WoltaRateLimitError,
+)
 from custom_components.wolta.const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
     CONF_EXTERNAL_CONTROL,
+    CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_SOLAR,
@@ -130,6 +135,7 @@ def _mock_client(results=None, raise_on_put=None, raise_on_recompute=None):
     client.results = AsyncMock(return_value=results or RESULTS_PAYLOAD)
     client.recompute = AsyncMock(side_effect=raise_on_recompute)
     client.delete = AsyncMock()
+    client.patch_profile = AsyncMock(return_value={})
     return client
 
 
@@ -2034,3 +2040,371 @@ async def test_fetch_modes_skip_recorder_when_no_entity_selected(
     fetch_states.assert_not_awaited()
     assert rows, f"{mode}: expected at least one uploaded row from the battery data"
     assert all(row["external_control"] is False for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# Flex compensation (spec 2026-08-28): an optional currency sensor is read
+# monthly and PATCHed to the server as flex_compensation records.
+#
+# Two things separate it from every other picker in this integration:
+#   B8 - it must stay OUT of the entity fingerprint. It changes no energy row,
+#        and a fingerprint change wipes the bookmark and re-backfills a year.
+#   §4 - its keys must stay out of _PROFILE_SYNC_KEYS. That list mirrors SERVER
+#        fields into entry.data; flex_compensation is a list of records the
+#        server owns per (month, source), not a scalar profile field.
+# ---------------------------------------------------------------------------
+
+_FLEX_ENTITY = "sensor.checkwatt_monthly_compensation"
+
+
+def _fingerprint(**extra) -> str:
+    """The entity fingerprint as the pre-flex code wrote it."""
+    import json as _json
+
+    base = {
+        "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
+        "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
+        "solar": ["sensor.solar"],
+    }
+    base.update(extra)
+    return _json.dumps(base, sort_keys=True)
+
+
+async def _run_cycles(hass, mock_entry, client, monthly_side_effect, cycles: int = 1):
+    """Run N incremental cycles with a patched monthly_amounts. Returns the coordinator."""
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+        patch("custom_components.wolta.stats.monthly_amounts",
+              new=AsyncMock(side_effect=monthly_side_effect)) as monthly,
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": _fingerprint()})
+        for _ in range(cycles):
+            await coordinator._async_update_data()
+    coordinator._monthly_mock = monthly
+    return coordinator
+
+
+def _flex_payloads(client) -> list[list[dict]]:
+    """Every flex_compensation list this cycle PATCHed, in order."""
+    return [
+        call.kwargs["flex_compensation"]
+        for call in client.patch_profile.await_args_list
+        if "flex_compensation" in call.kwargs
+    ]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_reads_flex_compensation_entity(
+    hass: HomeAssistant, mock_entry
+):
+    """A configured entity is exposed; absent/empty normalises to None."""
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    assert WoltaCoordinator(hass, mock_entry)._flex_entity == _FLEX_ENTITY
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: ""}
+    assert WoltaCoordinator(hass, mock_entry)._flex_entity is None
+
+    mock_entry.data = dict(ENTRY_DATA)
+    assert WoltaCoordinator(hass, mock_entry)._flex_entity is None
+
+
+@pytest.mark.asyncio
+async def test_flex_compensation_patched_with_sensor_source(
+    hass: HomeAssistant, mock_entry
+):
+    """Each month read becomes one record. source is ALWAYS "sensor": the web
+    card's "manual" records are the user's own entry and the server upserts per
+    (month, source), so writing "manual" here would silently overwrite them."""
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-05": 511.5, "2025-06": 812.0}],
+    )
+
+    payloads = _flex_payloads(client)
+    assert len(payloads) == 1, f"expected exactly one PATCH, got {len(payloads)}"
+    assert payloads[0] == [
+        {"month": "2025-05", "amount_sek": 511.5, "source": "sensor"},
+        {"month": "2025-06", "amount_sek": 812.0, "source": "sensor"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flex_compensation_reads_the_picked_entity_on_the_default_window(
+    hass: HomeAssistant, mock_entry
+):
+    """The coordinator reads the SELECTED entity and does not narrow the window.
+
+    What that window is (current month + the previous one - the current month is
+    still accruing and last month is only final once the aggregator has settled it)
+    is stats.monthly_amounts' own default, guarded in
+    test_stats.py::test_window_starts_at_first_of_the_oldest_wanted_month. Asserting
+    it again from a mocked call here could only check that no argument was passed,
+    which is what this test does say."""
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client, monthly_side_effect=[{}]
+    )
+
+    call = coordinator._monthly_mock.await_args
+    assert call.args[1:] == (_FLEX_ENTITY,), f"unexpected positional args: {call.args}"
+    assert call.kwargs == {}, f"the default window must not be overridden: {call.kwargs}"
+
+    from custom_components.wolta import stats as stats_mod
+    import inspect
+
+    assert (
+        inspect.signature(stats_mod.monthly_amounts).parameters["months_back"].default
+        == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_flex_compensation_resends_a_changed_amount(
+    hass: HomeAssistant, mock_entry
+):
+    """THE case this feature broke on once already.
+
+    "Only the months you mention are touched" means a guard where the sensor
+    STANDS STILL cannot tell working code from code that reads once, caches, and
+    never looks again - the server keeps the first value either way. So move the
+    number: an aggregator that settles May from a 511.50 estimate to 634.00 must
+    reach the server on the very next cycle, and the second PATCH must carry the
+    NEW figure, not a repeat of the first.
+    """
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[
+            {"2025-05": 511.5, "2025-06": 100.0},
+            {"2025-05": 634.0, "2025-06": 275.25},
+        ],
+        cycles=2,
+    )
+
+    payloads = _flex_payloads(client)
+    assert len(payloads) == 2, (
+        f"the sensor must be re-read every cycle, got {len(payloads)} PATCH(es)"
+    )
+    assert payloads[1] == [
+        {"month": "2025-05", "amount_sek": 634.0, "source": "sensor"},
+        {"month": "2025-06", "amount_sek": 275.25, "source": "sensor"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_flex_entity_means_no_read_and_no_patch(
+    hass: HomeAssistant, mock_entry
+):
+    """The fleet default. Neither the recorder nor the profile endpoint is touched -
+    an unconditional PATCH would write an empty list over the user's manual rows'
+    neighbours and cost every install a request per cycle for nothing."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client, monthly_side_effect=[{"2025-06": 1.0}]
+    )
+
+    coordinator._monthly_mock.assert_not_awaited()
+    assert _flex_payloads(client) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_month_mapping_is_not_patched(hass: HomeAssistant, mock_entry):
+    """No statistics for the picked sensor -> nothing to say. An empty list is a
+    statement we do not have grounds to make."""
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    await _run_cycles(hass, mock_entry, client, monthly_side_effect=[{}])
+
+    assert _flex_payloads(client) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_patch_failure_logs_and_does_not_fail_the_cycle(
+    hass: HomeAssistant, mock_entry, caplog
+):
+    """A failed PATCH must not take the upload cycle down with it. Unlike the
+    external-control read this one IS self-healing: the next cycle re-reads the
+    same months and sends them again."""
+    import logging
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom", status=500))
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.wolta.coordinator"):
+        coordinator = await _run_cycles(
+            hass, mock_entry, client,
+            monthly_side_effect=[{"2025-06": 12.0}, {"2025-06": 12.0}],
+            cycles=2,
+        )
+
+    # _run_cycles awaits _async_update_data directly - a raised exception would
+    # already have failed the test. results() is the last call of a completed cycle.
+    assert client.results.await_count >= 2, "the cycle must have completed both times"
+    assert client.patch_profile.await_count == 2, "the next cycle must retry"
+    assert any("flex" in r.message.lower() or "flex" in r.getMessage().lower()
+               for r in caplog.records if r.levelname == "WARNING")
+
+
+@pytest.mark.asyncio
+async def test_flex_statistics_read_failure_does_not_fail_the_cycle(
+    hass: HomeAssistant, mock_entry
+):
+    """Same guarantee on the recorder side of the read."""
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=RuntimeError("recorder down"),
+    )
+
+    assert client.results.await_count >= 1, "the cycle must have completed"
+    assert _flex_payloads(client) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_entity_stays_out_of_the_entity_fingerprint(
+    hass: HomeAssistant, mock_entry
+):
+    """B8. The external-control sensor DOES enter the fingerprint because it
+    rewrites energy rows; this one does not touch a single row. Letting it in
+    would wipe the bookmark and re-upload a year of history the moment a user
+    picks their compensation sensor - for data that has no bearing on those rows.
+    """
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client, monthly_side_effect=[{"2025-06": 5.0}]
+    )
+
+    assert coordinator._state["applied_entities"] == _fingerprint(), (
+        "the flex sensor leaked into the entity fingerprint"
+    )
+    assert coordinator._state.get("last_uploaded_ts") == _RECENT_BOOKMARK, (
+        "the bookmark was reset -> a full year re-backfill for nothing"
+    )
+    assert _FLEX_ENTITY not in coordinator._state["applied_entities"]
+
+
+@pytest.mark.asyncio
+async def test_flex_entity_alongside_external_control_keeps_only_the_latter(
+    hass: HomeAssistant, mock_entry
+):
+    """Both pickers set: the fingerprint carries external_control and nothing else
+    new. Guards against a blanket "add every configured entity" refactor."""
+    mock_entry.data = {
+        **ENTRY_DATA,
+        CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
+        CONF_FLEX_COMPENSATION: _FLEX_ENTITY,
+    }
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    expected = _fingerprint(external_control=["binary_sensor.grid_rewards_active"])
+
+    empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                             "sensor.grid_out", "sensor.solar")}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return empty
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+        patch("custom_components.wolta.stats.monthly_amounts",
+              new=AsyncMock(return_value={})),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              new=AsyncMock(return_value=[])),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
+                         "applied_invert": False,
+                         "applied_entities": expected})
+        await coordinator._async_update_data()
+
+    assert coordinator._state["applied_entities"] == expected
+    assert coordinator._state.get("last_uploaded_ts") == _RECENT_BOOKMARK
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_keys_unchanged_by_flex_compensation():
+    """§4. _PROFILE_SYNC_KEYS mirrors SERVER-owned scalar profile fields into
+    entry.data. flex_compensation is neither a scalar nor entry.data's business -
+    mirroring it would push a list of records into the config entry and, worse,
+    make the client's own writes look like server state on the next side-poll.
+
+    Asserted as an exact tuple, not a membership check: the point is that this
+    list did not grow, and `not in` would pass for a key added under any other
+    name."""
+    from custom_components.wolta.coordinator import _PROFILE_SYNC_KEYS
+    from custom_components.wolta.const import (
+        CONF_BATTERY_KW, CONF_BATTERY_KWH, CONF_COST_SEK, CONF_EFF,
+        CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
+        CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
+        CONF_SURCHARGE_ORE, CONF_ZONE,
+    )
+
+    assert _PROFILE_SYNC_KEYS == (
+        CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
+        CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
+        CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+    )
+    assert CONF_FLEX_COMPENSATION not in _PROFILE_SYNC_KEYS
+
+
+@pytest.mark.asyncio
+async def test_view_only_entry_never_patches_flex_compensation(
+    hass: HomeAssistant, mock_entry
+):
+    """A bound plant (Sonnen/Reduxi) owns its own data; this entry only polls
+    results. It must not read HA statistics for a compensation sensor either."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    mock_entry.data = {
+        **ENTRY_DATA, CONF_VIEW_ONLY: True, CONF_FLEX_COMPENSATION: _FLEX_ENTITY,
+    }
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.stats.monthly_amounts",
+              new=AsyncMock(return_value={"2025-06": 9.0})) as monthly,
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        await coordinator._async_update_data()
+
+    monthly.assert_not_awaited()
+    assert _flex_payloads(client) == []

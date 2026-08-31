@@ -32,6 +32,7 @@ from .const import (
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
     CONF_EXTERNAL_CONTROL,
+    CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -176,6 +177,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Grid Rewards state sensor). Client-local, never PATCHed to the server -
         # see const.CONF_EXTERNAL_CONTROL for the full rationale.
         self._external_entity: str | None = entry.data.get(CONF_EXTERNAL_CONTROL) or None
+        # Compensation sensor (spec 2026-08-28): optional currency sensor whose
+        # monthly totals are forwarded as flex_compensation records. Unlike
+        # _external_entity this is NOT an upload transformation - it touches no
+        # energy row, and therefore stays out of the entity fingerprint (B8).
+        self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -373,6 +379,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self._state.pop("consecutive_failure_days", None)
                     ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
 
+            # Before _maybe_recompute: with a fresh compensation figure already on
+            # the profile when the recompute is triggered, it does not have to wait
+            # a whole cycle to show up.
+            await self._push_flex_compensation()
+
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
@@ -501,6 +512,46 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 exc_info=True,
             )
             return set()
+
+    async def _push_flex_compensation(self) -> None:
+        """Send the compensation sensor's monthly totals on as flex_compensation.
+
+        source is ALWAYS "sensor". The server upserts per (month, source), so the
+        web card's "manual" records - the user's own bookkeeping - live beside ours
+        and are never touched. By the same rule we only ever send months we actually
+        read: a month we say nothing about keeps whatever the server has, and we
+        never send amount_sek=null (deleting a month is the user's decision, made in
+        the web card, not a side effect of a sensor going quiet).
+
+        Re-read and re-sent EVERY cycle, deliberately. Aggregators settle a month
+        days after it ends, so last month's figure changes under us; caching the
+        first reading would freeze an estimate that the server then keeps forever
+        (and "only changed months are mentioned" hides that: with a still sensor the
+        two behaviours are indistinguishable).
+
+        Never fails the cycle. Same soft-degradation contract as the external-control
+        read, but unlike that one this IS self-healing: nothing is bookmarked, so the
+        next cycle reads the same months again and re-sends them. Auth errors are
+        swallowed here too and left to results(), which owns the reauth path - same
+        division of labour as the profile side-poll.
+        """
+        if not self._flex_entity:
+            return
+        try:
+            amounts = await stats.monthly_amounts(self.hass, self._flex_entity)
+            if not amounts:
+                return  # nothing read -> nothing to claim
+            await self.client.patch_profile(
+                self.token,
+                flex_compensation=[
+                    {"month": month, "amount_sek": amount, "source": "sensor"}
+                    for month, amount in sorted(amounts.items())
+                ],
+            )
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "Flex compensation update failed; retrying next cycle", exc_info=True
+            )
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

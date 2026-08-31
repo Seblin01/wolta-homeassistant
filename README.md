@@ -155,6 +155,18 @@ template:
 
 Adjust the source entity and state value to whatever your own integration exposes. If that same source entity also distinguishes standby/reserve from active dispatch, folding those states into the template narrows the limitation above.
 
+### What the flex participation paid you
+
+Excluding the flagged intervals keeps the grade fair, but it says nothing about the other half of the trade: the compensation the service pays you for that control. Wolta can show the two side by side — what the participation earned, next to what it cost you in foregone spot value — but only if it knows the amounts.
+
+**The picker.** The same two places (setup flow's entity step and **Reconfigure**) offer an optional **Flex compensation, monthly** field. Point it at a sensor holding the compensation in SEK — CheckWatt, Tibber Grid Rewards and similar services usually expose one, and a [template sensor](https://www.home-assistant.io/integrations/template/) works just as well. The sensor needs **long-term statistics** (a `state_class`), because Wolta reads the monthly total from there rather than from the current state; a sensor that resets at the start of each month is handled correctly.
+
+Once a cycle the integration reads the current month and the previous one and sends those two figures on. Last month is re-sent every cycle on purpose: aggregators often settle a month days after it ended, and an estimate that was frozen on first reading would stay wrong.
+
+**It never touches what you entered yourself.** Amounts you type into the compensation card on wolta.se are kept separately from the ones the sensor reports, and the integration only ever writes its own. Clearing the picker stops the reading; it does not delete the months already recorded — remove those on wolta.se if you want them gone.
+
+Leaving the field empty — the default — changes nothing: no extra sensor is read and nothing is sent.
+
 ## Troubleshooting
 
 **Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).

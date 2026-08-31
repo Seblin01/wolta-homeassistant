@@ -428,6 +428,262 @@ class TestFetchChangeUnits:
             f"units argument must request kWh conversion, got {args[5]!r}"
         )
 
+    @pytest.mark.asyncio
+    async def test_units_none_is_passed_through(self, monkeypatch):
+        """units=None must reach the recorder untouched.
+
+        The kWh dict is right for energy statistics and WRONG for anything else: a
+        currency sensor (SEK) asked to normalise as "energy" is not a rounding
+        problem, it is a different quantity. The default must stay kWh (every
+        existing caller relies on it), so the override is what needs guarding -
+        hard-coding the dict inside the function would pass every other test in
+        this class and silently break the currency read.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["args"] = args
+            return {}
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        hass = MagicMock()
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        await stats_mod.async_fetch_change(
+            hass, {"sensor.flex_compensation"}, start, None, "month", units=None
+        )
+        args = captured["args"]
+        assert args[5] is None, (
+            f"units=None must be forwarded verbatim, got {args[5]!r}"
+        )
+        # The other arguments must be unaffected by the new parameter.
+        assert args[3] == {"sensor.flex_compensation"}
+        assert args[4] == "month"
+        assert args[6] == {"change"}
+
+
+# ---------------------------------------------------------------------------
+# monthly_amounts - flex-compensation read (spec 2026-08-28)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stockholm_tz():
+    """Run the month bucketing under a real, UTC-offset timezone.
+
+    HA compiles monthly statistics on LOCAL month boundaries (the recorder's
+    ``reduce_month_ts_factory`` builds its bounds with
+    ``dt_util.get_default_time_zone()``), so the row for July starts at
+    2026-06-30T22:00Z in Stockholm. Reading the month key in UTC would file that
+    payout under June. Under a UTC test clock the bug is invisible, which is the
+    only reason this fixture exists.
+    """
+    from zoneinfo import ZoneInfo
+
+    from homeassistant.util import dt as dt_util
+
+    previous = dt_util.get_default_time_zone()
+    dt_util.set_default_time_zone(ZoneInfo("Europe/Stockholm"))
+    yield ZoneInfo("Europe/Stockholm")
+    dt_util.set_default_time_zone(previous)
+
+
+class TestMonthlyAmounts:
+    """``monthly_amounts`` reads a currency sensor's long-term statistics and returns
+    ``{"YYYY-MM": amount}``. It is the client half of the flex-compensation contract:
+    the coordinator turns each entry into a ``flex_compensation`` record with
+    ``source="sensor"``."""
+
+    @staticmethod
+    def _patch_fetch(monkeypatch, rows, captured: dict):
+        from custom_components.wolta import stats as stats_mod
+
+        async def _fake(hass, ids, start, end, period, units=object()):
+            captured["ids"] = ids
+            captured["start"] = start
+            captured["end"] = end
+            captured["period"] = period
+            captured["units"] = units
+            return {"sensor.flex_compensation": rows}
+
+        monkeypatch.setattr(stats_mod, "async_fetch_change", _fake)
+
+    @pytest.mark.asyncio
+    async def test_sums_change_per_calendar_month(self, monkeypatch, stockholm_tz):
+        """A payout sensor that RESETS every month: ``change`` is the per-period
+        delta, so the monthly figure is the sum of the rows in that month - never
+        the raw meter state, which would report the value after the reset."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            # Local month starts: 2026-05-01, 2026-06-01, 2026-07-01 (Stockholm)
+            {"start": datetime(2026, 4, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 511.5},
+            {"start": datetime(2026, 5, 31, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 812.0},
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 233.25},
+        ]
+        captured: dict = {}
+        self._patch_fetch(monkeypatch, rows, captured)
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation", months_back=3,
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+
+        assert result == {"2026-05": 511.5, "2026-06": 812.0, "2026-07": 233.25}
+
+    @pytest.mark.asyncio
+    async def test_month_key_follows_local_boundary_not_utc(
+        self, monkeypatch, stockholm_tz
+    ):
+        """The July bucket starts at 2026-06-30T22:00Z. Keyed in UTC it would be
+        filed as June and overwrite that month's real payout."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 900.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 900.0}
+
+    @pytest.mark.asyncio
+    async def test_reads_without_unit_normalisation(self, monkeypatch, stockholm_tz):
+        """Mutation guard for the step-0 signature change: SEK must not be
+        normalised as kWh."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        captured: dict = {}
+        self._patch_fetch(monkeypatch, [], captured)
+
+        await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+
+        assert captured["units"] is None, (
+            f"currency statistics must be read raw, got units={captured['units']!r}"
+        )
+        assert captured["period"] == "month"
+        assert captured["ids"] == {"sensor.flex_compensation"}
+        assert captured["end"] is None
+
+    @pytest.mark.asyncio
+    async def test_window_starts_at_first_of_the_oldest_wanted_month(
+        self, monkeypatch, stockholm_tz
+    ):
+        """months_back counts calendar months INCLUDING the current one, so the
+        default (2) asks from the first of last month."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        captured: dict = {}
+        self._patch_fetch(monkeypatch, [], captured)
+
+        await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 1, 9, 10, tzinfo=timezone.utc),
+        )
+
+        start = captured["start"]
+        local = start.astimezone(stockholm_tz)
+        # January -> the window must cross the year boundary into December.
+        assert (local.year, local.month, local.day) == (2025, 12, 1)
+        assert (local.hour, local.minute) == (0, 0)
+        assert start.tzinfo is not None
+
+    @pytest.mark.asyncio
+    async def test_missing_change_is_treated_as_zero_not_dropped(
+        self, monkeypatch, stockholm_tz
+    ):
+        """HA emits change=None for gaps. The month still EXISTS (we read a row for
+        it), so it is reported - as 0.0, never as a missing key: a missing key means
+        "leave the server's value alone", which is a different statement."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 5, 31, 22, tzinfo=timezone.utc).timestamp(),
+             "change": None},
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 12.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-06": 0.0, "2026-07": 12.0}
+
+    @pytest.mark.asyncio
+    async def test_unknown_entity_returns_empty_mapping(
+        self, monkeypatch, stockholm_tz
+    ):
+        """No statistics for the picked entity -> no months mentioned -> the server
+        keeps whatever it already had. Silence is not the same as zero."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        async def _fake(hass, ids, start, end, period, units=None):
+            return {}
+
+        monkeypatch.setattr(stats_mod, "async_fetch_change", _fake)
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_several_rows_in_one_month_are_summed(
+        self, monkeypatch, stockholm_tz
+    ):
+        """Defensive: nothing in the contract promises exactly one row per month."""
+        from unittest.mock import MagicMock
+
+        from custom_components.wolta import stats as stats_mod
+
+        rows = [
+            {"start": datetime(2026, 6, 30, 22, tzinfo=timezone.utc).timestamp(),
+             "change": 100.0},
+            {"start": datetime(2026, 7, 10, 12, tzinfo=timezone.utc).timestamp(),
+             "change": 50.0},
+        ]
+        self._patch_fetch(monkeypatch, rows, {})
+
+        result = await stats_mod.monthly_amounts(
+            MagicMock(), "sensor.flex_compensation",
+            now=datetime(2026, 7, 15, 10, tzinfo=timezone.utc),
+        )
+        assert result == {"2026-07": 150.0}
+
 
 # ---------------------------------------------------------------------------
 # sum_quarter_dicts

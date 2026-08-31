@@ -92,10 +92,12 @@
           "grid_in": "Elförbrukning från nätet",
           "grid_out": "Elexport till nätet",
           "solar": "Solproduktionsenergi (valfri)",
-          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)"
+          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
+          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)"
         },
         "data_description": {
-          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget."
+          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha långtidsstatistik; belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
         }
       },
       "privacy": {
@@ -184,10 +186,12 @@
           "grid_in": "Elförbrukning från nätet",
           "grid_out": "Elexport till nätet",
           "solar": "Solproduktionsenergi (valfri)",
-          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)"
+          "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
+          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)"
         },
         "data_description": {
-          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget."
+          "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha långtidsstatistik; belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
         }
       },
       "view_only": {

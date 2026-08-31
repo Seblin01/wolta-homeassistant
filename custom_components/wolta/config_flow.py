@@ -49,6 +49,7 @@ from .const import (
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
     CONF_EXTERNAL_CONTROL,
+    CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -592,6 +593,19 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults.get(CONF_EXTERNAL_CONTROL) else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
+                # Same single-value picker mechanics (and the same v0.3.0 trap) as
+                # the external-control field above: `suggested_value`, never
+                # `default=`. Not domain-filtered on device_class - a compensation
+                # figure is just as often a template sensor without one, and the
+                # only hard requirement (long-term statistics) is not expressible
+                # in the selector.
+                vol.Optional(
+                    CONF_FLEX_COMPENSATION,
+                    description=(
+                        {"suggested_value": defaults[CONF_FLEX_COMPENSATION]}
+                        if defaults.get(CONF_FLEX_COMPENSATION) else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             }
         )
 
@@ -619,6 +633,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             # empty string (cleared selector) normalises to absence, never PATCHed to
             # the server.
             external_control = self._entities_data.get(CONF_EXTERNAL_CONTROL) or None
+            # The ENTITY ID is client-local config and is never sent to the server -
+            # only the monthly amounts it yields are, via the coordinator's PATCH.
+            flex_compensation = self._entities_data.get(CONF_FLEX_COMPENSATION) or None
             cost_sek: float | None = self._plant_data.get(CONF_COST_SEK) or None
             purchase_date: str | None = self._plant_data.get(CONF_PURCHASE_DATE) or None
             # Tariff fields (and reserve_pct) use a plain .get() (NOT `.get() or None`
@@ -722,6 +739,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 if external_control:
                     entry_data[CONF_EXTERNAL_CONTROL] = external_control
+                if flex_compensation:
+                    entry_data[CONF_FLEX_COMPENSATION] = flex_compensation
 
                 return self.async_create_entry(
                     title=f"Wolta ({zone})",
@@ -774,6 +793,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_GRID_OUT: user_input[CONF_GRID_OUT],
                     CONF_SOLAR: user_input.get(CONF_SOLAR) or [],
                     CONF_EXTERNAL_CONTROL: user_input.get(CONF_EXTERNAL_CONTROL) or None,
+                    CONF_FLEX_COMPENSATION: user_input.get(CONF_FLEX_COMPENSATION) or None,
                 }
                 # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
                 # full re-backfill skriver över historiken från de nya sensorerna.
@@ -783,7 +803,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             k: entry.data.get(k)
             for k in (
                 CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR,
-                CONF_EXTERNAL_CONTROL,
+                CONF_EXTERNAL_CONTROL, CONF_FLEX_COMPENSATION,
             )
         }
         schema = vol.Schema(
@@ -809,6 +829,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults[CONF_EXTERNAL_CONTROL] else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="binary_sensor")),
+                # `suggested_value` for the same reason as the field above: clearing
+                # this picker must actually stop the monthly PATCHes.
+                vol.Optional(
+                    CONF_FLEX_COMPENSATION,
+                    description=(
+                        {"suggested_value": defaults[CONF_FLEX_COMPENSATION]}
+                        if defaults[CONF_FLEX_COMPENSATION] else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             }
         )
         return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
@@ -839,6 +868,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             entry_data[CONF_SOLAR] = self._entities_data[CONF_SOLAR]
         if self._entities_data.get(CONF_EXTERNAL_CONTROL):
             entry_data[CONF_EXTERNAL_CONTROL] = self._entities_data[CONF_EXTERNAL_CONTROL]
+        if self._entities_data.get(CONF_FLEX_COMPENSATION):
+            entry_data[CONF_FLEX_COMPENSATION] = self._entities_data[CONF_FLEX_COMPENSATION]
         for key in (
             CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW,
             CONF_NAMEPLATE_KW, CONF_EFF,

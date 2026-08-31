@@ -29,6 +29,7 @@ from custom_components.wolta.const import (
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
     CONF_EXTERNAL_CONTROL,
+    CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -2742,6 +2743,260 @@ async def test_reconfigure_clears_external_control_entity_when_left_empty(
     assert result["reason"] == "reconfigure_successful"
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert not updated.data.get(CONF_EXTERNAL_CONTROL)
+
+
+# ---------------------------------------------------------------------------
+# Flex compensation (spec 2026-08-28): optional currency-sensor picker.
+# Unlike the external-control picker this one is NOT an upload transformation -
+# it is read monthly and PATCHed to the server as flex_compensation records with
+# source="sensor". The selector mechanics are the same, though: single-value
+# EntitySelector, suggested_value (never `default=`), clearing == absence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_flex_compensation_entity(hass: HomeAssistant) -> None:
+    """Setup flow accepts a selected sensor and stores it in entry.data."""
+    mock_client = _mock_client()
+    entities_with_flex = {
+        **STEP_ENTITIES_DATA,
+        CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=entities_with_flex
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert (
+        result["data"][CONF_FLEX_COMPENSATION]
+        == "sensor.checkwatt_monthly_compensation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_flex_compensation_entity(hass: HomeAssistant) -> None:
+    """The field is optional: left empty the key is absent, so the coordinator
+    sees None and never reads (or PATCHes) anything."""
+    mock_client = _mock_client()
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_ENTITIES_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    assert CONF_FLEX_COMPENSATION not in data or not data.get(CONF_FLEX_COMPENSATION)
+
+
+@pytest.mark.asyncio
+async def test_entities_step_clearing_flex_compensation_after_error_sticks(
+    hass: HomeAssistant,
+) -> None:
+    """A cleared single-value picker must stay cleared across a re-render.
+
+    Same v0.3.0 trap as the external-control field: declared with `default=`,
+    voluptuous re-fills the key whenever the frontend omits it - and omitting the
+    key is exactly what clearing an optional field does - so the entry would be
+    created with a sensor the user explicitly removed, and we would go on PATCHing
+    compensation figures they asked us to stop sending.
+    """
+    mock_client = _mock_client()
+    first_try = {
+        **STEP_ENTITIES_DATA,
+        CONF_GRID_IN: [],  # invalid -> forces the re-render
+        CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
+    }
+    # The frontend OMITS a cleared optional key rather than sending an empty value.
+    second_try = dict(STEP_ENTITIES_DATA)
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=first_try
+        )
+        assert result["step_id"] == "entities"
+        assert result["errors"].get(CONF_GRID_IN) == "required_sensor"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=second_try
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert not result["data"].get(CONF_FLEX_COMPENSATION), (
+        "the cleared flex-compensation sensor was silently restored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_updates_flex_compensation_entity(
+    hass: HomeAssistant,
+) -> None:
+    """Reconfigure stores a newly picked compensation sensor."""
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: ["sensor.battery_charge"],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+                CONF_SOLAR: ["sensor.solar"],
+                CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
+            },
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert (
+        updated.data[CONF_FLEX_COMPENSATION]
+        == "sensor.checkwatt_monthly_compensation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_clears_flex_compensation_entity_when_left_empty(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing a previously-set selection normalises back to absence, so the
+    coordinator stops reading the sensor. (Stopping the reads does NOT delete the
+    months already stored server-side - that is the web card's job, and the
+    integration never sends amount_sek=null on its own.)"""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_FLEX_COMPENSATION: "sensor.old_compensation"}
+    )
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BATT_IN: ["sensor.battery_charge"],
+                CONF_BATT_OUT: ["sensor.battery_discharge"],
+                CONF_GRID_IN: ["sensor.grid_import"],
+                CONF_GRID_OUT: ["sensor.grid_export"],
+                CONF_SOLAR: ["sensor.solar"],
+            },
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert not updated.data.get(CONF_FLEX_COMPENSATION)
+
+
+@pytest.mark.asyncio
+async def test_flex_compensation_is_never_sent_to_create_profile(
+    hass: HomeAssistant,
+) -> None:
+    """The ENTITY ID is client-local configuration - only the monthly AMOUNTS ever
+    reach the server, and only through the coordinator's PATCH. An entity id in the
+    profile payload would leak the user's HA naming for no benefit."""
+    mock_client = _mock_client()
+    entities_with_flex = {
+        **STEP_ENTITIES_DATA,
+        CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
+    }
+
+    with (
+        patch(
+            "custom_components.wolta.config_flow.WoltaApiClient",
+            return_value=mock_client,
+        ),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        patch(
+            "custom_components.wolta.config_flow._energy_dashboard_defaults",
+            return_value={},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "create"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=entities_with_flex
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_USER_DATA
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PRIVACY_DATA
+        )
+
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert CONF_FLEX_COMPENSATION not in kwargs
+    assert "flex_compensation" not in kwargs
 
 
 # ---------------------------------------------------------------------------
