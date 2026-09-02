@@ -132,9 +132,29 @@ A correction recalculates the grade and the economics against the new price seri
 
 ## External control (Grid Rewards and similar flex-market services)
 
-Some services take temporary direct control of your battery in exchange for compensation — Tibber's Grid Rewards is one example, and other flex-market programs work the same way. While such a service is dispatching your battery, the household isn't making its own price decisions, so those intervals shouldn't be judged as good or bad price calls in the optimisation grade — they are excluded from the grade's comparison instead.
+Some services take temporary direct control of your battery in exchange for compensation — Tibber's Grid Rewards is one example, and other flex-market programs work the same way. While such a service is dispatching your battery, the household isn't making its own price decisions, so those intervals shouldn't be judged as good or bad price calls in the optimisation grade. They are **not** cut out of the calculation: they are bound to your measured operation, so they contribute equally to both sides of the grade's ratio and neither raise nor lower your score. Removing them outright would break the battery's state-of-charge chain between intervals, since what the battery holds carries over from one interval to the next.
 
 **What the picker does.** Both the setup flow's entity step and the **Reconfigure** option afterwards (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) offer an optional **External control active** field: point it at a `binary_sensor` that is `on` for exactly as long as a flex service has control of the battery. The integration reads that sensor's Home Assistant state history and marks the corresponding 15-minute intervals so the backend can neutralise them. Leaving the field empty — the default — changes nothing: no extra sensor is read, and every interval is graded exactly as it was before this feature existed.
+
+**Where to get the sensor (Tibber Grid Rewards).** Tibber's official APIs do not expose
+Grid Rewards at all — neither the GraphQL API nor the newer Data API has a field for it, so
+there is nothing for Wolta to read directly. The community integration
+[`JohNan/homeassistant-tibber_grid_rewards`](https://github.com/JohNan/homeassistant-tibber_grid_rewards)
+fills the gap: it creates a **Grid Reward Active** binary sensor that is `on` for exactly as
+long as Tibber reports the `GridRewardDelivering` state. Point the picker straight at it — no
+template sensor needed.
+
+Two things worth knowing before you rely on it. It talks to Tibber's *app* API (the one behind
+the phone app, using your email and password) rather than an official, documented one, so it
+can stop working without warning if Tibber changes something. And it reports the present
+moment, not the past: Wolta reads the sensor's recorder history, so the flag only covers the
+period since you installed that integration — dispatch sessions from before it was running
+stay unflagged.
+
+For other flex services the picker is vendor-neutral: any `binary_sensor` that is `on` while
+the service controls your battery works, including a
+[template sensor](https://www.home-assistant.io/integrations/template/) derived from whatever
+state sensor your provider's integration offers.
 
 **How far back flagging reaches.** Your energy data (battery, grid, solar) is backfilled a full year regardless of this setting. The *flag* is different: it comes from Home Assistant's recorder **state history**, whose retention is governed by `recorder.purge_keep_days` (10 days by default) — far shorter than the long-term statistics your energy data is read from.
 
@@ -164,7 +184,7 @@ Excluding the flagged intervals keeps the grade fair, but it says nothing about 
 **Which sensor to pick.** Two integrations already expose something suitable:
 
 - **CheckWatt** — [`faanskit/ha-checkwatt`](https://github.com/faanskit/ha-checkwatt) publishes *Daily Net Income* and *Annual Net Income* (net after CheckWatt's and the installer's shares, in SEK). Either works: Wolta reads the *increase over the month*, so a daily sensor that resets every day and a yearly one that resets every year both add up to the same monthly figure.
-- **Tibber Grid Rewards** — the reward for the current month comes from Tibber's app API; [JohNan's Tibber integration](https://github.com/JohNan/home-assistant-tibber-data) exposes it as a month-to-date amount, which is exactly the figure Wolta wants.
+- **Tibber Grid Rewards** — the reward for the current month comes from Tibber's app API; [`JohNan/homeassistant-tibber_grid_rewards`](https://github.com/JohNan/homeassistant-tibber_grid_rewards) exposes it as *Grid Reward Current Month*, which is exactly the figure Wolta wants.
 
 Whichever you pick, open **Developer tools → Statistics** and confirm the entity is listed there with a *sum* — that is the check that matters, not what the integration is called. A sensor missing from that list, or listed without a sum, is the `state_class` problem below.
 
