@@ -111,6 +111,28 @@ _ISSUE_FLEX_NO_STATS = "flex_compensation_no_statistics"
 # whole problem. Without this the sync dies silently and stays dead.
 _FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 
+# A configured energy stream that reads EMPTY. Since stats.py stopped fabricating
+# 0.0 buckets for rows without a change value (the measurement-sensor shape), a
+# mispicked power (W) sensor produces an empty stream instead of a stream of zeros.
+# That trade - corruption for silence - is only safe if the silence is visible:
+# without this repair, a filled-in field in Configure plus no data at all is
+# indistinguishable from the integration working.
+_ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
+
+# Consecutive bad read cycles before the repair is raised. Same threshold and
+# rationale as the flex twin above: at the 6 h slow poll this is roughly a day,
+# far past the few minutes a freshly added sensor needs for its first statistics
+# compile, so a correct setup never sees it.
+_ENERGY_EMPTY_CYCLES_BEFORE_ISSUE = 3
+
+# Read windows shorter than this are not judged at all (neither counted nor
+# cleared). Right after a successful upload the next window can be seconds wide -
+# fast poll runs every 60 s - and legitimately holds no compiled 5-min rows for
+# ANY stream. Counting those would trip the repair in minutes on healthy setups;
+# clearing on them would give a broken setup a false all-clear. Two 5-min compile
+# periods plus margin is the smallest window where "no rows" means something.
+_ENERGY_EMPTY_MIN_WINDOW = timedelta(minutes=30)
+
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
 # from the meter, so we only propose adopting when we're confident the entered value is wrong).
 #   MATURE_DAYS   – enough history that the reconstruction is trustworthy
@@ -205,6 +227,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # shared id would let a healthy plant delete a broken plant's warning - a
         # false all-clear on the exact condition this repair exists to report.
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
+        self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -497,6 +520,79 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         ]
         return sum_quarter_dicts(per_entity)
 
+    def _build_streams(self, *sources) -> dict[str, dict]:
+        """Build all five per-quarter stream dicts from (raw_data, agg_fn) sources.
+
+        Sources are applied in order with dict-merge precedence (later wins on
+        overlapping quarters) - backfill passes LTS first and 5-min second, exactly
+        the precedence the inlined version had. Returning the streams as a mapping
+        keyed by merge_streams' parameter names lets the callers hand them over
+        with ** while _note_stream_emptiness inspects the same dicts - one build,
+        two consumers, no chance of judging different data than what is uploaded.
+        """
+        streams: dict[str, dict] = {}
+        for name in self._entity_map:
+            merged: dict = {}
+            for raw_data, agg_fn in sources:
+                merged.update(self._sum_stream(raw_data, name, agg_fn))
+            streams[name] = merged
+        return streams
+
+    async def _note_stream_emptiness(
+        self, streams: dict[str, dict], window: timedelta
+    ) -> None:
+        """Track configured streams that read EMPTY; raise the repair once the
+        streak holds (mirrors _note_flex_bad_cycle). Since stats.py stopped
+        fabricating 0.0 buckets, a sensor with ``state_class: measurement`` yields
+        an empty stream - and an empty stream uploads nothing, which looks exactly
+        like the integration working. This is the visibility half of that fix.
+
+        Windows below _ENERGY_EMPTY_MIN_WINDOW are not judged at all: neither
+        counted (fast-poll windows legitimately hold no compiled rows and would
+        trip the repair on healthy setups) nor cleared (a broken setup would get a
+        false all-clear from a window too short to prove anything).
+
+        A stream with no configured entities is expected to be empty and never
+        counts - solar-less plants are a normal configuration, not a fault.
+        """
+        if window < _ENERGY_EMPTY_MIN_WINDOW:
+            return
+
+        empty = [
+            name for name, data in streams.items()
+            if self._entity_map[self._effective_stream(name)] and not data
+        ]
+        if not empty:
+            await self._clear_energy_empty_streak()
+            return
+
+        streak = int(self._state.get("energy_empty_cycles", 0)) + 1
+        self._state["energy_empty_cycles"] = streak
+        await self._store.async_save(self._state)
+        if streak < _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE:
+            return
+        described = "; ".join(
+            f"{name}: {', '.join(self._entity_map[self._effective_stream(name)])}"
+            for name in empty
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._energy_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_ENERGY_NO_STATS,
+            translation_placeholders={"streams": described},
+        )
+
+    async def _clear_energy_empty_streak(self) -> None:
+        """Drop the streak and the repair. No-op unless a streak was recorded, so
+        healthy plants pay nothing per cycle (same contract as the flex twin)."""
+        if self._state.pop("energy_empty_cycles", None) is None:
+            return
+        await self._store.async_save(self._state)
+        ir.async_delete_issue(self.hass, DOMAIN, self._energy_issue_id)
+
     def _effective_stream(self, stream: str) -> str:
         """With the invert flag (issue #1), batt_in reads the discharge sensor and batt_out
         the charge sensor – the battery direction is flipped so a reversed sensor mapping is corrected
@@ -685,29 +781,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
         # Aggregate and sum per stream (short-term takes precedence on overlap via dict merge)
-        return merge_streams(
-            batt_in={
-                **self._sum_stream(lts_data, "batt_in", split_hour_to_quarters),
-                **self._sum_stream(short_data, "batt_in", aggregate_5min_to_15min),
-            },
-            batt_out={
-                **self._sum_stream(lts_data, "batt_out", split_hour_to_quarters),
-                **self._sum_stream(short_data, "batt_out", aggregate_5min_to_15min),
-            },
-            grid_in={
-                **self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
-                **self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
-            },
-            grid_out={
-                **self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
-                **self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
-            },
-            solar={
-                **self._sum_stream(lts_data, "solar", split_hour_to_quarters),
-                **self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
-            },
-            external=external,
+        streams = self._build_streams(
+            (lts_data, split_hour_to_quarters),
+            (short_data, aggregate_5min_to_15min),
         )
+        await self._note_stream_emptiness(streams, window=now - start)
+        return merge_streams(**streams, external=external)
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
@@ -719,14 +798,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="hour",
         )
-        return merge_streams(
-            batt_in=self._sum_stream(lts_data, "batt_in", split_hour_to_quarters),
-            batt_out=self._sum_stream(lts_data, "batt_out", split_hour_to_quarters),
-            grid_in=self._sum_stream(lts_data, "grid_in", split_hour_to_quarters),
-            grid_out=self._sum_stream(lts_data, "grid_out", split_hour_to_quarters),
-            solar=self._sum_stream(lts_data, "solar", split_hour_to_quarters),
-            external=external,
-        )
+        streams = self._build_streams((lts_data, split_hour_to_quarters))
+        await self._note_stream_emptiness(streams, window=now - start)
+        return merge_streams(**streams, external=external)
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
@@ -738,14 +812,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="5minute",
         )
-        return merge_streams(
-            batt_in=self._sum_stream(short_data, "batt_in", aggregate_5min_to_15min),
-            batt_out=self._sum_stream(short_data, "batt_out", aggregate_5min_to_15min),
-            grid_in=self._sum_stream(short_data, "grid_in", aggregate_5min_to_15min),
-            grid_out=self._sum_stream(short_data, "grid_out", aggregate_5min_to_15min),
-            solar=self._sum_stream(short_data, "solar", aggregate_5min_to_15min),
-            external=external,
-        )
+        streams = self._build_streams((short_data, aggregate_5min_to_15min))
+        await self._note_stream_emptiness(streams, window=now - start)
+        return merge_streams(**streams, external=external)
 
     # ------------------------------------------------------------------
     # Recompute logic

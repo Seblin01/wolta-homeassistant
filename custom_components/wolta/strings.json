@@ -12,6 +12,10 @@
       "title": "Wolta is not receiving your flex compensation",
       "description": "Nothing has reached Wolta from the sensor you picked for flex compensation ({entity_id}) — either it produced no monthly totals, or Wolta refused the amounts it did produce.\n\nThe most common cause is the sensor's `state_class`. Wolta reads the monthly sum from long-term statistics, which only exists for `state_class: total` or `total_increasing` — a `measurement` sensor does get long-term statistics, but only min/mean/max, and no monthly total can be read from it. A monthly total that comes out negative is skipped as well — Wolta only stores compensation of zero or more.\n\nPick a different sensor under Reconfigure, or leave the field empty to turn the feature off. Amounts you entered yourself on wolta.se are unaffected either way."
     },
+    "energy_stream_no_statistics": {
+      "title": "Wolta is not receiving data from one of your energy sensors",
+      "description": "One or more of the sensors you picked read completely empty ({streams}) while the upload window should have held data.\n\nThe most common cause is the sensor's `state_class`. Wolta reads energy deltas from statistics, which only carry them for `state_class: total` or `total_increasing` — a power sensor (W, `state_class: measurement`) produces statistics too, but without the sum column the deltas are read from, so the stream yields nothing at all. Nothing is uploaded for it, and the grade is computed without that stream.\n\nPick the corresponding energy (kWh) sensor under Reconfigure. This warning clears itself as soon as the stream reads data again."
+    },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
       "fix_flow": {

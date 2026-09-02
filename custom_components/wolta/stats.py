@@ -58,22 +58,36 @@ def aggregate_5min_to_15min(
     """Sum 5-min StatisticsRow ``change`` values into 15-min UTC buckets.
 
     Bucket key = ``start`` timestamp floored to the nearest 900-second boundary
-    in UTC.  ``change=None`` is treated as 0.0 (HA may emit None for gaps).
+    in UTC.  Rows without a value are SKIPPED, never read as 0.0. Two shapes
+    qualify and both mean "no information":
+
+    * ``change: None`` - the recorder could not compute the period's delta.
+    * no ``change`` key at all - what the recorder emits for a sensor with
+      ``state_class: measurement`` (has_sum=False drops the sum column and
+      _augment_result_with_change never sets the key, verified HA 2026.8.3).
+
+    The old ``or 0.0`` fallback CREATED the bucket for both shapes, so a
+    mispicked power (W) sensor uploaded real-looking zeros for its whole stream
+    and poisoned the grade data. A bucket whose every row lacked a value is
+    therefore absent from the result - absence is the truthful answer. A genuine
+    ``change: 0.0`` still creates its bucket; zero energy is information.
 
     Args:
         rows: List of StatisticsRow dicts with ``start`` (UNIX float) and
-              ``change`` (float|None).
+              optionally ``change`` (float|None).
 
     Returns:
         Mapping of UTC-aware datetime (floored to 900 s) → sum of changes.
     """
     result: dict[datetime, float] = {}
     for row in rows:
+        change = row.get("change")
+        if change is None:
+            continue  # no value = no information, never a fabricated 0.0
         unix = row["start"]
         # Floor to 900-second boundary
         bucket_unix = int(unix) - (int(unix) % 900)
         bucket = datetime.fromtimestamp(bucket_unix, tz=timezone.utc)
-        change = row.get("change") or 0.0
         result[bucket] = result.get(bucket, 0.0) + change
     return result
 
@@ -87,21 +101,25 @@ def split_hour_to_quarters(
     and assigned to the :00, :15, :30, :45 sub-timestamps of that hour.
     Used for backfill/healing from long-term (hourly) statistics.
 
-    ``change=None`` → 0.0 per quarter.
+    Rows without a value (``change: None``, or no ``change`` key at all - the
+    measurement-sensor shape, see aggregate_5min_to_15min) are SKIPPED: an hour
+    that produced no information must not become four fabricated 0.0 quarters.
 
     Args:
         rows: List of StatisticsRow dicts with ``start`` (UNIX float, hour-aligned)
-              and ``change`` (float|None).
+              and optionally ``change`` (float|None).
 
     Returns:
         Mapping of UTC-aware datetime (quarter boundary) → quarter value.
     """
     result: dict[datetime, float] = {}
     for row in rows:
+        change = row.get("change")
+        if change is None:
+            continue  # no value = no information, never a fabricated 0.0
         unix = row["start"]
         # Round down to the hour boundary
         hour_dt = datetime.fromtimestamp(int(unix) - (int(unix) % 3600), tz=timezone.utc)
-        change = row.get("change") or 0.0
         quarter = change / 4.0
         for offset_min in (0, 15, 30, 45):
             key = hour_dt + timedelta(minutes=offset_min)
