@@ -12,6 +12,10 @@
       "title": "Wolta får inte in din flexersättning",
       "description": "Ingenting har nått fram till Wolta från sensorn du valde för flexersättning ({entity_id}) — antingen gav den inga månadssummor, eller så avvisade Wolta beloppen den gav.\n\nVanligaste orsaken är sensorns `state_class`. Wolta läser månadssumman ur långtidsstatistiken, som bara finns för `state_class: total` eller `total_increasing` — en `measurement`-sensor får visserligen långtidsstatistik, men bara min/medel/max, och därur går ingen månadssumma att läsa. En månadssumma som blir negativ hoppas också över — Wolta lagrar bara ersättning på noll eller mer.\n\nVälj en annan sensor under Konfigurera om, eller lämna fältet tomt för att stänga av funktionen. Belopp du själv matat in på wolta.se påverkas inte i något av fallen."
     },
+    "energy_stream_no_statistics": {
+      "title": "Wolta får inte in data från en av dina energisensorer",
+      "description": "En eller flera av sensorerna du valde läser helt tomt ({streams}) trots att uppladdningsfönstret borde ha innehållit data.\n\nVanligaste orsaken är sensorns `state_class`. Wolta läser energideltan ur statistiken, som bara bär dem för `state_class: total` eller `total_increasing` — en effektsensor (W, `state_class: measurement`) får också statistik, men utan sum-kolumnen som deltan läses ur, så strömmen ger ingenting alls. Inget laddas upp för den, och betyget räknas utan den strömmen.\n\nVälj motsvarande energisensor (kWh) under Konfigurera om. Varningen rensar sig själv så fort strömmen läser data igen."
+    },
     "measured_capacity": {
       "title": "Wolta mätte en annan batterikapacitet",
       "fix_flow": {

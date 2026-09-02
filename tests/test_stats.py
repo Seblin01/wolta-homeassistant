@@ -87,8 +87,12 @@ class TestAggregate5MinTo15Min:
         assert result[b2] == pytest.approx(2.4, rel=1e-9)
         assert result[b3] == pytest.approx(3.3, rel=1e-9)
 
-    def test_change_none_treated_as_zero(self):
-        """HA can emit change=None; it should not crash and should be treated as 0.0."""
+    def test_none_change_rows_contribute_nothing(self):
+        """change=None means the recorder could NOT compute the period's delta.
+
+        Such a row carries no information: it must neither crash nor add to the
+        bucket. Mixed with a valid row in the same bucket, only the valid row counts.
+        """
         base = datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
         rows = [
             _row(base.replace(minute=0), None),
@@ -98,6 +102,43 @@ class TestAggregate5MinTo15Min:
         result = aggregate_5min_to_15min(rows)
         assert len(result) == 1
         assert list(result.values())[0] == pytest.approx(1.0, rel=1e-9)
+
+    def test_bucket_with_only_none_rows_is_absent(self):
+        """A bucket whose every row lacked a value is ABSENT, not 0.0.
+
+        The old ``or 0.0`` fallback fabricated the bucket, so the integration
+        uploaded real-looking zeros for streams that produced no data at all -
+        poisoning the grade data the whole product computes from.
+        """
+        base = datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [
+            _row(base.replace(minute=0), 1.0),      # valid: 10:00 bucket
+            _row(base.replace(minute=15), None),    # 10:15 bucket: no information
+            _row(base.replace(minute=20), None),
+        ]
+        result = aggregate_5min_to_15min(rows)
+        assert set(result) == {base.replace(minute=0)}
+        assert result[base.replace(minute=0)] == pytest.approx(1.0, rel=1e-9)
+
+    def test_row_without_change_key_is_skipped(self):
+        """A row with NO ``change`` key at all is what the recorder emits for a
+        sensor with ``state_class: measurement`` (has_sum=False drops the sum
+        column, and _augment_result_with_change never sets the key). It must be
+        skipped, not read as 0.0 - this exact shape produced fabricated zeros for
+        every stream when a user picked a power (W) sensor by mistake.
+        """
+        base = datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [
+            _row(base.replace(minute=0), 1.0),
+            {"start": _unix(base.replace(minute=15))},  # measurement-sensor shape
+        ]
+        result = aggregate_5min_to_15min(rows)
+        assert set(result) == {base.replace(minute=0)}
+
+        # A stream where EVERY row has the measurement shape yields nothing at all.
+        assert aggregate_5min_to_15min(
+            [{"start": _unix(base.replace(minute=m))} for m in (0, 5, 10)]
+        ) == {}
 
     def test_empty_input_returns_empty_dict(self):
         result = aggregate_5min_to_15min([])
@@ -173,13 +214,25 @@ class TestSplitHourToQuarters:
         assert result[dt1.replace(minute=15)] == pytest.approx(0.5)
         assert result[dt2.replace(minute=30)] == pytest.approx(1.0)
 
-    def test_change_none_treated_as_zero(self):
+    def test_none_change_hour_is_absent(self):
+        """An hour whose ``change`` is None produced no information - it must not
+        become four fabricated 0.0 quarters (the old behaviour, which uploaded
+        real-looking zeros for a stream that yielded nothing)."""
         dt = datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
-        rows = [_row(dt, None)]
-        result = split_hour_to_quarters(rows)
-        assert len(result) == 4
+        assert split_hour_to_quarters([_row(dt, None)]) == {}
+
+        # Mixed input: only the valid hour's quarters exist.
+        dt2 = datetime(2024, 3, 1, 11, 0, 0, tzinfo=timezone.utc)
+        result = split_hour_to_quarters([_row(dt, 2.0), _row(dt2, None)])
+        assert set(result) == {dt.replace(minute=m) for m in (0, 15, 30, 45)}
         for v in result.values():
-            assert v == pytest.approx(0.0)
+            assert v == pytest.approx(0.5)
+
+    def test_hour_without_change_key_is_absent(self):
+        """No ``change`` key at all = the measurement-sensor shape (see the 5-min
+        twin above). Skipped, never read as 0.0."""
+        dt = datetime(2024, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        assert split_hour_to_quarters([{"start": _unix(dt)}]) == {}
 
     def test_empty_input_returns_empty_dict(self):
         result = split_hour_to_quarters([])

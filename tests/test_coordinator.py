@@ -2674,3 +2674,168 @@ async def test_auth_and_rate_limit_do_not_count_toward_the_flex_repair(
     assert ir.async_get(hass).async_get_issue(
         DOMAIN, coordinator._flex_issue_id
     ) is None, "an auth failure must not be reported as a broken compensation sensor"
+
+
+# ---------------------------------------------------------------------------
+# Repair: an energy stream that yields nothing (measurement-sensor mistake)
+# ---------------------------------------------------------------------------
+#
+# stats.py no longer fabricates 0.0 buckets for rows without a change value, so a
+# mispicked power (W) sensor now produces an EMPTY stream instead of a stream of
+# zeros. Silence looks identical to "working" - these tests pin the repair issue
+# that makes it visible, mirroring the flex_compensation_no_statistics contract.
+
+
+def _energy_stats(start, end, *, empty: tuple[str, ...] = ()) -> dict:
+    """Recorder-shaped 5-min rows for every stream sensor; ``empty`` streams get []."""
+    rows = []
+    t = start.timestamp()
+    while t < end.timestamp():
+        rows.append({"start": t, "change": 0.1})
+        t += 300
+    return {
+        sid: ([] if sid in empty else list(rows))
+        for sid in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                    "sensor.grid_out", "sensor.solar")
+    }
+
+
+async def _run_energy_cycles(
+    hass, mock_entry, client, *, empty: tuple[str, ...], cycles: int,
+    bookmark_age: timedelta = timedelta(hours=6),
+    advance: timedelta = timedelta(hours=6),
+    fingerprint: str | None = None,
+):
+    """Run N incremental cycles with the given streams empty. The clock advances
+    ``advance`` per cycle so each read window is a real slow-poll window - with a
+    frozen clock the bookmark catches up and every later window is seconds wide."""
+    clock = {"now": NOW}
+
+    async def mock_fetch(h, ids, start, end, period):
+        return _energy_stats(start, end, empty=empty)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=mock_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - bookmark_age).isoformat(),
+                         "applied_invert": False,
+                         "applied_entities": fingerprint or _fingerprint()})
+        for _ in range(cycles):
+            await coordinator._async_update_data()
+            clock["now"] = clock["now"] + advance
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_empty_energy_stream_raises_repair_after_threshold(
+    hass: HomeAssistant, mock_entry
+):
+    """A configured stream that reads empty while its siblings deliver is the
+    broken-sensor signature (state_class: measurement gives no change column).
+    Without the repair the fix upstream in stats.py trades corruption for silence.
+    """
+    from custom_components.wolta.coordinator import _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE
+
+    # Pinned to a LITERAL on purpose, same reasoning as the flex twin: deriving the
+    # cycle counts from the constant would let a lowered threshold pass vacuously.
+    assert _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE == 3
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    # Two bad cycles - one short of the threshold: still quiet.
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar",), cycles=2,
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._energy_issue_id
+    ) is None, "the repair fired early - it will cry wolf on every fresh setup"
+
+    # The third one trips it.
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar",), cycles=3,
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._energy_issue_id)
+    assert issue is not None, "a stream that never yields data must be surfaced"
+    assert issue.translation_key == "energy_stream_no_statistics"
+    assert issue.is_fixable is False
+    assert "sensor.solar" in (issue.translation_placeholders or {}).get("streams", "")
+
+
+@pytest.mark.asyncio
+async def test_energy_repair_clears_when_the_stream_reads_again(
+    hass: HomeAssistant, mock_entry
+):
+    """The user re-picks a proper energy sensor -> the warning clears itself."""
+    from custom_components.wolta.coordinator import _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar",),
+        cycles=_ENERGY_EMPTY_CYCLES_BEFORE_ISSUE,
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._energy_issue_id) is not None
+
+    # One healthy cycle on the SAME coordinator: issue and streak both go.
+    clock = {"now": NOW + timedelta(days=2)}
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=lambda h, ids, start, end, period:
+              _energy_stats(start, end, empty=())),
+    ):
+        await coordinator._async_update_data()
+
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._energy_issue_id) is None
+    assert coordinator._state.get("energy_empty_cycles") is None
+
+
+@pytest.mark.asyncio
+async def test_all_empty_short_window_does_not_count(
+    hass: HomeAssistant, mock_entry
+):
+    """A window shorter than a statistics-compile period legitimately has no rows
+    for ANY stream (fast poll right after an upload). Counting those cycles would
+    trip the repair in minutes on perfectly healthy setups."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client,
+        empty=("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+               "sensor.grid_out", "sensor.solar"),
+        cycles=3,
+        bookmark_age=timedelta(minutes=2),
+        advance=timedelta(0),  # frozen clock: the window stays 2 minutes wide
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._energy_issue_id) is None
+    assert coordinator._state.get("energy_empty_cycles") is None, (
+        "short-window cycles must not even count toward the streak"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_stream_is_not_flagged(hass: HomeAssistant, mock_entry):
+    """No solar sensor configured -> an empty solar stream is expected, not broken."""
+    entry_data = {k: v for k, v in ENTRY_DATA.items() if k != CONF_SOLAR}
+    mock_entry.data = entry_data
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar",), cycles=3,
+        fingerprint=_fingerprint(solar=[]),
+    )
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._energy_issue_id) is None
