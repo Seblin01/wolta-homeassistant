@@ -24,6 +24,18 @@ _LOGGER = logging.getLogger(__name__)
 # rows that would violate the cap are dropped client-side instead.
 _BACKEND_MAX_KWH = 500.0
 
+# Default unit normalization for every ENERGY read. Used as a default ARGUMENT
+# value below - it is read-only on both sides (we hand it to the recorder, which
+# only looks things up in it), so the usual mutable-default hazard does not bite.
+# If anything ever needs to vary it per call, copy at the call site rather than
+# mutating this dict. Statistics are stored in the
+# sensor's own unit, and a Wh sensor would otherwise give 1000x too-large values ->
+# 422 from the backend's le=500 validation (seen in prod 2026-07-05/06). Callers
+# reading a NON-energy quantity (currency, see monthly_amounts) must pass
+# ``units=None`` instead - normalizing SEK as "energy" is not a rounding problem,
+# it is a different quantity.
+_ENERGY_UNITS: dict[str, str] = {"energy": "kWh"}
+
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -323,12 +335,13 @@ async def async_fetch_change(
     start: datetime,
     end: datetime | None,
     period: str,
+    units: dict[str, str] | None = _ENERGY_UNITS,
 ) -> dict[str, list[StatisticsRow]]:
     """Fetch statistics from the HA recorder using the executor thread.
 
-    This and ``async_fetch_states`` are the only functions in this module that
-    import from ``homeassistant``; the rest are pure and testable without an
-    HA runtime.
+    This, ``monthly_amounts`` and ``async_fetch_states`` are the only functions in
+    this module that import from ``homeassistant``; the rest are pure and testable
+    without an HA runtime.
 
     ``statistics_during_period`` is a blocking DB call and must be executed
     via ``get_instance(hass).async_add_executor_job`` to avoid blocking the
@@ -340,6 +353,10 @@ async def async_fetch_change(
         start:          Query window start (timezone-aware).
         end:            Query window end (timezone-aware), or None for open end.
         period:         One of ``"5minute"``, ``"hour"``, etc.
+        units:          Unit conversion passed straight to the recorder. Defaults to
+                        ``_ENERGY_UNITS`` so every existing energy caller is
+                        unchanged; pass ``None`` to read a statistic in its own
+                        stored unit (currency, see ``monthly_amounts``).
 
     Returns:
         Dict mapping each statistic_id → list of StatisticsRow dicts, as
@@ -358,10 +375,10 @@ async def async_fetch_change(
         end,
         statistic_ids,
         period,
-        # Normalize to kWh – statistics are stored in the sensor's own unit, and a
-        # Wh sensor would otherwise give 1000× too-large values → 422 from the backend's
-        # le=500 validation (seen in prod 2026-07-05/06).
-        {"energy": "kWh"},
+        # Defaults to _ENERGY_UNITS (kWh normalization); the currency read overrides
+        # it with None. Positional argument - the recorder's signature is
+        # statistics_during_period(hass, start, end, ids, period, units, types).
+        units,
         {"change"},
     )
 
@@ -398,6 +415,103 @@ async def async_fetch_lifetime(
             if first_ts is None or ts < first_ts:
                 first_ts = ts
     return _sum(batt_in_ids), _sum(batt_out_ids), first_ts
+
+
+async def monthly_amounts(
+    hass: Any,
+    entity_id: str,
+    month_count: int = 2,
+    now: datetime | None = None,
+) -> dict[str, float]:
+    """Per-calendar-month totals for a CURRENCY sensor, as ``{"2026-07": 812.0}``.
+
+    Reads the flex-market compensation the user's aggregator (CheckWatt, Tibber,
+    ...) reports through a Home Assistant sensor, so the coordinator can send it on
+    as ``flex_compensation`` records instead of the user typing the figures into the
+    web card by hand.
+
+    **The sensor must carry SUM statistics** - ``state_class: total`` or
+    ``total_increasing``. "Has long-term statistics" is not a sufficient test and
+    saying so in the help text was itself the bug: ``state_class: measurement``
+    produces long-term statistics too, but only min/mean/max, and this function then
+    reads nothing at all (see the loop below). An empty return is the honest answer
+    in that case; the coordinator raises a repair rather than sending zeroes.
+
+    Three things this function is deliberately careful about:
+
+    * **``change``, not the meter state.** A payout sensor is normally reset at the
+      start of each month; ``change`` is the accumulated delta WITHIN the period, so
+      it handles the reset. Reading the state would report whatever is left after it.
+    * **``units=None``.** These are kronor. The kWh normalization that every energy
+      read in this module needs would silently convert a different quantity.
+    * **LOCAL month boundaries.** The recorder buckets monthly statistics with
+      ``dt_util.get_default_time_zone()`` (``reduce_month_ts_factory``), so July's row
+      starts at 2026-06-30T22:00Z in Stockholm. Keying the result in UTC would file
+      that payout under June - one month of someone's compensation attributed to the
+      wrong month, invisible under a UTC test clock.
+
+    Args:
+        hass:        HomeAssistant instance.
+        entity_id:   The currency sensor to read.
+        month_count: How many calendar months to read, counting the current one
+                     (the default 2 = current month + the previous one: the current
+                     month is still accruing and the previous one is only final once
+                     the aggregator has settled it). A COUNT, not an offset.
+        now:         Reference time (defaults to the current local time). Injected
+                     by tests.
+
+    Returns:
+        ``{"YYYY-MM": amount}`` for every month the recorder could measure a
+        NON-NEGATIVE total for. Months with no row, with an unreadable total, or
+        with a negative total are ABSENT rather than zero - absence means "we have
+        nothing to say about this month", which the server honours by leaving it
+        untouched.
+    """
+    from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+    local_now = dt_util.as_local(now) if now is not None else dt_util.now()
+    tz = local_now.tzinfo
+    # Step back (month_count - 1) whole months from the first of the current month;
+    # month arithmetic via a month index so December -> January crosses the year.
+    index = local_now.year * 12 + (local_now.month - 1) - (max(int(month_count), 1) - 1)
+    start = datetime(index // 12, index % 12 + 1, 1, tzinfo=tz)
+
+    rows = await async_fetch_change(hass, {entity_id}, start, None, "month", units=None)
+
+    out: dict[str, float] = {}
+    for row in rows.get(entity_id, []):
+        # An UNREADABLE change is not a zero - it is the absence of a measurement,
+        # and the two must never be merged (C1). Both shapes mean "unreadable":
+        #   * key MISSING: the sensor carries no SUM statistics at all, so the
+        #     recorder discards the sum column up front, runs the query with an
+        #     empty `types`, and the rows come back as bare {"start", "end"} with
+        #     nothing to augment.
+        #   * key present but None: `_augment_result_with_change` sets it to None
+        #     for exactly the rows whose period `sum` is NULL (HA 2026.8
+        #     recorder/statistics.py) - the recorder could NOT compute that
+        #     month's delta. That is a gap, not a settled zero.
+        # Folding either into 0.0 would hand the server invented zeroes, and Wolta
+        # would show "0 kr compensation" against a real foregone-spot cost - a
+        # number nobody measured, making flex look like a pure loss. Worse, the
+        # coverage arithmetic in the API counts a 0-kr month's DAYS, so one
+        # invented zero dilutes compensation_period_sek and inflates
+        # compensation_coverage at the same time.
+        if row.get("change") is None:
+            continue
+        # row["start"] is unix-epoch (same reading as aggregate_5min_to_15min)
+        local = dt_util.as_local(datetime.fromtimestamp(row["start"], tz=timezone.utc))
+        key = f"{local.year:04d}-{local.month:02d}"
+        out[key] = out.get(key, 0.0) + float(row["change"])
+
+    # A NEGATIVE month is dropped, and dropping it is what keeps the sync alive.
+    # `state_class: total` is allowed to decrease - a settlement correction, an
+    # FCR-N down-regulation debit or a recomputed template value all produce one -
+    # but the server validates amount_sek >= 0 and 422s the WHOLE patch, not the
+    # offending month. The coordinator swallows that into a warning and re-sends the
+    # identical payload next cycle, so a single negative month would kill every
+    # later month's sync silently and permanently. Judged on the month TOTAL, after
+    # summing: rows that cancel out within a month are not a negative month.
+    return {month: amount for month, amount in out.items() if amount >= 0}
 
 
 async def async_fetch_states(

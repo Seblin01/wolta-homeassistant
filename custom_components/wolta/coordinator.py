@@ -32,6 +32,7 @@ from .const import (
     CONF_EXPORT_EXTRA_ORE,
     CONF_EXPORT_EXTRA_PCT,
     CONF_EXTERNAL_CONTROL,
+    CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -91,6 +92,24 @@ _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
 _ISSUE_POWER = "measured_power"
 _ISSUE_EFFICIENCY = "measured_efficiency"
+# A picked compensation sensor that never yields a figure (spec 2026-08-28). The
+# usual cause is the wrong state_class: only `total`/`total_increasing` produce the
+# SUM statistics monthly_amounts reads, while `measurement` yields min/mean/max and
+# nothing this feature can use. Without this the user sees a filled-in field in
+# Configure and no effect at all - indistinguishable from the feature working.
+_ISSUE_FLEX_NO_STATS = "flex_compensation_no_statistics"
+
+# Consecutive BAD cycles before the repair is raised - a cycle that read nothing, or
+# one whose PATCH the server rejected. At the 6h slow poll that is roughly a day -
+# far past the few minutes a freshly added sensor needs for its first statistics
+# compile, so a correct setup never sees it.
+#
+# The rejection leg exists because the compensation PATCH is a PERMANENT loop when it
+# fails: nothing is bookmarked, so the next cycle reads the same months and re-sends
+# the identical payload. A payload the server refuses is therefore refused forever,
+# and the empty-read leg cannot notice - there the mapping is non-empty, which is the
+# whole problem. Without this the sync dies silently and stays dead.
+_FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
 # from the meter, so we only propose adopting when we're confident the entered value is wrong).
@@ -176,6 +195,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Grid Rewards state sensor). Client-local, never PATCHed to the server -
         # see const.CONF_EXTERNAL_CONTROL for the full rationale.
         self._external_entity: str | None = entry.data.get(CONF_EXTERNAL_CONTROL) or None
+        # Compensation sensor (spec 2026-08-28): optional currency sensor whose
+        # monthly totals are forwarded as flex_compensation records. Unlike
+        # _external_entity this is NOT an upload transformation - it touches no
+        # energy row, and therefore stays out of the entity fingerprint (B8).
+        self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
+        # Per-entry issue id (the form _set_measured_issue already uses), NOT the
+        # shared id the two older non-fixable issues carry: with two Wolta entries a
+        # shared id would let a healthy plant delete a broken plant's warning - a
+        # false all-clear on the exact condition this repair exists to report.
+        self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -373,6 +402,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self._state.pop("consecutive_failure_days", None)
                     ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
 
+            # Before _maybe_recompute: with a fresh compensation figure already on
+            # the profile when the recompute is triggered, it does not have to wait
+            # a whole cycle to show up.
+            #
+            # Skipped during fast-poll for the same reason as the profile GET above,
+            # only more so: this is a WRITE plus a recorder month query, and the
+            # figure behind it is settled by an aggregator days after the month ends
+            # - there is nothing here that moves on a 60-second timescale. put_data
+            # is gated by `if rows:`, so ungated this would be the one call hitting
+            # the server every minute for as long as a server job runs.
+            if self.update_interval != _FAST_POLL:
+                await self._push_flex_compensation()
+
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
@@ -501,6 +543,121 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 exc_info=True,
             )
             return set()
+
+    async def _push_flex_compensation(self) -> None:
+        """Send the compensation sensor's monthly totals on as flex_compensation.
+
+        source is ALWAYS "sensor". The server upserts per (month, source), so the
+        web card's "manual" records - the user's own bookkeeping - live beside ours
+        and are never touched. By the same rule we only ever send months we actually
+        read: a month we say nothing about keeps whatever the server has, and we
+        never send amount_sek=null (deleting a month is the user's decision, made in
+        the web card, not a side effect of a sensor going quiet).
+
+        Re-read and re-sent EVERY cycle, deliberately. Aggregators settle a month
+        days after it ends, so last month's figure changes under us; caching the
+        first reading would freeze an estimate that the server then keeps forever
+        (and "only changed months are mentioned" hides that: with a still sensor the
+        two behaviours are indistinguishable).
+
+        Never fails the cycle. Same soft-degradation contract as the external-control
+        read, but unlike that one this IS self-healing: nothing is bookmarked, so the
+        next cycle reads the same months again and re-sends them. Auth errors are
+        swallowed here too and left to results(), which owns the reauth path - same
+        division of labour as the profile side-poll.
+
+        That self-healing is also the failure mode. Re-sending an identical payload is
+        recovery when the server was momentarily unavailable, and an infinite loop when
+        the server REFUSED the payload: the rejection then repeats forever, inside a
+        warning nobody reads. So a run of refusals raises the same repair an empty read
+        does (_note_flex_bad_cycle). The empty-read leg cannot cover that case - there
+        the mapping is non-empty.
+
+        Reading NOTHING is a different outcome from reading a zero and is reported as
+        such: after _FLEX_EMPTY_CYCLES_BEFORE_ISSUE bad cycles a repair goes up, and it
+        comes straight back down as soon as a cycle goes through or the picker is
+        cleared. Silent no-op was the alternative, and it is indistinguishable from the
+        feature working.
+        """
+        if not self._flex_entity:
+            # Clearing the picker is a deliberate "stop doing this", not an
+            # unresolved problem: the warning must not outlive the setting.
+            await self._clear_flex_bad_streak()
+            return
+        try:
+            amounts = await stats.monthly_amounts(self.hass, self._flex_entity)
+        except Exception:  # pylint: disable=broad-except
+            # A recorder read that blew up says nothing about the sensor - leave the
+            # streak where it is and try again next cycle.
+            _LOGGER.warning(
+                "Flex compensation read failed; retrying next cycle", exc_info=True
+            )
+            return
+        if not amounts:
+            # Nothing to claim - and nothing read is now a DISTINCT state from
+            # "the month was zero" (see monthly_amounts), so it can be reported.
+            await self._note_flex_bad_cycle()
+            return
+        try:
+            await self.client.patch_profile(
+                self.token,
+                flex_compensation=[
+                    {"month": month, "amount_sek": amount, "source": "sensor"}
+                    for month, amount in sorted(amounts.items())
+                ],
+            )
+        except (WoltaAuthError, WoltaRateLimitError):
+            # Neither says anything about the compensation payload: reauth belongs to
+            # results() and a 429 clears itself. Warn and move on.
+            _LOGGER.warning(
+                "Flex compensation update failed; retrying next cycle", exc_info=True
+            )
+        except WoltaApiError:
+            # The server looked at THIS payload and refused it. An identical payload
+            # next cycle earns an identical refusal, forever - count it.
+            _LOGGER.warning(
+                "Flex compensation update rejected; retrying next cycle", exc_info=True
+            )
+            await self._note_flex_bad_cycle()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "Flex compensation update failed; retrying next cycle", exc_info=True
+            )
+        else:
+            await self._clear_flex_bad_streak()
+
+    async def _note_flex_bad_cycle(self) -> None:
+        """Count a cycle that got nothing through; raise the repair once the streak
+        holds. The two causes - nothing read, and a payload the server refused - share
+        one counter and one issue: they are mutually exclusive within a cycle and land
+        the user in the same place, no compensation reaching Wolta.
+
+        Thresholded rather than immediate for the same reason _track_failure is: a
+        sensor added seconds ago has no compiled statistics yet, and a repair that
+        fires on every fresh setup teaches people to dismiss it.
+        """
+        streak = int(self._state.get("flex_empty_cycles", 0)) + 1
+        self._state["flex_empty_cycles"] = streak
+        await self._store.async_save(self._state)
+        if streak < _FLEX_EMPTY_CYCLES_BEFORE_ISSUE:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._flex_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_FLEX_NO_STATS,
+            translation_placeholders={"entity_id": self._flex_entity or ""},
+        )
+
+    async def _clear_flex_bad_streak(self) -> None:
+        """Drop the streak and the repair. No-op unless a streak was recorded, so
+        the fleet default (no sensor picked) costs nothing per cycle."""
+        if self._state.pop("flex_empty_cycles", None) is None:
+            return
+        await self._store.async_save(self._state)
+        ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

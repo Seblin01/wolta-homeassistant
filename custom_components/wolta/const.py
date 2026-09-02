@@ -84,6 +84,11 @@ CONF_LINK_TOKEN = "link_token"
 # KLIENTLOKAL nyckel (samma art som CONF_INVERT_BATTERY): en uppladdningstransformation,
 # inte ett profilfält – PATCH:as aldrig till servern, hålls utanför _PROFILE_SYNC_KEYS.
 CONF_EXTERNAL_CONTROL = "external_control_entity"
+# Ersättningssensor (spec 2026-08-28): läses månadsvis ur LTS och PATCH:as till servern
+# som flex_compensation-poster med source='sensor'. Ingår MEDVETET INTE i
+# applied_entities-fingerprintet - den påverkar inga energirader och får inte trigga
+# re-backfill (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
+CONF_FLEX_COMPENSATION = "flex_compensation_entity"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

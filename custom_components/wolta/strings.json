@@ -8,6 +8,10 @@
       "title": "Wolta profile is full",
       "description": "Your Wolta profile has reached its storage limit (about 2.3 years of 15-minute data), so new energy data can no longer be uploaded. Your grade and economy figures keep working on the stored history. To start fresh, remove the integration and set it up again."
     },
+    "flex_compensation_no_statistics": {
+      "title": "Wolta is not receiving your flex compensation",
+      "description": "Nothing has reached Wolta from the sensor you picked for flex compensation ({entity_id}) — either it produced no monthly totals, or Wolta refused the amounts it did produce.\n\nThe most common cause is the sensor's `state_class`. Wolta reads the monthly sum from long-term statistics, which only exists for `state_class: total` or `total_increasing` — a `measurement` sensor does get long-term statistics, but only min/mean/max, and no monthly total can be read from it. A monthly total that comes out negative is skipped as well — Wolta only stores compensation of zero or more.\n\nPick a different sensor under Reconfigure, or leave the field empty to turn the feature off. Amounts you entered yourself on wolta.se are unaffected either way."
+    },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
       "fix_flow": {
@@ -92,10 +96,12 @@
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
           "solar": "Solar production energy (optional)",
-          "external_control_entity": "External control active (binary sensor, optional)"
+          "external_control_entity": "External control active (binary sensor, optional)",
+          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)"
         },
         "data_description": {
-          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
+          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten."
         }
       },
       "privacy": {
@@ -184,10 +190,12 @@
           "grid_in": "Grid import energy",
           "grid_out": "Grid export energy",
           "solar": "Solar production energy (optional)",
-          "external_control_entity": "External control active (binary sensor, optional)"
+          "external_control_entity": "External control active (binary sensor, optional)",
+          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)"
         },
         "data_description": {
-          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade."
+          "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
+          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten."
         }
       },
       "view_only": {

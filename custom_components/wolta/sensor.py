@@ -244,6 +244,27 @@ def _external_control_attr(results: dict) -> dict[str, Any]:
     return {"external_control": ext}
 
 
+def _flex_compensation_attr(results: dict) -> dict[str, Any]:
+    """flex_compensation (spec 2026-08-28): the backend's ADDITIVE block on results.betyg
+    holding what the flex-market participation paid - measured from the amounts the owner
+    entered (or read off the compensation sensor) and/or estimated from the aggregator's
+    capacity prices - so it can be shown next to what that participation cost in foregone
+    spot value. Present only when at least one of the two amounts exists; omitted entirely
+    (not None) for a plant with no flex signal at all and for every payload cached before
+    this backend deploy, exactly like _external_control_attr above.
+
+    Handed over VERBATIM, never rebuilt field by field. Two reasons, both load-bearing:
+    the amounts have DIFFERENT bases (the estimate spans the whole grade window, the
+    measured amount only the months actually entered) so the coverage ratios must travel
+    with them for the comparison to mean anything, and a keyed lookup into an optional
+    block is the annual["factor"] KeyError (<= v0.27.0) that took the whole sensor down for
+    every user on an older backend."""
+    flex = (results.get("betyg") or {}).get("flex_compensation")
+    if flex is None:
+        return {}
+    return {"flex_compensation": flex}
+
+
 def _measured_params_attr(results: dict) -> dict[str, Any]:
     """Measured battery parameters: capacity/power/efficiency as the uploaded meter data
     actually shows them (the observed_* dicts, in the payload since the v0.12.0
@@ -333,6 +354,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 **_capacity_hint_attr(data.results),
                 **_measured_params_attr(data.results),
                 **_external_control_attr(data.results),
+                **_flex_compensation_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}
