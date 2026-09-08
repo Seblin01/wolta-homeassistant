@@ -2676,6 +2676,46 @@ async def test_auth_and_rate_limit_do_not_count_toward_the_flex_repair(
     ) is None, "an auth failure must not be reported as a broken compensation sensor"
 
 
+@pytest.mark.asyncio
+async def test_server_errors_do_not_count_toward_the_flex_repair(
+    hass: HomeAssistant, mock_entry
+):
+    """A 5xx says the SERVER is in trouble, not that this payload was refused.
+
+    The refusal leg exists because a rejected payload is re-sent byte-identical
+    forever. A 502 from a deploy or a 503 from an overloaded backend is the opposite
+    case: the identical payload will go through once the server is back, and that
+    is exactly what re-sending is for. Counting it would raise a repair that blames
+    the user's sensor for Wolta's downtime - a warning they cannot act on, and
+    one that teaches them to dismiss the real one.
+    """
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.coordinator import _FLEX_EMPTY_CYCLES_BEFORE_ISSUE
+
+    mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    statuses = iter([500, 502, 503, 500, 503])
+
+    async def _server_error(token, **fields):
+        if "flex_compensation" in fields:
+            raise WoltaApiError("upstream unavailable", status=next(statuses))
+        return {}
+
+    client.patch_profile = AsyncMock(side_effect=_server_error)
+
+    coordinator = await _run_cycles(
+        hass, mock_entry, client,
+        monthly_side_effect=[{"2025-06": 5.0}] * (_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 2),
+        cycles=_FLEX_EMPTY_CYCLES_BEFORE_ISSUE + 2,
+    )
+
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._flex_issue_id
+    ) is None, "a server-side failure must not be reported as a refused payload"
+
+
 # ---------------------------------------------------------------------------
 # Repair: an energy stream that yields nothing (measurement-sensor mistake)
 # ---------------------------------------------------------------------------

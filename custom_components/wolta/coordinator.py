@@ -708,13 +708,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.warning(
                 "Flex compensation update failed; retrying next cycle", exc_info=True
             )
-        except WoltaApiError:
-            # The server looked at THIS payload and refused it. An identical payload
-            # next cycle earns an identical refusal, forever - count it.
-            _LOGGER.warning(
-                "Flex compensation update rejected; retrying next cycle", exc_info=True
-            )
-            await self._note_flex_bad_cycle()
+        except WoltaApiError as err:
+            if err.status is not None and 400 <= err.status < 500:
+                # The server looked at THIS payload and refused it (a 4xx other than
+                # the 404/429 caught above). An identical payload next cycle earns an
+                # identical refusal, forever - count it.
+                _LOGGER.warning(
+                    "Flex compensation update rejected; retrying next cycle",
+                    exc_info=True,
+                )
+                await self._note_flex_bad_cycle()
+            else:
+                # A 5xx (or a response with no status at all) is the server's
+                # trouble, not this payload's: the same bytes go through once it is
+                # back, which is what re-sending is for. Counting it would blame the
+                # user's sensor for Wolta's downtime.
+                _LOGGER.warning(
+                    "Flex compensation update failed; retrying next cycle",
+                    exc_info=True,
+                )
         except Exception:  # pylint: disable=broad-except
             _LOGGER.warning(
                 "Flex compensation update failed; retrying next cycle", exc_info=True
