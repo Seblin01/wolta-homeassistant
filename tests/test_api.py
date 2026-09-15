@@ -663,3 +663,18 @@ async def test_get_control_systems():
     client._request = AsyncMock(return_value=[{"id": "huawei", "label": "Huawei", "ha_domains": ["huawei_solar"]}])
     assert (await client.get_control_systems())[0]["id"] == "huawei"
     assert client._request.await_args.args[:2] == ("GET", "/control-systems")
+
+
+@pytest.mark.asyncio
+async def test_get_control_systems_skickar_bunden_timeout():
+    """Samma grund som de två mintarna: uppslaget awaitas INLINE i övergången
+    entities → plant, alltså medan användaren väntar på att nästa steg ska ritas.
+    Utan egen timeout gällde aiohttps default (total=300 s), så en blackholead
+    anslutning kunde frysa onboardingen i fem minuter för ett FÖRSLAG som ändå
+    degraderar tyst (broad except i config_flow → inget förslag)."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value=[])
+    await client.get_control_systems()
+    tmo = client._request.await_args.kwargs.get("timeout")
+    assert tmo is not None, "get_control_systems skickade ingen timeout - default 300 s galler da"
+    assert tmo.total is not None and tmo.total <= 15, f"otillräcklig gräns: {tmo.total}"

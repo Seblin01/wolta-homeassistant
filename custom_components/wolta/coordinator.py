@@ -354,9 +354,18 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # the status sensor would keep saying "measuring" for up to 6h while the repair
         # already asks for the nameplate. Only on a change - refreshing on every tick
         # would run the whole upload cycle every 5 minutes.
-        previous_status = self._battery_status
-        self._take_battery_state(profile)
-        battery_changed = self._battery_status != previous_status
+        # Stämpelläsningen ligger INNE i try:t: _take_battery_state indexerar
+        # battery_detect som dict och int():ar detect_min_days, så en missbildad rad
+        # (icke-dict, osiffrigt) kastar. Utanför try:t hade det brutit docstringens
+        # "Never raises" var 5:e minut i all oändlighet – servern skickar samma rad
+        # nästa tick, så felet hade aldrig läkt av sig självt.
+        try:
+            previous_status = self._battery_status
+            self._take_battery_state(profile)
+            battery_changed = self._battery_status != previous_status
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
+            battery_changed = False
         if self._apply_profile_sync(profile) or battery_changed:
             _LOGGER.debug("Web-side profile change detected; refreshing results")
             await self.async_request_refresh()

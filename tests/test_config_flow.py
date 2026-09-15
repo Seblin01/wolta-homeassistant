@@ -1357,11 +1357,16 @@ def _settings_marker(result, section_name: str, field: str):
 async def test_options_pending_battery_pair_is_optional(hass: HomeAssistant) -> None:
     """Väntande/needs_input-rad: servern HAR inget par än, så formuläret får inte kräva
     det. Ett vol.Required hade renderat DEFAULT_BATTERY_KWH och skrivit 22 kWh över
-    mätningen så fort användaren sparade något annat i dialogen."""
+    mätningen så fort användaren sparade något annat i dialogen.
+
+    eff är UNDANTAGET och förblir Required: backend lagrar alltid eff på en deklarerad
+    rad (0.9), så fältet är förifyllt även medan paret mäts. Som Optional hade det gått
+    att rensa → PATCH eff: null → backend 422 ("eff kan inte tas bort") som i dialogen
+    bara syns som cannot_connect."""
     entry = _make_mock_entry(hass)
     mock_client, _ = _mock_options_env(entry)
     mock_client.get_profile = AsyncMock(return_value=_server_profile(
-        entry, battery_kwh=None, battery_kw=None, eff=None, battery_status="pending"))
+        entry, battery_kwh=None, battery_kw=None, eff=0.9, battery_status="pending"))
 
     with (
         patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
@@ -1370,14 +1375,41 @@ async def test_options_pending_battery_pair_is_optional(hass: HomeAssistant) -> 
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={"next_step_id": "settings"})
-        for field in (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF):
+        for field in (CONF_BATTERY_KWH, CONF_BATTERY_KW):
             assert isinstance(_settings_marker(result, "battery", field), vol.Optional), field
+        eff_marker = _settings_marker(result, "battery", CONF_EFF)
+        assert isinstance(eff_marker, vol.Required), "eff får inte bli rensningsbar"
+        assert eff_marker.default() == 0.9
         # Ett tomt par går igenom och PATCH:ar ingenting – varken värden eller nullar.
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input=_opts())
+            result["flow_id"], user_input=_opts(**{CONF_EFF: 0.9}))
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_explicit_null_faller_till_default(hass: HomeAssistant) -> None:
+    """Servern kan skicka nycklarna MED null (till skillnad från att utelämna dem).
+    `srv.get(key, DEFAULT)` ger då None, och vol.Required(default=None) går inte att
+    spara – formuläret låser sig. Defaulten måste falla på null, inte bara på frånvaro."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_kwh=None, battery_kw=None, eff=None))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+
+    for field in (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF):
+        marker = _settings_marker(result, "battery", field)
+        assert isinstance(marker, vol.Required), field
+        assert marker.default() is not None, f"{field}: null-nyckel gav default=None"
 
 
 @pytest.mark.asyncio
@@ -1458,7 +1490,11 @@ async def test_options_purchase_date_prefill_is_offered_once(hass: HomeAssistant
 async def test_options_rejects_half_battery_pair(hass: HomeAssistant) -> None:
     """Väntande rad: paret är Optional, så ett ensamt kWh är submitbart. Det får inte
     PATCH:as – ett halvt par i cachen kan reauth bara deklarera bort, och backend
-    avvisar ett halvt par."""
+    avvisar ett halvt par.
+
+    Felet sätts på BÅDE det saknade fältet och "base": fältfelet sitter på ett fält
+    INUTI section("battery"), och renderar frontend inte fältfel i sektioner ser
+    användaren bara ett formulär som vägrar spara utan att säga varför."""
     entry = _make_mock_entry(hass)
     mock_client, _ = _mock_options_env(entry)
     mock_client.get_profile = AsyncMock(return_value=_server_profile(
@@ -1475,7 +1511,8 @@ async def test_options_rejects_half_battery_pair(hass: HomeAssistant) -> None:
             result["flow_id"], user_input=_opts(**{CONF_BATTERY_KWH: 22.0}))
 
     assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {CONF_BATTERY_KW: "battery_pair_incomplete"}
+    assert result["errors"] == {CONF_BATTERY_KW: "battery_pair_incomplete",
+                                "base": "battery_pair_incomplete"}
     mock_client.patch_profile.assert_not_awaited()
 
 

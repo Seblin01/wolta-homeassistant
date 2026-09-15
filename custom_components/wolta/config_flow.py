@@ -1253,6 +1253,10 @@ class WoltaOptionsFlow(OptionsFlow):
                 errors[CONF_BATTERY_KWH if kwh_in is None else CONF_BATTERY_KW] = (
                     "battery_pair_incomplete"
                 )
+                # Även på "base": fältfelet sitter på ett fält INUTI section("battery"),
+                # och renderar frontend inte fältfel i sektioner ser användaren bara ett
+                # formulär som vägrar spara utan att säga varför.
+                errors["base"] = "battery_pair_incomplete"
 
             # cost_scope (backend 2026-07-18): "plant" = the scalar price covers the
             # WHOLE plant (solar + battery; wolta.se guide profiles adopted into HA).
@@ -1377,19 +1381,27 @@ class WoltaOptionsFlow(OptionsFlow):
         kwh_selector = _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")
         kw_selector = _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")
         eff_selector = _number_selector(min_val=0.5, max_val=1.0, step=0.01)
+        # eff är Required i BÅDA grenarna – bara KAPACITETSPARET går Optional. Backend
+        # lagrar alltid eff (0.9) på en deklarerad rad, så fältet är förifyllt även
+        # medan paret mäts; det finns ingen mätning att skriva över. Som Optional hade
+        # det gått att rensa → PATCH eff: null → backend 422 ("eff kan inte tas bort"),
+        # som i dialogen bara syns som cannot_connect.
+        #
+        # `or DEFAULT` och inte `srv.get(key, DEFAULT)`: servern kan skicka nyckeln MED
+        # null (inte bara utelämna den), och då ger tvåargumentsformen None →
+        # vol.Required(default=None) går inte att spara alls.
+        eff_row = (vol.Required(CONF_EFF, default=srv.get(CONF_EFF) or DEFAULT_EFF),
+                   eff_selector)
         if battery_pending:
             kwh_row = _opt(CONF_BATTERY_KWH, kwh_selector)
             kw_row = _opt(CONF_BATTERY_KW, kw_selector)
-            eff_row = _opt(CONF_EFF, eff_selector)
         else:
             kwh_row = (vol.Required(CONF_BATTERY_KWH,
-                                    default=srv.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH)),
+                                    default=srv.get(CONF_BATTERY_KWH) or DEFAULT_BATTERY_KWH),
                        kwh_selector)
             kw_row = (vol.Required(CONF_BATTERY_KW,
-                                   default=srv.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW)),
+                                   default=srv.get(CONF_BATTERY_KW) or DEFAULT_BATTERY_KW),
                       kw_selector)
-            eff_row = (vol.Required(CONF_EFF, default=srv.get(CONF_EFF, DEFAULT_EFF)),
-                       eff_selector)
         battery_schema = vol.Schema(dict([
             kwh_row,
             _opt(CONF_NAMEPLATE_KWH, _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),

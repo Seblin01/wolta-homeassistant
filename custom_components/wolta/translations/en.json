@@ -200,7 +200,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
-      "invalid_input": "Invalid battery configuration – battery capacity and power must both be greater than zero.",
+      "invalid_input": "Wolta rejected the plant details – check the price zone and control system and try again.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
       "unknown": "Unexpected error",

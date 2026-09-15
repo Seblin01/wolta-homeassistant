@@ -2957,6 +2957,22 @@ async def test_battery_state_evaluated_by_side_poll(hass: HomeAssistant, mock_en
 
 
 @pytest.mark.asyncio
+async def test_side_poll_survives_malformed_battery_stamp(hass: HomeAssistant, mock_entry, caplog):
+    """Sidopollen är en timer-callback och lovar i sin docstring "Never raises" – men
+    stämpelläsningen låg UTANFÖR try:t. En missbildad stämpel (icke-dict battery_detect,
+    osiffrigt detect_min_days) kastade då AttributeError/ValueError rakt ut i HA:s
+    timer var 5:e minut, i all oändlighet: servern skickar samma trasiga rad nästa tick."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect="trasig", detect_min_days="x"))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+
+    await coordinator.async_check_profile_sync()  # får inte kasta
+
+    assert "side-poll" in caplog.text.lower() or "battery" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_battery_state_unchanged_side_poll_does_not_refresh(hass: HomeAssistant, mock_entry):
     """Oförändrad stämpel får INTE refresha – det vore hela uppladdningscykeln var 5:e minut."""
     client = _mock_client()

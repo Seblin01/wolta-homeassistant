@@ -39,6 +39,14 @@ _LOGGER = logging.getLogger(__name__)
 SETUP_MINT_TIMEOUT = aiohttp.ClientTimeout(total=10)
 INTERACTIVE_MINT_TIMEOUT = aiohttp.ClientTimeout(total=25)
 
+# Same reasoning, third failure contract: the /control-systems lookup behind the
+# control-system prefill (spec 2026-09-14 §5.6). It is awaited INLINE in the
+# entities → plant transition, i.e. while the user waits for the next onboarding
+# step to render, and it degrades silently to "no suggestion" (the call site wraps
+# it in a broad except). A wait longer than the step takes to draw therefore costs
+# the user everything and buys nothing - keep it the shortest of the three.
+PREFILL_TIMEOUT = aiohttp.ClientTimeout(total=8)
+
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
 # NPM/nginx defaults can be as low as 1 MB). ~5000 15-min rows ≈ 0.8 MB → passes
@@ -235,8 +243,12 @@ class WoltaApiClient:
 
     async def get_control_systems(self) -> list[dict]:
         """GET /control-systems (publik, cachebar): [{id, label, ha_domains}] – EN källa för
-        etiketter och förslagsmappningen HA-integrationsdomän → styrsystem (spec 2026-09-14 §5.6)."""
-        data = await self._request("GET", "/control-systems")
+        etiketter och förslagsmappningen HA-integrationsdomän → styrsystem (spec 2026-09-14 §5.6).
+
+        Bunden timeout (PREFILL_TIMEOUT): anropet awaitas inline i onboardingens
+        entities → plant-övergång, så aiohttps default (total=300 s) hade kunnat frysa
+        steget i fem minuter för ett förslag som ändå är frivilligt."""
+        data = await self._request("GET", "/control-systems", timeout=PREFILL_TIMEOUT)
         return data if isinstance(data, list) else []
 
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:

@@ -39,6 +39,8 @@ from .const import (
     CONF_CAPACITY_ISSUE_IGNORED,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
+    CONF_NAMEPLATE_KW,
+    CONF_NAMEPLATE_KWH,
     CONF_POWER_ISSUE_IGNORED,
     CONF_RESERVE_PCT,
     DOMAIN,
@@ -230,12 +232,25 @@ class BatteryNeedsInputRepairFlow(RepairsFlow):
     async def async_step_set_nameplate(self, user_input=None) -> data_entry_flow.FlowResult:
         if user_input is not None:
             coordinator = self._entry.runtime_data
+            kwh = float(user_input["nameplate_kwh"])
+            kw = float(user_input["nameplate_kw"])
             # Båda värdena i EN PATCH: backend härleder kapaciteten ur paret, så ett halvt
             # par lämnar raden utan betyg (samma regel som deklarationen i config-flowet).
             await coordinator.client.patch_profile(
-                coordinator.token, nameplate_kwh=float(user_input["nameplate_kwh"]),
-                nameplate_kw=float(user_input["nameplate_kw"]))
-            ir.async_delete_issue(self.hass, DOMAIN, f"battery_needs_input_{self._entry.entry_id}")
+                coordinator.token, nameplate_kwh=kwh, nameplate_kw=kw)
+            # Spegla paret i entry.data, precis som _finish speglar de levererbara värdena.
+            # Märkdatanycklarna ligger INTE i coordinatorns _PROFILE_SYNC_KEYS, så de kommer
+            # aldrig tillbaka via profilspeglingen – en reauth bygger en ny profil ur
+            # entry.data och hade återskapat raden utan märkdata, alltså rakt tillbaka i
+            # needs_input som användaren just svarat på.
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data={**self._entry.data, CONF_NAMEPLATE_KWH: kwh, CONF_NAMEPLATE_KW: kw},
+            )
+            # Repairs-managern har stämplat issue_id på flödet (components/repairs/
+            # issue_handler.py) – radera DEN id:t i stället för att bygga strängen igen och
+            # riskera att den glider ur fas med den som restes.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             await coordinator.async_request_refresh()
             return self.async_create_entry(title="", data={})
         return self.async_show_form(
