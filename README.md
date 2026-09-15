@@ -89,7 +89,7 @@ No account or API token is required. Setup starts with a choice:
 
 **Step 2 – Price zone and control system (create path)**
 - Pick your price zone. Nothing is preselected: the zone suggested from your Home Assistant location is listed first and labelled, but you have to choose it — the zone cannot be changed after the plant is created.
-- Confirm the control system (prefilled when Wolta recognises the integration behind your battery sensors), choose whether to contribute anonymised data, and check the charge/discharge direction toggle (preselected when your history looks reversed).
+- Confirm the control system (prefilled when Wolta recognises the integration behind your battery sensors) and check the charge/discharge direction toggle (preselected when your history looks reversed). The form states plainly what setup means: your 15-minute energy data is stored at Wolta, your anonymised optimisation grade is included in the public comparison, and removing the integration deletes all of it — see [Privacy](#privacy). There is no separate checkbox for any of this; it isn't optional.
 - Submit. **You are not asked for battery capacity, power or efficiency**: Wolta measures them from the data the integration uploads. The status sensor shows *Measuring battery* until then (typically 30 days with a few full charges). If the data cannot yield them — the battery never charges fully, or one stream is empty — a Repair asks for the nameplate values instead; you can also enter them any time under Configure → Settings.
 
 ## Shared profile with wolta.se
@@ -243,7 +243,7 @@ Your 15-minute energy data is stored on Wolta's servers to power the analysis. N
 
 **Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
-Anonymised corpus sharing is opt-in and defaults to off. See [wolta.se/om](https://wolta.se/om) for the full privacy policy.
+Your anonymised optimisation grade is always included in the public corpus comparison — there is no checkbox to opt out of it, and there never actually was one that did anything: the setting used to sit in the plant step, but it did not gate corpus membership or the raw-data retention described above, and it only had one real effect — disabling the expansion calculator (see [v0.37.0 release notes](docs/release-notes-v0.37.0.md)). See [wolta.se/om](https://wolta.se/om) for the full privacy policy.
 
 ## Links
 

@@ -75,7 +75,6 @@ from .const import (
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
-    DEFAULT_SHARE,
     DEFAULT_ZONE,
     DOMAIN,
     MIN_BATTERY_KW,
@@ -501,9 +500,6 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_CONTROL_SYSTEM_NAME): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
-                vol.Required(CONF_SHARE, default=DEFAULT_SHARE): BooleanSelector(
-                    BooleanSelectorConfig()
-                ),
                 # Visas ALLTID (beslut 2026-09-14), förbockad vid misstanke ur
                 # historiken (stadigt ur > in = omkastade batterisensorer).
                 vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
@@ -533,7 +529,6 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         zone = self._plant_data[CONF_ZONE]
-        share = self._plant_data.get(CONF_SHARE, DEFAULT_SHARE)
         solar = self._entities_data.get(CONF_SOLAR)
         # Client-local upload transformation (same nature as invert_battery below):
         # empty string (cleared selector) normalises to absence, never PATCHed to
@@ -556,7 +551,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             token = await client.create_profile(
                 zone=zone,
                 has_solar=bool(solar),
-                share_profile=share,
+                # The share checkbox is gone (2026-09-15 decision): it never gated
+                # corpus membership or the raw-data retention it claimed to, so
+                # every plant is created shared now. Full reasoning in the reauth
+                # branch below, which sends the same constant True.
+                share_profile=True,
                 battery_declared=True,
                 client_plant_id=self._plant_id,
                 control_system=control_system,
@@ -582,7 +581,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
             CONF_GRID_IN: self._entities_data[CONF_GRID_IN],
             CONF_GRID_OUT: self._entities_data[CONF_GRID_OUT],
-            CONF_SHARE: share,
+            # Key kept (reauth/diagnostics still read it) - always True now.
+            CONF_SHARE: True,
             CONF_CREATED_BY_HA: True,
             CONF_INVERT_BATTERY: bool(
                 self._plant_data.get(CONF_INVERT_BATTERY, False)
@@ -978,7 +978,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     eff=entry_data.get(CONF_EFF),
                     battery_declared=declared,
                     has_solar=bool(entry_data.get(CONF_SOLAR)),
-                    share_profile=entry_data.get(CONF_SHARE, DEFAULT_SHARE),
+                    # Always True (2026-09-15), NOT read from entry_data: the flag's
+                    # only real effect on an integration row is disabling the
+                    # expansion calculator - nothing is withheld from the comparison
+                    # (corpus membership was never gated by it) and the series is
+                    # kept regardless (streaming needs it), so a hidden False here
+                    # would be an invisible dead end with no privacy upside. A
+                    # linked row can't in practice carry False either - the web
+                    # opt-out never saves a returning token to link with.
+                    share_profile=True,
                     reserve_pct=entry_data.get(CONF_RESERVE_PCT),
                     cost_sek=entry_data.get(CONF_COST_SEK) if created_by_ha else None,
                     purchase_date=entry_data.get(CONF_PURCHASE_DATE),

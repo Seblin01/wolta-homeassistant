@@ -140,18 +140,16 @@
       },
       "plant": {
         "title": "Elpriszon och styrsystem",
-        "description": "Batterikapacitet, effekt och verkningsgrad mäts ur din uppladdade data – inget att fylla i. {zone_hint}",
+        "description": "Batterikapacitet, effekt och verkningsgrad mäts ur din uppladdade data – inget att fylla i. Din 15-minutersdata lagras hos Wolta, ditt anonymiserade optimeringsbetyg ingår i den publika jämförelsen, och allt raderas när du tar bort integrationen. {zone_hint}",
         "data": {
           "zone": "Elpriszon",
           "control_system": "Styrsystem",
           "control_system_name": "Styrsystemets namn (vid Annat)",
-          "share": "Bidra med anonymiserad data för att förbättra Wolta",
           "invert_battery": "Batteriladdning/urladdning omvänd"
         },
         "data_description": {
           "zone": "Går inte att ändra efter att anläggningen skapats – zonen avgör vilken prisserie ditt betyg och din ekonomi mäts mot.",
           "control_system": "Förifylld ur batterisensorernas integration när Wolta känner igen den – ändra om den är fel. Påverkar inte betyget; låter Wolta jämföra dig med anläggningar på samma system.",
-          "share": "Avstängt som standard. Din 15-minutersdata lagras hos Wolta tills du tar bort integrationen och delas aldrig om du inte kryssar i detta.",
           "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Förvald när din historik visar mer energi ut ur batteriet än in."
         }
       },
