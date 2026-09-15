@@ -650,6 +650,36 @@ def test_status_sensor_mapping():
         assert s.native_value == expected, f"{results['status']} → {expected}"
 
 
+def test_status_sensor_battery_pending_states():
+    """Väntande/ogiltig batterikapacitet har företräde över jobbstatusen (spec 2026-09-14
+    §7.2): utan känd kapacitet finns inget betyg, så "Klar" vore en lögn."""
+    for status, expected in (("pending", "measuring_battery"), ("needs_input", "needs_battery_input")):
+        s = _sensor("status", {**RESULTS_RECOMPUTING, "status": "cold", "battery_status": status})
+        assert s.native_value == expected
+    # känd kapacitet → jobbstatus som förr
+    s = _sensor("status", {**RESULTS_RECOMPUTING, "status": "done", "battery_status": "measured"})
+    assert s.native_value == "done"
+
+
+def test_status_sensor_battery_states_are_declared_options():
+    """ENUM-sensorns options måste rymma de två nya lägena, annars blir tillståndet ogiltigt."""
+    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "status")
+    assert {"measuring_battery", "needs_battery_input"} <= set(desc.options)
+
+
+def test_status_sensor_exposes_battery_detect_attrs():
+    """Detektionens framsteg syns som attribut (dygn hittills vs minsta krav) så en
+    dashboard kan visa väntan utan att gissa."""
+    s = _sensor("status", {**RESULTS_RECOMPUTING, "status": "cold", "battery_status": "pending"})
+    s.coordinator.data.battery_status = "pending"
+    s.coordinator.data.battery_detect = {"n_days": 12}
+    s.coordinator.data.detect_min_days = 30
+    attrs = s.extra_state_attributes
+    assert attrs["battery_status"] == "pending"
+    assert attrs["detect_days"] == 12
+    assert attrs["detect_min_days"] == 30
+
+
 def test_sek_sensors_suggest_zero_decimals():
     """The two kr-valued sensors display without decimals by default
     (dashboard entity cards can't set precision – it must come from the

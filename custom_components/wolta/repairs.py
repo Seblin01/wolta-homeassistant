@@ -16,6 +16,10 @@ The adopt UX differs per parameter:
 - power: an EDITABLE field pre-filled with the measured peak. Observed power is only a LOWER
   bound (the controller may never have demanded full power), so the user sets the battery's real
   maximum, likely the measured figure but higher if the hardware can do more.
+
+BatteryNeedsInputRepairFlow (spec 2026-09-14 §7.2) is the exception to the menu rule: it fires
+when the backend could not measure a declared battery at all, so there is no configured value to
+keep and nothing to ignore — without the nameplate pair the plant has no grade.
 """
 
 from __future__ import annotations
@@ -207,6 +211,42 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
         )
 
 
+class BatteryNeedsInputRepairFlow(RepairsFlow):
+    """Backend kunde inte mäta batteriets storlek (spec 2026-09-14 §7.2): be om märkskyltens
+    värden. Ingen ignore-meny – utan värden finns inget betyg. PATCH:ar båda; backend härleder
+    synkront (märkdata som fallback) och raden blir känd."""
+
+    def __init__(self, entry: ConfigEntry | None, *, days: int = 0) -> None:
+        self._entry = entry
+        self._days = days
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Samma kapplöpning som i _AdoptRepairFlow: entryn kan vara borttagen mellan att
+        # issuen restes och att användaren öppnar den.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return await self.async_step_set_nameplate()
+
+    async def async_step_set_nameplate(self, user_input=None) -> data_entry_flow.FlowResult:
+        if user_input is not None:
+            coordinator = self._entry.runtime_data
+            # Båda värdena i EN PATCH: backend härleder kapaciteten ur paret, så ett halvt
+            # par lämnar raden utan betyg (samma regel som deklarationen i config-flowet).
+            await coordinator.client.patch_profile(
+                coordinator.token, nameplate_kwh=float(user_input["nameplate_kwh"]),
+                nameplate_kw=float(user_input["nameplate_kw"]))
+            ir.async_delete_issue(self.hass, DOMAIN, f"battery_needs_input_{self._entry.entry_id}")
+            await coordinator.async_request_refresh()
+            return self.async_create_entry(title="", data={})
+        return self.async_show_form(
+            step_id="set_nameplate",
+            data_schema=vol.Schema({
+                vol.Required("nameplate_kwh"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=500.0)),
+                vol.Required("nameplate_kw"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=100.0)),
+            }),
+            description_placeholders={"days": str(self._days)})
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict[str, Any] | None
 ) -> RepairsFlow:
@@ -215,6 +255,8 @@ async def async_create_fix_flow(
     data = data or {}
     entry = hass.config_entries.async_get_entry(data.get("entry_id", ""))
     days = int(data.get("days", 0))
+    if issue_id.startswith("battery_needs_input"):
+        return BatteryNeedsInputRepairFlow(entry, days=days)
     if issue_id.startswith("measured_power"):
         configured = data.get("configured_kw")
         return MeasuredPowerRepairFlow(

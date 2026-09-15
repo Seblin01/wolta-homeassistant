@@ -302,7 +302,21 @@ _STATUS_MAP = {
     "cold": "waiting_for_data",
     "no_data": "waiting_for_data",
 }
-_STATUS_OPTIONS = ["done", "computing", "waiting_for_data", "error"]
+_STATUS_OPTIONS = [
+    "done", "computing", "waiting_for_data", "error",
+    "measuring_battery", "needs_battery_input",
+]
+# Serverns battery_status → statussensorns slug (spec 2026-09-14 §7.2). Bara de två
+# väntande lägena mappas; measured/nameplate/none betyder att jobbstatusen är det
+# intressanta igen.
+_BATTERY_STATUS_FIRST = {"pending": "measuring_battery", "needs_input": "needs_battery_input"}
+
+
+def _status_value(r: dict) -> str:
+    # Batteritillståndet har företräde (spec 2026-09-14 §7.2): utan känd kapacitet finns
+    # inget jobb att rapportera status för.
+    bs = _BATTERY_STATUS_FIRST.get(r.get("battery_status") or "")
+    return bs or _STATUS_MAP.get(r.get("status"), "waiting_for_data")
 
 
 SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
@@ -311,11 +325,16 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="status",
         device_class=SensorDeviceClass.ENUM,
         options=_STATUS_OPTIONS,
-        value_fn=lambda r: _STATUS_MAP.get(r.get("status"), "waiting_for_data"),
+        value_fn=_status_value,
         attr_fn=lambda data: {
             "server_status": data.results.get("status"),
             "job": (data.results.get("job") or {}).get("status"),
             "step": (data.results.get("job") or {}).get("step"),
+            # Mätningens framsteg (spec 2026-09-14 §7.2): dygn hittills mot serverns
+            # minsta krav, så väntan går att visa utan att gissa hur länge den håller på.
+            "battery_status": data.battery_status,
+            "detect_days": (data.battery_detect or {}).get("n_days"),
+            "detect_min_days": data.detect_min_days,
         },
     ),
     WoltaSensorEntityDescription(
