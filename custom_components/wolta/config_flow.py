@@ -553,7 +553,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 has_solar=bool(solar),
                 # The share checkbox is gone (2026-09-15 decision): it never gated
                 # corpus membership or the raw-data retention it claimed to, so
-                # every plant is created shared now - see CONF_SHARE in const.py.
+                # every plant is created shared now. Full reasoning in the reauth
+                # branch below, which sends the same constant True.
                 share_profile=True,
                 battery_declared=True,
                 client_plant_id=self._plant_id,

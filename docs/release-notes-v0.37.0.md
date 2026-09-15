@@ -26,11 +26,13 @@ the README for the full picture, including the linked-profile exception).
 key), but it is always `True` from this version on and is never read to decide
 anything any more.
 
-**If you created your plant with the box left unticked, the expansion calculator
-turns on at your next reauth** — no action needed beyond the normal
-re-authentication flow (Home Assistant prompts for it automatically when your
-token needs refreshing; you can also trigger it any time from Settings → Devices &
-Services → Wolta).
+**A plant created with the box left unticked keeps the old setting for now.**
+Server-side the flag only changes when the plant's profile is recreated, which
+happens during re-authentication — and Home Assistant prompts for that only if the
+plant's token stops working. There is no way to flip it from the interface, and
+removing and re-adding the integration would delete the plant's data and start a
+new plant, so it is not worth doing for this alone. The expansion calculator is the
+only thing affected; the grade, the economics and the sensors are unchanged.
 
 ### Why
 
@@ -43,7 +45,7 @@ the fix is to remove the false choice and say what actually happens instead.
 
 - No grade change for existing plants — every plant's grade already counted in the
   corpus regardless of this setting, so nothing about the comparison changes.
-- If your expansion calculator was disabled, it starts working again after your
-  next reauth — nothing to delete or recreate.
+- If your expansion calculator was disabled, it stays disabled until the profile is
+  recreated at a re-authentication. Nothing else about that plant is affected.
 - No breaking changes to the sensors or entry data shape. Update via HACS and
   restart Home Assistant.
