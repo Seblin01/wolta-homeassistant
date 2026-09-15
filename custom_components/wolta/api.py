@@ -143,11 +143,12 @@ class WoltaApiClient:
         self,
         *,
         zone: str,
-        battery_kwh: float,
-        battery_kw: float,
-        eff: float,
         has_solar: bool,
         share_profile: bool,
+        battery_kwh: float | None = None,
+        battery_kw: float | None = None,
+        eff: float | None = None,
+        battery_declared: bool = False,
         cost_sek: float | None = None,
         purchase_date: str | None = None,
         grid_var_ore: float | None = None,
@@ -166,14 +167,17 @@ class WoltaApiClient:
 
         POST /api/v1/profile → 201 {"profile_token": "<tok>"}
         """
-        payload: dict[str, Any] = {
-            "zone": zone,
-            "battery_kwh": battery_kwh,
-            "battery_kw": battery_kw,
-            "eff": eff,
-            "has_solar": has_solar,
-            "share_profile": share_profile,
-        }
+        payload: dict[str, Any] = {"zone": zone, "has_solar": has_solar, "share_profile": share_profile}
+        # Spec 2026-09-14 §7.1: paret utelämnas när batteriet bara DEKLARERAS – backend mäter
+        # kapacitet/effekt/verkningsgrad ur uppladdningen. Ett halvt par ska aldrig skickas
+        # (backend 422:ar), så flowet skickar antingen båda eller inget.
+        if battery_declared and battery_kwh is None and battery_kw is None:
+            payload["battery_declared"] = True
+        else:
+            payload["battery_kwh"] = battery_kwh
+            payload["battery_kw"] = battery_kw
+        if eff is not None:
+            payload["eff"] = eff
         if cost_sek is not None:
             payload["cost_sek"] = cost_sek
         if purchase_date is not None:
@@ -228,6 +232,12 @@ class WoltaApiClient:
         (purged/unknown token).
         """
         return await self._request("GET", "/profile", headers=self._auth(token))
+
+    async def get_control_systems(self) -> list[dict]:
+        """GET /control-systems (publik, cachebar): [{id, label, ha_domains}] – EN källa för
+        etiketter och förslagsmappningen HA-integrationsdomän → styrsystem (spec 2026-09-14 §5.6)."""
+        data = await self._request("GET", "/control-systems")
+        return data if isinstance(data, list) else []
 
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.
