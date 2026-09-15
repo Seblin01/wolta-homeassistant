@@ -844,6 +844,46 @@ async def test_reauth_without_pair_sends_declared(hass: HomeAssistant) -> None:
     assert kwargs["eff"] is None
 
 
+@pytest.mark.asyncio
+async def test_reauth_half_pair_sends_declared_not_nulls(hass: HomeAssistant) -> None:
+    """En HALV cache (bara kWh) får inte bli `battery_kwh: null, battery_kw: null` utan
+    deklaration – det 422:ar eller skapar en batterilös rad. Halva paret deklareras och
+    mäts om i stället, och paret går aldrig ut halvt."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    initial_data: dict[str, Any] = {
+        CONF_TOKEN: "old-token",
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_BATTERY_KWH: 22.0,   # effekten saknas – halv cache
+        CONF_SHARE: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Wolta (SE3)", data=initial_data,
+        source=config_entries.SOURCE_USER, unique_id="reauth-half-pair")
+    entry.add_to_hass(hass)
+
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=initial_data)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    kwargs = mock_client.create_profile.await_args.kwargs
+    assert kwargs["battery_declared"] is True
+    assert kwargs["battery_kwh"] is None and kwargs["battery_kw"] is None
+
+
 # ---------------------------------------------------------------------------
 # Multi-sensor: two solar sensors → entry.data stores list
 # ---------------------------------------------------------------------------
@@ -1371,6 +1411,72 @@ async def test_options_purchase_date_suggests_prefill(hass: HomeAssistant) -> No
             result["flow_id"], user_input={"next_step_id": "settings"})
     marker = _settings_marker(result, "economy", CONF_PURCHASE_DATE)
     assert (marker.description or {}).get("suggested_value") == "2023-01-15"
+
+
+@pytest.mark.asyncio
+async def test_options_purchase_date_prefill_is_offered_once(hass: HomeAssistant) -> None:
+    """Förslaget är ett ENGÅNGSerbjudande: har formuläret visat det en gång tas nyckeln
+    bort. Annars hade varje senare sparning föreslagit datumet igen och därmed
+    återuppväckt ett datum användaren medvetet rensade."""
+    entry = _make_mock_entry(hass, {CONF_PREFILL_PURCHASE_DATE: "2024-03-01"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, purchase_date=None))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        marker = _settings_marker(result, "economy", CONF_PURCHASE_DATE)
+        assert (marker.description or {}).get("suggested_value") == "2024-03-01"
+        # Användaren sparar med datumet RENSAT (nyckeln utelämnad, som frontenden gör).
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**{CONF_RESERVE_PCT: 10.0}))
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    entry = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_PREFILL_PURCHASE_DATE not in entry.data
+
+    # Andra rundan: erbjudandet är förbrukat, fältet är tomt igen.
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, purchase_date=None))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+    marker = _settings_marker(result, "economy", CONF_PURCHASE_DATE)
+    assert (marker.description or {}).get("suggested_value") is None
+
+
+@pytest.mark.asyncio
+async def test_options_rejects_half_battery_pair(hass: HomeAssistant) -> None:
+    """Väntande rad: paret är Optional, så ett ensamt kWh är submitbart. Det får inte
+    PATCH:as – ett halvt par i cachen kan reauth bara deklarera bort, och backend
+    avvisar ett halvt par."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_kwh=None, battery_kw=None, eff=None, battery_status="pending"))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**{CONF_BATTERY_KWH: 22.0}))
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_BATTERY_KW: "battery_pair_incomplete"}
+    mock_client.patch_profile.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2227,6 +2333,19 @@ async def test_control_system_default_from_platforms(hass: HomeAssistant) -> Non
     with _patched(mock_client, platforms=["huawei_solar", "huawei_solar"]):
         result = await _drive_create_to_plant(hass)
     assert _plant_schema_default(result, "control_system") == "huawei"
+
+
+@pytest.mark.asyncio
+async def test_control_system_unknown_id_is_not_defaulted(hass: HomeAssistant) -> None:
+    """Backendens lista ligger före vår egen (const.CONTROL_SYSTEMS): ett id vi inte har
+    som alternativ hade förvalt ett värde SelectSelector själv avvisar → MultipleInvalid
+    i sista onboarding-steget. Okänt förslag ⇒ ingen default."""
+    mock_client = _mock_client()
+    mock_client.get_control_systems = AsyncMock(return_value=[
+        {"id": "brandnew", "label": "Brand New", "ha_domains": ["brandnew_battery"]}])
+    with _patched(mock_client, platforms=["brandnew_battery"]):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, "control_system") is vol.UNDEFINED
 
 
 @pytest.mark.asyncio

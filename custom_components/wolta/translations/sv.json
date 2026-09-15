@@ -317,6 +317,7 @@
       }
     },
     "error": {
+      "battery_pair_incomplete": "Kapacitet och effekt hör ihop: fyll i båda, eller lämna båda tomma och låt Wolta mäta dem.",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },

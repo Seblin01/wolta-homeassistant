@@ -317,6 +317,7 @@
       }
     },
     "error": {
+      "battery_pair_incomplete": "Capacity and power go together: fill in both, or leave both empty and let Wolta measure them.",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },

@@ -655,7 +655,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         mapping = await WoltaApiClient(
                             async_get_clientsession(self.hass)
                         ).get_control_systems()
-                        self._cs_suggest = suggest_control_system(platforms, mapping)
+                        suggestion = suggest_control_system(platforms, mapping)
+                        # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
+                        # ett id vi inte känner igen som default hade förvalt ett värde som
+                        # SelectSelector själv avvisar → MultipleInvalid i sista
+                        # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
+                        self._cs_suggest = (
+                            suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
+                            else None
+                        )
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug(
                             "control_system prefill failed; no suggestion", exc_info=True
@@ -955,14 +963,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # for linked entries (created_by_ha False); the plant price is owned/edited on the
                 # web anyway. HA-created entries (default True) are battery-scoped → send it.
                 created_by_ha = entry_data.get(CONF_CREATED_BY_HA, True)
-                # Väntande entry (ingen kapacitet i cachen) återskapas väntande; backend
-                # mäter om. Kravet är att paret är HELT eller frånvarande: ett halvt par
-                # 422:ar (api.create_profile vidarebefordrar det), så `declared` kräver
-                # att BÅDA saknas och paret skickas bara när båda finns.
+                # Paret skickas bara när cachen har det HELT. Allt annat återskapas
+                # DEKLARERAT och mäts om av backend: en väntande entry (ingen kapacitet
+                # i cachen) men också en HALV cache, eftersom alternativet vore att
+                # skicka `battery_kwh: null, battery_kw: null` utan deklaration – vilket
+                # 422:ar eller skapar en batterilös rad. Ett halvt par går aldrig ut.
                 has_pair = (entry_data.get(CONF_BATTERY_KWH) is not None
                             and entry_data.get(CONF_BATTERY_KW) is not None)
-                declared = (entry_data.get(CONF_BATTERY_KWH) is None
-                            and entry_data.get(CONF_BATTERY_KW) is None)
+                declared = not has_pair
                 new_token = await client.create_profile(
                     zone=entry_data[CONF_ZONE],
                     battery_kwh=entry_data.get(CONF_BATTERY_KWH) if has_pair else None,
@@ -1235,6 +1243,17 @@ class WoltaOptionsFlow(OptionsFlow):
                     if key in sec_input:
                         flat[key] = sec_input[key]
 
+            # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
+            # (se battery_pending nedan), så ett ensamt värde är submitbart – och ett halvt
+            # par här blir ett halvt par i cachen, som reauth sedan bara kan deklarera bort
+            # (backend avvisar ett halvt par). Felet sätts på det SAKNADE fältet.
+            kwh_in = flat.get(CONF_BATTERY_KWH)
+            kw_in = flat.get(CONF_BATTERY_KW)
+            if (kwh_in is None) != (kw_in is None):
+                errors[CONF_BATTERY_KWH if kwh_in is None else CONF_BATTERY_KW] = (
+                    "battery_pair_incomplete"
+                )
+
             # cost_scope (backend 2026-07-18): "plant" = the scalar price covers the
             # WHOLE plant (solar + battery; wolta.se guide profiles adopted into HA).
             # Our field is explicitly battery-only, so it is hidden from the form for
@@ -1271,7 +1290,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 entry.data.get(CONF_INVERT_BATTERY, False)
             )
 
-            if patch_fields:
+            if patch_fields and not errors:
                 try:
                     await client.patch_profile(token, **patch_fields)
                 except WoltaApiError as err:
@@ -1279,7 +1298,12 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors["base"] = "cannot_connect"
 
             if not errors:
-                if patch_fields or invert_changed:
+                # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
+                # nu visat det, så nyckeln tas bort. Utan det hade varje senare sparning
+                # föreslagit datumet igen och därmed återuppväckt ett datum användaren
+                # medvetet rensade.
+                prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
+                if patch_fields or invert_changed or prefill_offered:
                     new_data = dict(entry.data)
                     for key, val in patch_fields.items():
                         if val is None:
@@ -1288,6 +1312,7 @@ class WoltaOptionsFlow(OptionsFlow):
                             new_data[key] = val
                     if invert_changed:
                         new_data[CONF_INVERT_BATTERY] = invert_new
+                    new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
                 coordinator = getattr(entry, "runtime_data", None)
@@ -1342,8 +1367,10 @@ class WoltaOptionsFlow(OptionsFlow):
         # än – backend mäter det ur uppladdningen. Då får formuläret inte KRÄVA paret:
         # ett vol.Required hade renderat DEFAULT_BATTERY_KWH och skrivit den gissningen
         # över mätningen så fort användaren sparade något annat i dialogen. Diff-logiken
-        # ovan är oförändrad: fälten ligger i _REQUIRED_FIELDS, så ett tomt fält PATCH:ar
-        # aldrig null, och ett komplett par nollställer flaggan server-side (plan A Task 7).
+        # ovan är oförändrad: fälten ligger kvar i _REQUIRED_FIELDS, så de jämförs rakt
+        # mot server-snapshotet – tomt mot tomt (den väntande raden) PATCH:ar ingenting,
+        # medan ett rensat visat värde PATCH:ar null precis som förut. Ett komplett par
+        # nollställer flaggan server-side (plan A Task 7).
         battery_pending = srv.get("battery_status") in (
             BATTERY_STATUS_PENDING, BATTERY_STATUS_NEEDS_INPUT
         )
