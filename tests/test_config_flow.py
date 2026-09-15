@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import string
 
 import hashlib
@@ -9,6 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
@@ -35,6 +37,7 @@ from custom_components.wolta.const import (
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
+    CONF_PREFILL_PURCHASE_DATE,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
@@ -42,7 +45,6 @@ from custom_components.wolta.const import (
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
-    DEFAULT_EFF,
     DEFAULT_SHARE,
     DOMAIN,
 )
@@ -55,14 +57,17 @@ from custom_components.wolta.const import (
 TOKEN = "tok-abc123"
 ZONE = "SE3"
 
-STEP_USER_DATA = {
+# Everything the plant step asks for since the two-step rewrite (spec 2026-09-14 §7.1):
+# capacity, power, efficiency, nameplate, reserve, economy and tariffs are gone from
+# setup (the backend measures the battery; the rest live in options → settings), and
+# `share`/`invert_battery` moved here from the removed privacy step.
+STEP_PLANT_DATA = {
     CONF_ZONE: ZONE,
-    CONF_BATTERY_KWH: 22.0,
-    CONF_BATTERY_KW: 5.0,
-    CONF_EFF: 0.9,
     # Mandatory since v0.29.0 (active choice, no default) - see the control_system
     # test block at the end of this file.
     "control_system": "emhass",
+    CONF_SHARE: False,
+    CONF_INVERT_BATTERY: False,
 }
 
 STEP_ENTITIES_DATA = {
@@ -80,41 +85,81 @@ STEP_ENTITIES_NO_SOLAR = {
     CONF_GRID_OUT: ["sensor.grid_export"],
 }
 
-STEP_PRIVACY_DATA = {
-    CONF_SHARE: False,
-}
-
 
 def _mock_client(token: str = TOKEN) -> MagicMock:
     """Return a mock WoltaApiClient whose create_profile returns TOKEN."""
     mock = MagicMock()
     mock.create_profile = AsyncMock(return_value=token)
+    # The entities step asks the backend for the domain → control-system mapping; an
+    # empty mapping means "no suggestion", which is the neutral default for tests that
+    # are not about the prefill.
+    mock.get_control_systems = AsyncMock(return_value=[])
     return mock
 
 
+@contextlib.contextmanager
+def _patched(mock_client, *, platforms=(), lifetime=(0.0, 0.0, None)):
+    """Patch everything the create flow reaches outside itself.
+
+    `platforms` is what the entity registry reports for the chosen battery sensors
+    (patched rather than registered: the test entity ids do not exist in the registry,
+    so the real lookup can only ever return an empty list). `lifetime` is the
+    (charged, discharged, first_ts) triple the history prefill is computed from.
+    """
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client)
+        )
+        stack.enter_context(patch("custom_components.wolta.config_flow.async_get_clientsession"))
+        stack.enter_context(
+            patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={})
+        )
+        stack.enter_context(
+            patch("custom_components.wolta.stats.async_fetch_lifetime",
+                  new=AsyncMock(return_value=lifetime))
+        )
+        stack.enter_context(
+            patch("custom_components.wolta.config_flow.battery_platforms",
+                  return_value=list(platforms))
+        )
+        yield mock_client
+
+
+async def _drive_create_to_plant(hass):
+    """Hjälpare: meny → create → entities (giltigt val) → returnera plant-stegets result."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "create"})
+    assert result["step_id"] == "entities"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], STEP_ENTITIES_DATA)
+    assert result["step_id"] == "plant"
+    return result
+
+
+def _plant_schema_default(result, field):
+    marker = next(k for k in result["data_schema"].schema
+                  if (k.schema if hasattr(k, "schema") else str(k)) == field)
+    # voluptuous wraps an explicit default value in a callable (default_factory);
+    # a Required() with NO default at all leaves .default as the raw vol.UNDEFINED
+    # sentinel, which is not callable - handle both so this helper also works for
+    # fields (like CONF_ZONE) that must render with nothing pre-selected.
+    d = marker.default
+    return d() if callable(d) else d
+
+
 # ---------------------------------------------------------------------------
-# Full happy-path flow: user → entities → privacy → entry created
+# Full happy-path flow: user → entities → plant → entry created
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
-    """Full user→entities→privacy flow creates a config entry with correct data."""
+    """Full user→entities→plant flow creates a config entry with correct data."""
     mock_client = _mock_client()
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -128,13 +173,7 @@ async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
         assert result["step_id"] == "plant"
 
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "privacy"
-
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -148,10 +187,13 @@ async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
     assert data[CONF_GRID_IN] == ["sensor.grid_import"]
     assert data[CONF_GRID_OUT] == ["sensor.grid_export"]
     assert data[CONF_SOLAR] == ["sensor.solar_production"]
-    assert data[CONF_BATTERY_KWH] == 22.0
-    assert data[CONF_BATTERY_KW] == 5.0
-    assert data[CONF_EFF] == 0.9
     assert data[CONF_SHARE] is False
+    # The battery figures are measured by the backend now, so nothing is cached for
+    # them here (spec 2026-09-14 §7.1) - a stale cached value would be re-sent by
+    # reauth and overwrite what the measurement found.
+    assert CONF_BATTERY_KWH not in data
+    assert CONF_BATTERY_KW not in data
+    assert CONF_EFF not in data
 
 
 @pytest.mark.asyncio
@@ -160,19 +202,7 @@ async def test_full_flow_unique_id_is_sha256_prefix(hass: HomeAssistant) -> None
     mock_client = _mock_client()
     expected_unique_id = hashlib.sha256(TOKEN.encode()).hexdigest()[:16]
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -183,10 +213,7 @@ async def test_full_flow_unique_id_is_sha256_prefix(hass: HomeAssistant) -> None
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -201,19 +228,7 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
     """Flow completes without solar entity (solar is optional)."""
     mock_client = _mock_client()
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -224,10 +239,7 @@ async def test_full_flow_no_solar(hass: HomeAssistant) -> None:
             result["flow_id"], user_input=STEP_ENTITIES_NO_SOLAR
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -251,19 +263,7 @@ async def test_full_flow_with_external_control_entity(hass: HomeAssistant) -> No
         CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active",
     }
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -274,10 +274,7 @@ async def test_full_flow_with_external_control_entity(hass: HomeAssistant) -> No
             result["flow_id"], user_input=entities_with_external
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -290,19 +287,7 @@ async def test_full_flow_without_external_control_entity(hass: HomeAssistant) ->
     coordinator sees None (not an empty string)."""
     mock_client = _mock_client()
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -313,10 +298,7 @@ async def test_full_flow_without_external_control_entity(hass: HomeAssistant) ->
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -346,17 +328,7 @@ async def test_entities_step_clearing_external_control_after_error_sticks(
     # The frontend OMITS a cleared optional key rather than sending an empty value.
     second_try = dict(STEP_ENTITIES_DATA)
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -373,10 +345,7 @@ async def test_entities_step_clearing_external_control_after_error_sticks(
             result["flow_id"], user_input=second_try
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -386,254 +355,35 @@ async def test_entities_step_clearing_external_control_after_error_sticks(
 
 
 # ---------------------------------------------------------------------------
-# Tariff override fields (plan 35 / task 4)
+# Economy, tariff, reserve and nameplate fields left the plant step with the
+# two-step rewrite (spec 2026-09-14 §7.1) - they all live in options → settings,
+# whose own tests below cover editing them. What the create path still owes is
+# that it sends NONE of them: an unasked value silently seeded into a fresh
+# profile is what the options diff would then measure "unchanged" against.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_full_flow_with_tariff_fields_sent_to_create_profile(
-    hass: HomeAssistant,
-) -> None:
-    """Tariff fields filled in the user step are passed to create_profile and stored."""
+async def test_create_flow_sends_no_economy_or_tariff_fields(hass: HomeAssistant) -> None:
+    """Setup asks for zone/control system/share/invert only, so the POST carries no
+    economy, tariff, reserve or nameplate value - and entry.data caches none."""
     mock_client = _mock_client()
-    step_user_with_tariff = {
-        **STEP_USER_DATA,
-        CONF_GRID_VAR_ORE: 40.0,
-        CONF_SURCHARGE_ORE: 8.0,
-        CONF_EXPORT_EXTRA_ORE: 5.0,
-    }
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_tariff
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["grid_var_ore"] == 40.0
-    assert kwargs["surcharge_ore"] == 8.0
-    assert kwargs["export_extra_ore"] == 5.0
-
-    data = result["data"]
-    assert data[CONF_GRID_VAR_ORE] == 40.0
-    assert data[CONF_SURCHARGE_ORE] == 8.0
-    assert data[CONF_EXPORT_EXTRA_ORE] == 5.0
-
-
-@pytest.mark.asyncio
-async def test_full_flow_without_tariff_fields_not_sent(hass: HomeAssistant) -> None:
-    """Leaving tariff fields blank means they are not sent and not stored."""
-    mock_client = _mock_client()
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs.get("grid_var_ore") is None
-    assert kwargs.get("surcharge_ore") is None
-    assert kwargs.get("export_extra_ore") is None
-
-    data = result["data"]
-    assert CONF_GRID_VAR_ORE not in data
-    assert CONF_SURCHARGE_ORE not in data
-    assert CONF_EXPORT_EXTRA_ORE not in data
-
-
-# ---------------------------------------------------------------------------
-# reserve_pct field (plan 38 / task 5)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_full_flow_with_reserve_pct_sent_to_create_profile(
-    hass: HomeAssistant,
-) -> None:
-    """reserve_pct filled in the user step is passed to create_profile and stored."""
-    mock_client = _mock_client()
-    step_user_with_reserve = {**STEP_USER_DATA, CONF_RESERVE_PCT: 10.0}
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_reserve
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["reserve_pct"] == 10.0
-
-    data = result["data"]
-    assert data[CONF_RESERVE_PCT] == 10.0
-
-
-@pytest.mark.asyncio
-async def test_full_flow_without_reserve_pct_not_sent(hass: HomeAssistant) -> None:
-    """Leaving reserve_pct blank means it is not sent and not stored."""
-    mock_client = _mock_client()
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs.get("reserve_pct") is None
-
-    data = result["data"]
-    assert CONF_RESERVE_PCT not in data
-
-
-@pytest.mark.asyncio
-async def test_full_flow_with_reserve_pct_zero_is_sent(hass: HomeAssistant) -> None:
-    """A legitimate reserve_pct of 0.0 (no reserve floor) must reach create_profile,
-    not be swallowed as "unset" (the `.get() or None` gotcha)."""
-    mock_client = _mock_client()
-    step_user_with_zero_reserve = {**STEP_USER_DATA, CONF_RESERVE_PCT: 0.0}
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_zero_reserve
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["reserve_pct"] == 0.0
-
-    data = result["data"]
-    assert data[CONF_RESERVE_PCT] == 0.0
+    kwargs = mock_client.create_profile.await_args.kwargs
+    for key in ("cost_sek", "purchase_date", "reserve_pct", "nameplate_kwh", "nameplate_kw",
+                "grid_var_ore", "surcharge_ore", "export_extra_ore",
+                "grid_var_pct", "export_extra_pct"):
+        assert kwargs.get(key) is None, f"{key} must not be sent on create"
+    for key in (CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
+                CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
+                CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT):
+        assert key not in result["data"], f"{key} must not be cached in entry.data"
 
 
 # ---------------------------------------------------------------------------
@@ -761,25 +511,13 @@ async def test_energy_prefill_skips_non_sensor_entities(hass: HomeAssistant) -> 
 
 @pytest.mark.asyncio
 async def test_api_error_shows_cannot_connect(hass: HomeAssistant) -> None:
-    """WoltaApiError during create_profile shows cannot_connect in privacy step."""
+    """WoltaApiError during create_profile shows cannot_connect in the plant step."""
     from custom_components.wolta.api import WoltaApiError
 
-    mock_client = MagicMock()
+    mock_client = _mock_client()
     mock_client.create_profile = AsyncMock(side_effect=WoltaApiError("failed"))
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -789,21 +527,19 @@ async def test_api_error_shows_cannot_connect(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
+        # The plant step is where the POST happens now, so this is where the failure
+        # must land: the form re-shows with the error instead of dead-ending.
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        # Privacy step with API failure
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "privacy"
+    assert result["step_id"] == "plant"
     assert result["errors"].get("base") == "cannot_connect"
 
 
 # ---------------------------------------------------------------------------
-# share default is False (privacy step default)
+# share default is False (plant step default)
 # ---------------------------------------------------------------------------
 
 
@@ -842,24 +578,12 @@ async def test_422_shows_invalid_input(hass: HomeAssistant) -> None:
     """HTTP 422 from create_profile (bad battery params) → invalid_input error."""
     from custom_components.wolta.api import WoltaApiError
 
-    mock_client = MagicMock()
+    mock_client = _mock_client()
     mock_client.create_profile = AsyncMock(
         side_effect=WoltaApiError("HTTP 422 from .../profile: ...", status=422)
     )
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -870,14 +594,11 @@ async def test_422_shows_invalid_input(hass: HomeAssistant) -> None:
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "privacy"
+    assert result["step_id"] == "plant"
     assert result["errors"].get("base") == "invalid_input"
 
 
@@ -886,24 +607,12 @@ async def test_non422_api_error_shows_cannot_connect(hass: HomeAssistant) -> Non
     """HTTP 500 (or other non-422) from create_profile → cannot_connect error."""
     from custom_components.wolta.api import WoltaApiError
 
-    mock_client = MagicMock()
+    mock_client = _mock_client()
     mock_client.create_profile = AsyncMock(
         side_effect=WoltaApiError("HTTP 500 from .../profile: ...", status=500)
     )
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -914,14 +623,11 @@ async def test_non422_api_error_shows_cannot_connect(hass: HomeAssistant) -> Non
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "privacy"
+    assert result["step_id"] == "plant"
     assert result["errors"].get("base") == "cannot_connect"
 
 
@@ -1051,6 +757,8 @@ async def test_reauth_flow_preserves_all_profile_fields(hass: HomeAssistant) -> 
     assert kwargs["export_extra_ore"] == 5.0
     assert kwargs["nameplate_kwh"] == 15.36
     assert kwargs["nameplate_kw"] == 8.0
+    # Cachen HAR ett par, så profilen återskapas med det – inte deklarerad.
+    assert kwargs["battery_declared"] is False
 
 
 @pytest.mark.asyncio
@@ -1097,6 +805,45 @@ async def test_reauth_linked_profile_omits_plant_scoped_cost(hass: HomeAssistant
     assert kwargs["reserve_pct"] == 10.0    # scope-neutrala fält seedas ändå
 
 
+@pytest.mark.asyncio
+async def test_reauth_without_pair_sends_declared(hass: HomeAssistant) -> None:
+    """En entry skapad väntande har inga kWh/kW i cachen (backend mäter dem), så reauth
+    måste återskapa profilen DEKLARERAD – aldrig med ett halvt par, som 422:ar."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    initial_data: dict[str, Any] = {
+        CONF_TOKEN: "old-token",
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SHARE: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Wolta (SE3)", data=initial_data,
+        source=config_entries.SOURCE_USER, unique_id="reauth-declared")
+    entry.add_to_hass(hass)
+
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=initial_data)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    kwargs = mock_client.create_profile.await_args.kwargs
+    assert kwargs["battery_declared"] is True
+    assert kwargs["battery_kwh"] is None and kwargs["battery_kw"] is None
+    assert kwargs["eff"] is None
+
+
 # ---------------------------------------------------------------------------
 # Multi-sensor: two solar sensors → entry.data stores list
 # ---------------------------------------------------------------------------
@@ -1115,19 +862,7 @@ async def test_full_flow_two_solar_sensors(hass: HomeAssistant) -> None:
         CONF_SOLAR: ["sensor.solar_inverter_a", "sensor.solar_inverter_b"],
     }
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -1138,10 +873,7 @@ async def test_full_flow_two_solar_sensors(hass: HomeAssistant) -> None:
             result["flow_id"], user_input=two_solar_entities
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -1166,19 +898,7 @@ async def test_required_stream_empty_list_shows_error(hass: HomeAssistant) -> No
         CONF_GRID_OUT: ["sensor.grid_export"],
     }
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -1234,109 +954,6 @@ async def test_energy_prefill_collects_multiple_solar_sources(hass: HomeAssistan
     assert "sensor.solar_a" in solar
     assert "sensor.solar_b" in solar
     assert len(solar) == 2
-
-
-# ---------------------------------------------------------------------------
-# v0.3.0: cost_sek + purchase_date in initial config flow
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_full_flow_with_cost_and_date(hass: HomeAssistant) -> None:
-    """Full flow with cost_sek + purchase_date stores them in entry.data and passes them to create_profile."""
-    mock_client = _mock_client()
-
-    step_user_with_cost = {
-        **STEP_USER_DATA,
-        CONF_COST_SEK: 89900.0,
-        CONF_PURCHASE_DATE: "2022-11-15",
-    }
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_cost
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    data = result["data"]
-    assert data[CONF_COST_SEK] == 89900.0
-    assert data[CONF_PURCHASE_DATE] == "2022-11-15"
-
-    # create_profile must have received cost_sek and purchase_date
-    mock_client.create_profile.assert_awaited_once()
-    call_kwargs = mock_client.create_profile.call_args
-    assert call_kwargs.kwargs["cost_sek"] == 89900.0
-    assert call_kwargs.kwargs["purchase_date"] == "2022-11-15"
-
-
-@pytest.mark.asyncio
-async def test_full_flow_without_cost_and_date(hass: HomeAssistant) -> None:
-    """Full flow without cost/date → entry.data has no cost/date keys, create_profile called without them (or with None)."""
-    mock_client = _mock_client()
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA  # no cost/date
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    data = result["data"]
-    # cost and date must not be in entry.data (or be None/absent)
-    assert not data.get(CONF_COST_SEK)
-    assert not data.get(CONF_PURCHASE_DATE)
-
-    # create_profile must have been called with cost_sek=None or not at all
-    call_kwargs = mock_client.create_profile.call_args
-    assert call_kwargs.kwargs.get("cost_sek") is None
-    assert call_kwargs.kwargs.get("purchase_date") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1684,6 +1301,76 @@ async def test_options_flow_prefills_existing_values(hass: HomeAssistant) -> Non
     assert seen[CONF_BATTERY_KWH] == 22.0
     assert seen[CONF_BATTERY_KW] == 5.0
     assert seen[CONF_EFF] == 0.9
+
+
+def _settings_marker(result, section_name: str, field: str):
+    """Hämta voluptuous-markören för ett fält i en options-sektion."""
+    outer = result["data_schema"].schema
+    sec_key = next(k for k in outer
+                   if (k.schema if hasattr(k, "schema") else str(k)) == section_name)
+    inner = outer[sec_key].schema.schema
+    return next(k for k in inner
+                if (k.schema if hasattr(k, "schema") else str(k)) == field)
+
+
+@pytest.mark.asyncio
+async def test_options_pending_battery_pair_is_optional(hass: HomeAssistant) -> None:
+    """Väntande/needs_input-rad: servern HAR inget par än, så formuläret får inte kräva
+    det. Ett vol.Required hade renderat DEFAULT_BATTERY_KWH och skrivit 22 kWh över
+    mätningen så fort användaren sparade något annat i dialogen."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_kwh=None, battery_kw=None, eff=None, battery_status="pending"))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        for field in (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF):
+            assert isinstance(_settings_marker(result, "battery", field), vol.Optional), field
+        # Ett tomt par går igenom och PATCH:ar ingenting – varken värden eller nullar.
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts())
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_purchase_date_suggests_prefill(hass: HomeAssistant) -> None:
+    """Datumförslaget ur statistiken skickades aldrig till servern, så options är där
+    användaren bekräftar det (spec 2026-09-14 §7.1) – men serverns egna datum vinner."""
+    entry = _make_mock_entry(hass, {CONF_PREFILL_PURCHASE_DATE: "2024-03-01"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, purchase_date=None))
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+    marker = _settings_marker(result, "economy", CONF_PURCHASE_DATE)
+    assert (marker.description or {}).get("suggested_value") == "2024-03-01"
+
+    # Samma entry, nytt options-flöde: nu HAR servern ett datum och det vinner.
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, purchase_date="2023-01-15"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+    marker = _settings_marker(result, "economy", CONF_PURCHASE_DATE)
+    assert (marker.description or {}).get("suggested_value") == "2023-01-15"
 
 
 @pytest.mark.asyncio
@@ -2302,11 +1989,7 @@ async def test_link_flow_creates_entry_with_server_profile(hass: HomeAssistant) 
     mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
     mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -2418,72 +2101,64 @@ async def test_reauth_view_only_avvisar_laslank(hass: HomeAssistant) -> None:
     mock_client.get_profile.assert_not_called()
 
 
-async def _drive_create_to_plant(hass):
-    """Hjälpare: meny → create → entities (giltigt val) → returnera plant-stegets result."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER})
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"next_step_id": "create"})
-    assert result["step_id"] == "entities"
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], STEP_ENTITIES_DATA)
-    assert result["step_id"] == "plant"
-    return result
-
-
-def _plant_schema_default(result, field):
-    marker = next(k for k in result["data_schema"].schema
-                  if (k.schema if hasattr(k, "schema") else str(k)) == field)
-    # voluptuous wraps an explicit default value in a callable (default_factory);
-    # a Required() with NO default at all leaves .default as the raw vol.UNDEFINED
-    # sentinel, which is not callable - handle both so this helper also works for
-    # fields (like CONF_ZONE) that must render with nothing pre-selected.
-    d = marker.default
-    return d() if callable(d) else d
-
-
 @pytest.mark.asyncio
-async def test_create_flow_order_entities_then_plant(hass: HomeAssistant) -> None:
-    """Ny ordning: meny → entities → plant → privacy; POST /profile först i privacy."""
+async def test_create_flow_order_entities_then_plant_creates_entry(
+    hass: HomeAssistant,
+) -> None:
+    """Två steg (spec 2026-09-14 §7.1): entities → plant → entry. POST /profile i
+    plant-steget, utan battery_kwh/kw/eff, med battery_declared."""
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
+        mock_client.create_profile.assert_not_awaited()
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], STEP_USER_DATA)
-        assert result["step_id"] == "privacy"
-        mock_client.create_profile.assert_not_awaited()  # POST först i privacy-steget
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], STEP_PRIVACY_DATA)
-
+            result["flow_id"], STEP_PLANT_DATA)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_CREATED_BY_HA] is True
     mock_client.create_profile.assert_awaited_once()
+    kwargs = mock_client.create_profile.await_args.kwargs
+    assert kwargs["battery_declared"] is True
+    assert kwargs.get("battery_kwh") is None and kwargs.get("battery_kw") is None
+    assert kwargs.get("eff") is None
+    assert kwargs["share_profile"] is False
+    assert CONF_BATTERY_KWH not in result["data"] and CONF_EFF not in result["data"]
 
 
 @pytest.mark.asyncio
-async def test_create_flow_zone_has_no_default(hass: HomeAssistant) -> None:
-    """Zone is an ACTIVE choice (directive 2026-08-24): it selects the price series
-    the grade AND the economics are computed against, and is IMMUTABLE server-side
-    after plant creation. A location-based guess must never pre-select the dropdown
-    - that would be acceptance-by-inaction, exactly like the pre-fix control_system
-    default. This test used to assert the default WAS "SE3" (the old, wrong
-    behaviour); it is now inverted per directive rather than deleted."""
-    import voluptuous as vol  # noqa: PLC0415
-
-    hass.config.country = "SE"
-    hass.config.latitude = 59.33
+async def test_plant_step_has_no_privacy_step(hass: HomeAssistant) -> None:
+    """The plant step asks for exactly four things (share and the invert toggle moved
+    here from the removed privacy step); everything else is measured or lives in
+    options. The field list IS the contract - a stray number field here would be a
+    value the user is asked for twice."""
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+        keys = {(k.schema if hasattr(k, "schema") else str(k))
+                for k in result["data_schema"].schema}
+    assert keys == {CONF_ZONE, "control_system", "control_system_name",
+                    CONF_SHARE, CONF_INVERT_BATTERY}
+
+
+@pytest.mark.asyncio
+async def test_zone_suggestion_first_with_label_no_default(hass: HomeAssistant) -> None:
+    """Zone is an ACTIVE choice (directive 2026-08-24): it selects the price series the
+    grade AND the economics are measured against, and the server treats it as immutable
+    after creation. So the location guess is surfaced by MOVING that zone to the top of
+    the dropdown with a labelled hint (spec 2026-09-14 §7.1) - never as a default, which
+    would be acceptance-by-inaction."""
+    hass.config.country = "SE"
+    hass.config.latitude = 59.33  # -> SE3, per the SE latitude bands
+    mock_client = _mock_client()
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
     assert _plant_schema_default(result, CONF_ZONE) is vol.UNDEFINED
+    zone_marker = next(k for k in result["data_schema"].schema
+                       if (k.schema if hasattr(k, "schema") else str(k)) == CONF_ZONE)
+    options = result["data_schema"].schema[zone_marker].config["options"]
+    assert options[0]["value"] == "SE3"
+    assert "föreslag" in options[0]["label"].lower() or "suggest" in options[0]["label"].lower()
+    # The rest of the list keeps its order, so the dropdown is not reshuffled.
+    assert [o["value"] for o in options[1:4]] == ["SE1", "SE2", "SE4"]
 
 
 @pytest.mark.asyncio
@@ -2493,11 +2168,7 @@ async def test_create_flow_zone_guess_surfaced_as_text(hass: HomeAssistant) -> N
     hass.config.country = "SE"
     hass.config.latitude = 59.33  # -> SE3, per the SE latitude bands
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
     hint = result["description_placeholders"]["zone_hint"]
     assert "SE3" in hint
@@ -2511,11 +2182,7 @@ async def test_create_flow_zone_no_guess_reads_sensibly(hass: HomeAssistant) -> 
     hass.config.country = "SE"
     hass.config.latitude = 0.0
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
     hint = result["description_placeholders"]["zone_hint"]
     assert "None" not in hint
@@ -2528,11 +2195,7 @@ async def test_create_flow_zone_no_guess_unsupported_country(hass: HomeAssistant
     hass.config.country = "US"
     hass.config.latitude = 40.0
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
     hint = result["description_placeholders"]["zone_hint"]
     assert "None" not in hint
@@ -2544,17 +2207,68 @@ async def test_plant_step_requires_zone(hass: HomeAssistant) -> None:
     """Submitting the plant step without a zone must not pass - it must never
     silently create a plant with the old SE3 default."""
     mock_client = _mock_client()
-    with (
-        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
-    ):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
-        submission = {k: v for k, v in STEP_USER_DATA.items() if k != CONF_ZONE}
+        submission = {k: v for k, v in STEP_PLANT_DATA.items() if k != CONF_ZONE}
         with pytest.raises(Exception):  # vol.MultipleInvalid: required key missing
             await hass.config_entries.flow.async_configure(
                 result["flow_id"], user_input=submission
             )
+
+
+@pytest.mark.asyncio
+async def test_control_system_default_from_platforms(hass: HomeAssistant) -> None:
+    """The battery sensors' integration domain identifies the control system well
+    enough to PRE-SELECT it (spec 2026-09-14 §7.1) - unlike the zone, a wrong value
+    here is correctable afterwards, and the mapping comes from the backend."""
+    mock_client = _mock_client()
+    mock_client.get_control_systems = AsyncMock(return_value=[
+        {"id": "huawei", "label": "Huawei", "ha_domains": ["huawei_solar"]}])
+    with _patched(mock_client, platforms=["huawei_solar", "huawei_solar"]):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, "control_system") == "huawei"
+
+
+@pytest.mark.asyncio
+async def test_control_system_no_default_without_suggestion(hass: HomeAssistant) -> None:
+    """No suggestion (unknown domain, a tie, or a failed mapping fetch) leaves the
+    field without a default, as before the prefill existed - a guessed default would
+    park every inattentive user in the same corpus bucket."""
+    mock_client = _mock_client()
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, "control_system") is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_invert_shown_always_prefilled_on_suspicion(hass: HomeAssistant) -> None:
+    """Steady out > in in the history means the two battery meters are swapped, so the
+    toggle is pre-ticked. The field itself is shown either way (decision 2026-09-14) -
+    see test_plant_step_has_no_privacy_step, which finds it without any suspicion."""
+    mock_client = _mock_client()
+    # charged/discharged/first_ts: ratio 1.2 > the 1.05 invert threshold, over enough
+    # days and kWh for stats.analyze_battery_history to trust the ratio at all.
+    with _patched(mock_client,
+                  lifetime=(1000.0, 1200.0, datetime(2025, 1, 1, tzinfo=timezone.utc))):
+        result = await _drive_create_to_plant(hass)
+    assert _plant_schema_default(result, CONF_INVERT_BATTERY) is True
+
+
+@pytest.mark.asyncio
+async def test_prefill_purchase_date_stored_not_sent(hass: HomeAssistant) -> None:
+    """The first statistics timestamp is not necessarily a purchase date, and a
+    silently filled one steers the payback calculation - so it is cached in entry.data
+    for options → Economy to offer, never sent on create (spec 2026-09-14 §7.1)."""
+    mock_client = _mock_client()
+    with _patched(mock_client,
+                  lifetime=(100.0, 90.0, datetime(2024, 3, 1, tzinfo=timezone.utc))):
+        result = await _drive_create_to_plant(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_PLANT_DATA)
+    assert result["data"][CONF_PREFILL_PURCHASE_DATE] == "2024-03-01"
+    assert CONF_PURCHASE_DATE not in result["data"]
+    kwargs = mock_client.create_profile.await_args.kwargs
+    assert kwargs.get("purchase_date") is None
 
 
 def test_zone_hint_localized_by_language() -> None:
@@ -2585,30 +2299,11 @@ async def test_create_flow_zone_hint_wired_to_ha_language(hass: HomeAssistant) -
     hass.config.country = "SE"
     hass.config.latitude = 59.33  # -> SE3, per the SE latitude bands
     mock_client = _mock_client()
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
     hint = result["description_placeholders"]["zone_hint"]
     assert "stämma" in hint
     assert "looks likely" not in hint
-
-
-@pytest.mark.asyncio
-async def test_create_flow_invert_detection_prefills_toggle(hass: HomeAssistant) -> None:
-    """Ur > in i historiken → invert-togglen förvald + eff-förslag = speglad kvot."""
-    mock_client = _mock_client()
-    first = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(880.0, 1000.0, first))):
-        result = await _drive_create_to_plant(hass)
-    assert _plant_schema_default(result, CONF_INVERT_BATTERY) is True
-    assert _plant_schema_default(result, CONF_EFF) == 0.88
 
 
 @pytest.mark.asyncio
@@ -2619,11 +2314,7 @@ async def test_link_flow_invert_suspected_shows_check_step(hass: HomeAssistant) 
     mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
     first = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(880.0, 1000.0, first))):
+    with _patched(mock_client, lifetime=(880.0, 1000.0, first)):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -2763,17 +2454,7 @@ async def test_full_flow_with_flex_compensation_entity(hass: HomeAssistant) -> N
         CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
     }
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -2784,10 +2465,7 @@ async def test_full_flow_with_flex_compensation_entity(hass: HomeAssistant) -> N
             result["flow_id"], user_input=entities_with_flex
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -2803,17 +2481,7 @@ async def test_full_flow_without_flex_compensation_entity(hass: HomeAssistant) -
     sees None and never reads (or PATCHes) anything."""
     mock_client = _mock_client()
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -2824,10 +2492,7 @@ async def test_full_flow_without_flex_compensation_entity(hass: HomeAssistant) -
             result["flow_id"], user_input=STEP_ENTITIES_DATA
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -2856,17 +2521,7 @@ async def test_entities_step_clearing_flex_compensation_after_error_sticks(
     # The frontend OMITS a cleared optional key rather than sending an empty value.
     second_try = dict(STEP_ENTITIES_DATA)
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -2883,10 +2538,7 @@ async def test_entities_step_clearing_flex_compensation_after_error_sticks(
             result["flow_id"], user_input=second_try
         )
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -2967,17 +2619,7 @@ async def test_flex_compensation_is_never_sent_to_create_profile(
         CONF_FLEX_COMPENSATION: "sensor.checkwatt_monthly_compensation",
     }
 
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -2987,11 +2629,8 @@ async def test_flex_compensation_is_never_sent_to_create_profile(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=entities_with_flex
         )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
         await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            result["flow_id"], user_input=STEP_PLANT_DATA
         )
 
     kwargs = mock_client.create_profile.call_args.kwargs
@@ -3012,11 +2651,7 @@ async def test_link_flow_adopts_web_profile(hass: HomeAssistant) -> None:
     mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
     mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -3040,11 +2675,7 @@ async def test_link_flow_stores_plant_id(hass: HomeAssistant) -> None:
     mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
     mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -3085,6 +2716,43 @@ async def test_link_flow_rejects_batteryless_profile(hass: HomeAssistant) -> Non
 
 
 @pytest.mark.asyncio
+async def test_link_accepts_pending_profile(hass: HomeAssistant) -> None:
+    """A profile whose capacity is still being measured has no kWh/kW pair yet, but it
+    HAS a battery - the pair-is-missing rule would reject it (spec 2026-09-14 §7.2)."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value={"zone": "SE3", "battery_kwh": None,
+        "battery_kw": None, "battery_status": "pending", "derived": {}})
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": TOKEN})
+    assert result["step_id"] == "entities"
+
+
+@pytest.mark.asyncio
+async def test_link_rejects_none_status(hass: HomeAssistant) -> None:
+    """battery_status "none" is the one value that still means solar-only: the
+    integration's grade semantics assume a battery."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value={"zone": "SE3", "battery_kwh": None,
+        "battery_kw": None, "battery_status": "none", "derived": {}})
+    mock_client.adopt_profile = AsyncMock()
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": TOKEN})
+    assert result["errors"] == {"profile_input": "profile_no_battery"}
+    mock_client.adopt_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_link_flow_zone_fallback_when_server_lacks_zone(hass: HomeAssistant) -> None:
     """Zone saknas i serversvaret (defensivt) → DEFAULT_ZONE, aldrig KeyError vid setup."""
     from custom_components.wolta.const import DEFAULT_ZONE
@@ -3095,11 +2763,7 @@ async def test_link_flow_zone_fallback_when_server_lacks_zone(hass: HomeAssistan
     mock_client.get_profile = AsyncMock(return_value=profile)
     mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -3136,192 +2800,6 @@ async def test_options_flow_purged_profile_starts_reauth(hass: HomeAssistant) ->
         if f["context"].get("source") == config_entries.SOURCE_REAUTH
     ]
     assert len(reauth_flows) == 1
-
-
-# ---------------------------------------------------------------------------
-# nameplate_kwh field (backend spec 2026-07-14)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_full_flow_with_nameplate_kwh_sent_to_create_profile(
-    hass: HomeAssistant,
-) -> None:
-    """nameplate_kwh filled in the plant step is passed to create_profile and cached."""
-    from custom_components.wolta.const import CONF_NAMEPLATE_KWH
-
-    mock_client = _mock_client()
-    step_user_with_nameplate = {**STEP_USER_DATA, CONF_NAMEPLATE_KWH: 22.0}
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_nameplate
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["nameplate_kwh"] == 22.0
-    assert result["data"][CONF_NAMEPLATE_KWH] == 22.0
-
-
-@pytest.mark.asyncio
-async def test_full_flow_without_nameplate_kwh_not_sent(hass: HomeAssistant) -> None:
-    """Leaving nameplate_kwh blank means None is sent and nothing is cached."""
-    from custom_components.wolta.const import CONF_NAMEPLATE_KWH
-
-    mock_client = _mock_client()
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["nameplate_kwh"] is None
-    assert CONF_NAMEPLATE_KWH not in result["data"]
-
-
-# ---------------------------------------------------------------------------
-# nameplate_kw field (v0.15.0 – parity with nameplate_kwh, backend spec 2026-07-15)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_full_flow_with_nameplate_kw_sent_to_create_profile(
-    hass: HomeAssistant,
-) -> None:
-    """nameplate_kw filled in the plant step is passed to create_profile and cached."""
-    from custom_components.wolta.const import CONF_NAMEPLATE_KW
-
-    mock_client = _mock_client()
-    step_user_with_nameplate = {**STEP_USER_DATA, CONF_NAMEPLATE_KW: 8.0}
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_nameplate
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    mock_client.create_profile.assert_awaited_once()
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["nameplate_kw"] == 8.0
-    assert result["data"][CONF_NAMEPLATE_KW] == 8.0
-
-
-@pytest.mark.asyncio
-async def test_full_flow_without_nameplate_kw_not_sent(hass: HomeAssistant) -> None:
-    """Leaving nameplate_kw blank means None is sent and nothing is cached."""
-    from custom_components.wolta.const import CONF_NAMEPLATE_KW
-
-    mock_client = _mock_client()
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_USER_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["nameplate_kw"] is None
-    assert CONF_NAMEPLATE_KW not in result["data"]
 
 
 @pytest.mark.asyncio
@@ -3464,11 +2942,7 @@ async def test_create_flow_sends_and_stores_plant_id(hass: HomeAssistant) -> Non
     """
     mock_client = _mock_client()
 
-    with patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client), \
-         patch("custom_components.wolta.config_flow.async_get_clientsession"), \
-         patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}), \
-         patch("custom_components.wolta.stats.async_fetch_lifetime",
-               new=AsyncMock(return_value=(0.0, 0.0, None))):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -3476,9 +2950,7 @@ async def test_create_flow_sends_and_stores_plant_id(hass: HomeAssistant) -> Non
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], STEP_ENTITIES_DATA)
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], STEP_USER_DATA)
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], STEP_PRIVACY_DATA)
+            result["flow_id"], STEP_PLANT_DATA)
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     sent = mock_client.create_profile.await_args.kwargs["client_plant_id"]
@@ -3686,57 +3158,6 @@ async def test_reconfigure_aborts_for_view_only(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_flow_with_pct_fields_sent_to_create_profile(
-    hass: HomeAssistant,
-) -> None:
-    """Percent-of-spot fields (backend api 0.55.0) filled in the plant step are
-    passed to create_profile and stored, mirroring the öre fields exactly."""
-    mock_client = _mock_client()
-    step_user_with_pct = {
-        **STEP_USER_DATA,
-        CONF_GRID_VAR_PCT: 5.61,
-        CONF_EXPORT_EXTRA_PCT: 5.0,
-    }
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "custom_components.wolta.config_flow.async_get_clientsession",
-        ),
-        patch(
-            "custom_components.wolta.config_flow._energy_dashboard_defaults",
-            return_value={},
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"next_step_id": "create"}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_ENTITIES_DATA
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=step_user_with_pct
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    _, kwargs = mock_client.create_profile.call_args
-    assert kwargs["grid_var_pct"] == 5.61
-    assert kwargs["export_extra_pct"] == 5.0
-    data = result["data"]
-    assert data[CONF_GRID_VAR_PCT] == 5.61
-    assert data[CONF_EXPORT_EXTRA_PCT] == 5.0
-
-
-@pytest.mark.asyncio
 async def test_options_flow_changes_pct_field(hass: HomeAssistant) -> None:
     """Changing grid_var_pct in the options flow → patch_profile with the new value."""
     entry = _make_mock_entry(
@@ -3816,11 +3237,7 @@ async def test_options_flow_clears_pct_field(hass: HomeAssistant) -> None:
 async def test_plant_step_requires_control_system(hass: HomeAssistant) -> None:
     """Submitting the plant step without a control system must not pass."""
     mock_client = _mock_client()
-    with (
-        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -3834,10 +3251,8 @@ async def test_plant_step_requires_control_system(hass: HomeAssistant) -> None:
         with pytest.raises(Exception):  # vol.MultipleInvalid: required key missing
             await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                user_input={
-                    CONF_ZONE: ZONE, CONF_BATTERY_KWH: 22.0,
-                    CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
-                },
+                user_input={k: v for k, v in STEP_PLANT_DATA.items()
+                            if k != "control_system"},
             )
 
 
@@ -3845,11 +3260,7 @@ async def test_plant_step_requires_control_system(hass: HomeAssistant) -> None:
 async def test_plant_step_other_requires_name(hass: HomeAssistant) -> None:
     """control_system='other' without a name re-shows the form with an error."""
     mock_client = _mock_client()
-    with (
-        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -3861,7 +3272,7 @@ async def test_plant_step_other_requires_name(hass: HomeAssistant) -> None:
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            user_input={**STEP_USER_DATA, "control_system": "other"},
+            user_input={**STEP_PLANT_DATA, "control_system": "other"},
         )
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "plant"
@@ -3872,11 +3283,7 @@ async def test_plant_step_other_requires_name(hass: HomeAssistant) -> None:
 async def test_create_profile_sends_and_stores_control_system(hass: HomeAssistant) -> None:
     """The chosen control system reaches create_profile and lands in entry data."""
     mock_client = _mock_client()
-    with (
-        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-        patch("custom_components.wolta.config_flow._energy_dashboard_defaults", return_value={}),
-    ):
+    with _patched(mock_client):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -3888,11 +3295,7 @@ async def test_create_profile_sends_and_stores_control_system(hass: HomeAssistan
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            user_input={**STEP_USER_DATA, "control_system": "emhass"},
-        )
-        assert result["step_id"] == "privacy"
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input=STEP_PRIVACY_DATA
+            user_input={**STEP_PLANT_DATA, "control_system": "emhass"},
         )
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert mock_client.create_profile.call_args.kwargs["control_system"] == "emhass"
