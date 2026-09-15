@@ -63,6 +63,15 @@ CONF_PLANT_ID = "plant_id"
 # profile (it just asks for a fresh token). Missing key = False (every pre-v0.18.0 entry
 # streams).
 CONF_VIEW_ONLY = "view_only"
+# Spec 2026-09-14: inköpsdatumet ur statistiken (första datapunkten) skickas INTE till
+# servern vid skapandet – det är inte nödvändigtvis ett inköpsdatum. Sparas här och visas
+# som suggested_value i options → Economy, där användaren bekräftar det.
+CONF_PREFILL_PURCHASE_DATE = "prefill_purchase_date"
+# Serverns battery_status (profil-GET, spec 2026-09-14 §4). Bara stämpeln renderas; regeln
+# pending→needs_input bor i backend.
+BATTERY_STATUS_NONE = "none"
+BATTERY_STATUS_PENDING = "pending"
+BATTERY_STATUS_NEEDS_INPUT = "needs_input"
 # Set when the user dismisses the measured-power repair via its "ignore" option. observed_power
 # is only a lower bound and can be inflated by chronic sensor jumps in the cumulative HA
 # statistics, so a user who stands by their configured power must be able to silence the nudge
