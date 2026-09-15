@@ -32,13 +32,13 @@ step 1. It's just a comparison label — it doesn't affect the grade — so chan
 if it's wrong or leave it as suggested.
 
 **The charge/discharge direction toggle is always shown in step 2** (previously it
-only appeared as a separate confirmation step when your history looked reversed),
-preselected when it does.
+sat among the battery fields; linked profiles still get a separate confirmation
+step), preselected when your history looks reversed.
 
 **A suggested purchase date, read from your sensor history, is now offered once in
 the Configure dialog instead of being set automatically.** It shows up as a
 suggested value the first time you open Settings after setup; accept it, type your
-own, or leave the field blank — nothing is written until you save.
+own, or clear it if you don't know the date — nothing is written until you save.
 
 ### Notes
 
