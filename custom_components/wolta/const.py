@@ -106,8 +106,6 @@ DEFAULT_BATTERY_KW = 5.0
 MIN_BATTERY_KWH = 0.1
 MIN_BATTERY_KW = 0.1
 DEFAULT_EFF = 0.9
-# Privacy opt-in – must default to False (users must explicitly opt in to sharing)
-DEFAULT_SHARE = False
 
 # API – wolta.se serves the API under /api/v1 (no api. subdomain exists)
 WOLTA_API_BASE = "https://wolta.se"

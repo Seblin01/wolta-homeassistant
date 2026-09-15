@@ -140,18 +140,16 @@
       },
       "plant": {
         "title": "Price zone and control system",
-        "description": "Battery capacity, power and efficiency are measured from your uploaded data – nothing to type. {zone_hint}",
+        "description": "Battery capacity, power and efficiency are measured from your uploaded data – nothing to type. Your 15-minute energy data is stored at Wolta, your anonymised optimisation grade is included in the public comparison, and removing the integration deletes all of it. {zone_hint}",
         "data": {
           "zone": "Electricity price zone",
           "control_system": "Control system",
           "control_system_name": "Control system name (when Other)",
-          "share": "Contribute anonymised data to improve Wolta",
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
           "zone": "Cannot be changed after the plant is created – it decides which price series your grade and economics are measured against.",
           "control_system": "Prefilled from your battery sensors' integration when Wolta recognises it – change it if it is wrong. Does not affect the grade; lets Wolta compare you with plants on the same system.",
-          "share": "Off by default. Your 15-minute energy data is stored at Wolta until you remove the integration and is never shared unless you tick this.",
           "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Preselected when your history shows more energy leaving the battery than entering it."
         }
       },
