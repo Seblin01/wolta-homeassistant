@@ -45,7 +45,6 @@ from custom_components.wolta.const import (
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
-    DEFAULT_SHARE,
     DOMAIN,
 )
 
@@ -60,13 +59,15 @@ ZONE = "SE3"
 # Everything the plant step asks for since the two-step rewrite (spec 2026-09-14 §7.1):
 # capacity, power, efficiency, nameplate, reserve, economy and tariffs are gone from
 # setup (the backend measures the battery; the rest live in options → settings), and
-# `share`/`invert_battery` moved here from the removed privacy step.
+# `invert_battery` moved here from the removed privacy step. The `share` checkbox
+# that used to sit alongside it is gone too (2026-09-15 decision): it never gated
+# corpus membership or the raw-data retention it claimed to, so entries are always
+# created with share_profile=True now - see CONF_SHARE in const.py.
 STEP_PLANT_DATA = {
     CONF_ZONE: ZONE,
     # Mandatory since v0.29.0 (active choice, no default) - see the control_system
     # test block at the end of this file.
     "control_system": "emhass",
-    CONF_SHARE: False,
     CONF_INVERT_BATTERY: False,
 }
 
@@ -187,7 +188,8 @@ async def test_full_flow_creates_entry(hass: HomeAssistant) -> None:
     assert data[CONF_GRID_IN] == ["sensor.grid_import"]
     assert data[CONF_GRID_OUT] == ["sensor.grid_export"]
     assert data[CONF_SOLAR] == ["sensor.solar_production"]
-    assert data[CONF_SHARE] is False
+    # The share checkbox is gone (2026-09-15) - every entry is created shared now.
+    assert data[CONF_SHARE] is True
     # The battery figures are measured by the backend now, so nothing is cached for
     # them here (spec 2026-09-14 §7.1) - a stale cached value would be re-sent by
     # reauth and overwrite what the measurement found.
@@ -539,13 +541,79 @@ async def test_api_error_shows_cannot_connect(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# share default is False (plant step default)
+# The share checkbox is gone (2026-09-15 decision, see const.py CONF_SHARE) - it
+# never gated corpus membership (corpus_submission ignores it) or the raw-data
+# retention it claimed to gate (warm.py keeps the series for every integration
+# row regardless); the only real effect was disabling the expansion calculator.
+# So the plant step no longer asks, and every plant is created/reauthed shared.
 # ---------------------------------------------------------------------------
 
 
-def test_default_share_is_false() -> None:
-    """DEFAULT_SHARE must be False (privacy opt-in, not opt-out)."""
-    assert DEFAULT_SHARE is False
+@pytest.mark.asyncio
+async def test_plant_schema_has_no_share_field(hass: HomeAssistant) -> None:
+    """The plant step's schema must not offer a share toggle any more."""
+    mock_client = _mock_client()
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+        keys = {(k.schema if hasattr(k, "schema") else str(k))
+                for k in result["data_schema"].schema}
+    assert CONF_SHARE not in keys
+
+
+@pytest.mark.asyncio
+async def test_create_always_sends_share_profile_true(hass: HomeAssistant) -> None:
+    """Create must send share_profile=True unconditionally, and persist share: True
+    in entry.data, even though the plant step no longer collects it."""
+    mock_client = _mock_client()
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_PLANT_DATA)
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.create_profile.await_args.kwargs["share_profile"] is True
+    assert result["data"][CONF_SHARE] is True
+
+
+@pytest.mark.asyncio
+async def test_reauth_sends_share_profile_true_even_if_stored_false(
+    hass: HomeAssistant,
+) -> None:
+    """An entry created before this change may still carry share: False in
+    entry.data (the key is kept for reauth/diagnostics). Reauth must NOT read it -
+    it always sends share_profile=True, since a hidden False would be an invisible
+    dead end with no privacy upside (the series is kept regardless, and a linked
+    row can't in practice carry False - the web opt-out never saves a returning
+    token to link with)."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    initial_data: dict[str, Any] = {
+        CONF_TOKEN: "old-token",
+        CONF_ZONE: ZONE,
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SHARE: False,
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Wolta (SE3)", data=initial_data,
+        source=config_entries.SOURCE_USER, unique_id="reauth-share-false")
+    entry.add_to_hass(hass)
+
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=initial_data)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={})
+
+    assert result["reason"] == "reauth_successful"
+    assert mock_client.create_profile.await_args.kwargs["share_profile"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -2263,23 +2331,24 @@ async def test_create_flow_order_entities_then_plant_creates_entry(
     assert kwargs["battery_declared"] is True
     assert kwargs.get("battery_kwh") is None and kwargs.get("battery_kw") is None
     assert kwargs.get("eff") is None
-    assert kwargs["share_profile"] is False
+    assert kwargs["share_profile"] is True
     assert CONF_BATTERY_KWH not in result["data"] and CONF_EFF not in result["data"]
 
 
 @pytest.mark.asyncio
 async def test_plant_step_has_no_privacy_step(hass: HomeAssistant) -> None:
-    """The plant step asks for exactly four things (share and the invert toggle moved
-    here from the removed privacy step); everything else is measured or lives in
-    options. The field list IS the contract - a stray number field here would be a
-    value the user is asked for twice."""
+    """The plant step asks for exactly four things (the invert toggle moved here from
+    the removed privacy step; the share checkbox that used to sit next to it is gone
+    entirely, 2026-09-15); everything else is measured or lives in options. The field
+    list IS the contract - a stray field here would be a value the user is asked for
+    twice."""
     mock_client = _mock_client()
     with _patched(mock_client):
         result = await _drive_create_to_plant(hass)
         keys = {(k.schema if hasattr(k, "schema") else str(k))
                 for k in result["data_schema"].schema}
     assert keys == {CONF_ZONE, "control_system", "control_system_name",
-                    CONF_SHARE, CONF_INVERT_BATTERY}
+                    CONF_INVERT_BATTERY}
 
 
 @pytest.mark.asyncio
