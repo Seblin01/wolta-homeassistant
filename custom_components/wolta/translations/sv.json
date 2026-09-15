@@ -87,6 +87,19 @@
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
+    },
+    "battery_needs_input": {
+      "title": "Wolta behöver batteriets märkdata",
+      "fix_flow": {
+        "step": {
+          "set_nameplate": {
+            "title": "Ange batteriets märkdata",
+            "description": "Wolta kunde inte mäta batteriets storlek ur datan som laddats upp hittills ({days} dygn): batteriet fulladdas aldrig, eller så är en av batteriströmmarna tom. Ange tillverkarens värden – Wolta räknar själv ut den användbara kapaciteten och byter till det uppmätta värdet så fort datan räcker.",
+            "data": { "nameplate_kwh": "Märkt kapacitet (kWh)", "nameplate_kw": "Märkeffekt (kW)" }
+          }
+        },
+        "abort": { "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort." }
+      }
     }
   },
   "config": {
@@ -108,13 +121,6 @@
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
         }
       },
-      "privacy": {
-        "title": "Data & integritet",
-        "description": "Din 15-minutersdata lagras hos Wolta tills du raderar integrationen. Den delas aldrig utan att du kryssar i bidrag nedan.",
-        "data": {
-          "share": "Bidra med anonymiserad data för att förbättra Wolta"
-        }
-      },
       "reauth_confirm": {
         "title": "Autentisera Wolta på nytt",
         "description": "Din Wolta-profiltoken har upphört eller tagits bort. Bekräfta för att skapa en ny profil och återkoppla integrationen.",
@@ -133,42 +139,20 @@
         }
       },
       "plant": {
-        "title": "Batteri och ekonomi",
-        "description": "Förifyllt där det går utifrån din Home Assistant-plats och sensorhistorik – kontrollera värdena och justera. {zone_hint}",
+        "title": "Elpriszon och styrsystem",
+        "description": "Batterikapacitet, effekt och verkningsgrad mäts ur din uppladdade data – inget att fylla i. {zone_hint}",
         "data": {
           "zone": "Elpriszon",
-          "battery_kwh": "Användbar batterikapacitet (kWh)",
-          "nameplate_kwh": "Märkt kapacitet (kWh) – valfri",
-          "battery_kw": "Batteriets maxeffekt (kW)",
-          "nameplate_kw": "Märkeffekt (kW) – valfri",
-          "eff": "Rundtripsverkningsgrad (0,5–1,0)",
           "control_system": "Styrsystem",
           "control_system_name": "Styrsystemets namn (vid Annat)",
-          "reserve_pct": "Reservgolv (%) – valfritt",
-          "cost_sek": "Vad du betalade för batteriet (kr) – endast batteriet, valfritt",
-          "purchase_date": "Inköpsdatum – valfritt",
-          "grid_var_ore": "Nätavgift (öre/ct per kWh) – valfritt",
-          "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh) – valfritt",
-          "export_extra_ore": "Exportjustering (öre/ct per kWh) – valfritt",
-          "grid_var_pct": "Nätavgiftens procentdel (% av spot) – valfritt",
-          "export_extra_pct": "Exportersättning i procent (% av spot) – valfritt",
+          "share": "Bidra med anonymiserad data för att förbättra Wolta",
           "invert_battery": "Batteriladdning/urladdning omvänd"
         },
         "data_description": {
-          "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan). Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
-          "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
-          "battery_kw": "Batteriets maximala laddnings- och urladdningseffekt.",
-          "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara AC-effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt vid mätaren är lägre (växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
-          "eff": "Verkningsgrad tur och retur mätt på växelströmssidan (energi ut ÷ energi in, vid mätaren). Inte DC-/cellsiffran från tillverkarens app.",
-          "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger.",
-          "cost_sek": "Vad du faktiskt betalade för ENDAST batteriet (inte solceller/installation), i kr. Ange fakturans slutsumma, efter eventuellt grönt avdrag. Används för att räkna batteriets IRR och återbetalningstid. Valfritt. Har du köpt batteriet i flera steg, eller vill ange solcellernas kostnad och se hela anläggningens avkastning? Det redigerar du på din wolta.se-profil.",
-          "purchase_date": "Datum då batteri- (eller sol+batteri-)systemet installerades. Används för att räkna 'facit i år'. Valfritt. När datumet föreslås ur din sensorhistorik är det första registrerade månadens start – justera om du vet exakt datum. Datum i framtiden (planerat köp)? Resultaten visar bara det faktiska utfallet hittills – för ett planerat köp, använd beslutskalkylatorn på wolta.se i stället.",
-          "grid_var_ore": "Din rörliga nätavgift, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
-          "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Lämna tomt för att använda landets schablon.",
-          "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset, i öre eller eurocent. Kan vara negativt. Lämna tomt för att använda landets schablon.",
-          "grid_var_pct": "Nätavgiftens rörliga del uttryckt som procent av spotpriset (vanligt i södra Sverige sedan 2026: fast öre-del + procentdel). Lämna tomt om din nätavgift är enbart öre.",
-          "export_extra_pct": "Exportersättning uttryckt som procent av spotpriset (kan vara negativ). Lämna tomt om din ersättning är enbart öre.",
-          "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Byter batteriets laddning och urladdning vid uppladdning, så du slipper ändra dina Home Assistant-sensorer."
+          "zone": "Går inte att ändra efter att anläggningen skapats – zonen avgör vilken prisserie ditt betyg och din ekonomi mäts mot.",
+          "control_system": "Förifylld ur batterisensorernas integration när Wolta känner igen den – ändra om den är fel. Påverkar inte betyget; låter Wolta jämföra dig med anläggningar på samma system.",
+          "share": "Avstängt som standard. Din 15-minutersdata lagras hos Wolta tills du tar bort integrationen och delas aldrig om du inte kryssar i detta.",
+          "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Förvald när din historik visar mer energi ut ur batteriet än in."
         }
       },
       "link": {
@@ -216,7 +200,7 @@
     },
     "error": {
       "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
-      "invalid_input": "Ogiltig batterikonfiguration – batterikapacitet och effekt måste båda vara större än noll.",
+      "invalid_input": "Wolta avvisade anläggningens uppgifter – kontrollera elområde och styrsystem och försök igen.",
       "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
       "required_sensor": "Minst en sensor krävs för detta flöde.",
       "unknown": "Oväntat fel",
@@ -258,9 +242,9 @@
               "reserve_pct": "Reservgolv (%)"
             },
             "data_description": {
-              "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan). Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
+              "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan) – lämna tomt medan Wolta mäter. Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
               "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
-              "battery_kw": "Maximal ladd-/urladdningseffekt i kW.",
+              "battery_kw": "Maximal ladd-/urladdningseffekt i kW – lämna tomt medan Wolta mäter.",
               "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara AC-effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt vid mätaren är lägre (växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
               "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
@@ -317,6 +301,7 @@
       }
     },
     "error": {
+      "battery_pair_incomplete": "Kapacitet och effekt hör ihop: fyll i båda, eller lämna båda tomma och låt Wolta mäta dem.",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },
@@ -333,6 +318,8 @@
           "done": "Klar",
           "computing": "Beräknar",
           "waiting_for_data": "Väntar på data",
+          "measuring_battery": "Mäter batteriet",
+          "needs_battery_input": "Behöver batterivärden",
           "error": "Fel"
         }
       },

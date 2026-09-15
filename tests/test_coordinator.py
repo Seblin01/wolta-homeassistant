@@ -622,7 +622,9 @@ async def test_wolta_data_structure(hass: HomeAssistant, mock_entry):
     assert hasattr(result, "last_uploaded")
     assert hasattr(result, "n_days")
     assert hasattr(result, "pending")
-    assert result.results == RESULTS_PAYLOAD
+    # results är sensorernas vy, inte en råkopia: batteristämpeln hoistas in (spec
+    # 2026-09-14 §7.2) eftersom value_fn bara ser results.
+    assert result.results == {**RESULTS_PAYLOAD, "battery_status": None}
     assert result.n_days == 150
     assert result.pending is False
 
@@ -1749,7 +1751,7 @@ async def test_view_only_never_uploads(hass: HomeAssistant, mock_entry):
     client.put_data.assert_not_awaited()
     client.recompute.assert_not_awaited()
     client.results.assert_awaited_once()
-    assert data.results == RESULTS_DONE_JOB_SETTLED
+    assert data.results == {**RESULTS_DONE_JOB_SETTLED, "battery_status": None}
     assert data.last_uploaded is None
 
 
@@ -2879,3 +2881,135 @@ async def test_unconfigured_stream_is_not_flagged(hass: HomeAssistant, mock_entr
     )
     assert ir.async_get(hass).async_get_issue(
         DOMAIN, coordinator._energy_issue_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Väntande batterikapacitet (spec 2026-09-14 §7.2): stämpeln ur profil-GET:en
+# ---------------------------------------------------------------------------
+
+_BATTERY_ISSUE_ID = "battery_needs_input_test_entry_id"
+
+
+def _battery_profile(status, **over):
+    """Profil-GET som backend (api 0.88.0) svarar för en deklarerad men omätt batterirad."""
+    return {**BASE_PROFILE, "battery_status": status, **over}
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_raises_fixable_issue(hass: HomeAssistant, mock_entry):
+    """needs_input = backend har gett upp mätningen → fråga användaren om märkskylten."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect={"n_days": 240}))
+    _, data = await _sync_refresh(hass, mock_entry, client)
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _BATTERY_ISSUE_ID)
+    assert issue is not None
+    assert issue.is_fixable is True
+    assert issue.translation_placeholders == {"days": "240"}
+    assert issue.data["days"] == 240
+    assert issue.data["entry_id"] == "test_entry_id"
+    # Stämpeln ska nå både dataobjektet och results (sensorernas value_fn ser bara results).
+    assert data.battery_status == "needs_input"
+    assert data.results["battery_status"] == "needs_input"
+    assert data.battery_detect == {"n_days": 240}
+    assert data.detect_min_days == 30
+
+
+@pytest.mark.asyncio
+async def test_battery_pending_clears_issue_and_keeps_slow_poll(hass: HomeAssistant, mock_entry):
+    """pending = mätningen pågår. Issuen (från en tidigare needs_input) ska bort, och
+    väntan får INTE dra upp polltakten – det är serverns mätfönster som rör sig, inte ett jobb."""
+    from custom_components.wolta.coordinator import _SLOW_POLL
+
+    ir.async_create_issue(
+        hass, DOMAIN, _BATTERY_ISSUE_ID, is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="battery_needs_input")
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "pending", battery_detect={"n_days": 4}, detect_min_days=14))
+    coordinator, data = await _sync_refresh(hass, mock_entry, client)
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BATTERY_ISSUE_ID) is None
+    assert data.battery_status == "pending"
+    assert data.detect_min_days == 14
+    assert data.pending is False, "väntande kapacitet är ingen jobbstatus"
+    assert coordinator.update_interval == _SLOW_POLL
+
+
+@pytest.mark.asyncio
+async def test_battery_state_evaluated_by_side_poll(hass: HomeAssistant, mock_entry):
+    """Sidopollen (5 min) måste utvärdera stämpeln också – annars dröjer frågan upp till 6 h.
+    Profilen är i övrigt oförändrad, så ingen spegling sker: utvärderingen får inte hänga på den."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect={"n_days": 90}))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    await coordinator.async_check_profile_sync()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _BATTERY_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_placeholders == {"days": "90"}
+    # Stämpeln ligger inte i entry.data, så _apply_profile_sync ser den inte: utan den
+    # egna refreshen skulle statussensorn säga "mäter" i upp till 6 h efter att repairen
+    # redan bett om märkskylten.
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_survives_malformed_battery_stamp(hass: HomeAssistant, mock_entry, caplog):
+    """Sidopollen är en timer-callback och lovar i sin docstring "Never raises" – men
+    stämpelläsningen låg UTANFÖR try:t. En missbildad stämpel (icke-dict battery_detect,
+    osiffrigt detect_min_days) kastade då AttributeError/ValueError rakt ut i HA:s
+    timer var 5:e minut, i all oändlighet: servern skickar samma trasiga rad nästa tick."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect="trasig", detect_min_days="x"))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+
+    await coordinator.async_check_profile_sync()  # får inte kasta
+
+    assert "side-poll" in caplog.text.lower() or "battery" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_battery_state_unchanged_side_poll_does_not_refresh(hass: HomeAssistant, mock_entry):
+    """Oförändrad stämpel får INTE refresha – det vore hela uppladdningscykeln var 5:e minut."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect={"n_days": 90}))
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    await coordinator.async_check_profile_sync()   # första tick: None → needs_input
+    coordinator.async_request_refresh.reset_mock()
+    await coordinator.async_check_profile_sync()   # andra tick: oförändrad
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_never_fires_in_view_only(hass: HomeAssistant, mock_entry):
+    """Visningsläge äger inte profilen (bunden anläggning) – att be den ägaren om märkdata
+    vore att skicka frågan till fel person, och servern 409:ar skrivningen ändå."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    mock_entry.data = {**ENTRY_DATA, CONF_VIEW_ONLY: True}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=_battery_profile(
+        "needs_input", battery_detect={"n_days": 240}))
+    _, data = await _sync_refresh(hass, mock_entry, client)
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BATTERY_ISSUE_ID) is None
+    # Stämpeln syns ändå i sensorn – bara repairen är tystad.
+    assert data.battery_status == "needs_input"
+
+
+@pytest.mark.asyncio
+async def test_battery_status_absent_on_old_backend(hass: HomeAssistant, mock_entry):
+    """Profil utan stämpel (äldre backend) → inget fält, ingen issue, inget krångel."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    _, data = await _sync_refresh(hass, mock_entry, client)
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BATTERY_ISSUE_ID) is None
+    assert data.battery_status is None
+    assert data.results["battery_status"] is None
+    assert data.detect_min_days == 30

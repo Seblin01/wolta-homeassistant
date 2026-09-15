@@ -322,3 +322,103 @@ async def test_repair_aborts_when_entry_missing(hass: HomeAssistant):
     result = await flow.async_step_init()
     assert result["type"] == "abort"
     assert result["reason"] == "entry_not_found"
+
+
+# ---------------------------------------------------------------------------
+# battery_needs_input (spec 2026-09-14 §7.2): backend gav upp mätningen
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.repairs import BatteryNeedsInputRepairFlow  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_repair_patches_nameplate_pair(hass: HomeAssistant):
+    """Formuläret PATCH:ar BÅDA märkskyltsvärdena – backend härleder kapaciteten synkront
+    ur paret, så ett halvt par lämnar raden utan betyg."""
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=None, reserve=None)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = BatteryNeedsInputRepairFlow(entry, days=240)
+    flow.hass = hass
+    flow.issue_id = "battery_needs_input_e1"
+    form = await flow.async_step_init()
+    assert form["type"] == "form" and form["step_id"] == "set_nameplate"
+    result = await flow.async_step_set_nameplate({"nameplate_kwh": 12.0, "nameplate_kw": 6.0})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with(
+        "tok", nameplate_kwh=12.0, nameplate_kw=6.0)
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_repair_has_no_ignore_option(hass: HomeAssistant):
+    """Ingen ignore-väg: utan värden finns inget betyg, så det finns inget att vifta bort.
+    Steget öppnar direkt i formuläret istället för i de andra flödenas meny."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=None, reserve=None)
+    flow = BatteryNeedsInputRepairFlow(entry, days=240)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] == "form"
+    assert form["description_placeholders"]["days"] == "240"
+    assert not hasattr(flow, "async_step_ignore")
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_repair_clears_issue(hass: HomeAssistant):
+    """Issuen tas bort direkt vid inskickat par istället för vid nästa poll."""
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=None, reserve=None)
+    hass.config_entries.async_update_entry = MagicMock()
+    ir.async_create_issue(
+        hass, "wolta", "battery_needs_input_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="battery_needs_input")
+    flow = BatteryNeedsInputRepairFlow(entry, days=240)
+    flow.hass = hass
+    # Repairs-managern stämplar issue_id på flödet innan något steg körs
+    # (components/repairs/issue_handler.py) – flödet raderar den id:t, inte en
+    # egenbyggd sträng som kan glida ur fas med den som restes.
+    flow.issue_id = "battery_needs_input_e1"
+    await flow.async_step_set_nameplate({"nameplate_kwh": 12.0, "nameplate_kw": 6.0})
+    assert ir.async_get(hass).async_get_issue("wolta", "battery_needs_input_e1") is None
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_repair_speglar_parat_i_entry_data(hass: HomeAssistant):
+    """Märkdata måste speglas i entry.data precis som _finish speglar de levererbara
+    värdena. Nameplate-nycklarna ligger INTE i coordinatorns _PROFILE_SYNC_KEYS, så
+    de kommer aldrig tillbaka från servern via profilspeglingen – en reauth bygger en
+    ny profil ur entry.data och hade då återskapat raden UTAN märkdata, alltså rakt
+    tillbaka i needs_input som användaren just svarat på."""
+    from custom_components.wolta.const import CONF_NAMEPLATE_KW, CONF_NAMEPLATE_KWH
+
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=None, reserve=None)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = BatteryNeedsInputRepairFlow(entry, days=240)
+    flow.hass = hass
+    flow.issue_id = "battery_needs_input_e1"
+    await flow.async_step_set_nameplate({"nameplate_kwh": 12.0, "nameplate_kw": 6.0})
+
+    hass.config_entries.async_update_entry.assert_called_once()
+    data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert data[CONF_NAMEPLATE_KWH] == 12.0
+    assert data[CONF_NAMEPLATE_KW] == 6.0
+    # Resten av entryn ska vara orörd (spread, inte ersättning).
+    assert CONF_BATTERY_KWH in data
+
+
+@pytest.mark.asyncio
+async def test_battery_needs_input_repair_aborts_when_entry_missing(hass: HomeAssistant):
+    flow = BatteryNeedsInputRepairFlow(None, days=240)
+    flow.hass = hass
+    result = await flow.async_step_init()
+    assert result["type"] == "abort"
+    assert result["reason"] == "entry_not_found"
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_dispatch_battery_needs_input(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=None, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(hass, "battery_needs_input_e1", {"entry_id": "e1", "days": 7})
+    assert isinstance(flow, BatteryNeedsInputRepairFlow)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["description_placeholders"]["days"] == "7"

@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .const import (
+    BATTERY_STATUS_NEEDS_INPUT,
     CONF_BATT_IN,
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
@@ -92,6 +93,14 @@ _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
 _ISSUE_POWER = "measured_power"
 _ISSUE_EFFICIENCY = "measured_efficiency"
+# Backend gave up measuring the declared battery (spec 2026-09-14 §7.2): ask for the
+# nameplate pair instead. Unlike the three adopt repairs above this is not a nudge to
+# improve a value - without a capacity there is no grade at all.
+_ISSUE_BATTERY_NEEDS_INPUT = "battery_needs_input"
+# Fallback for the server's detect_min_days when the profile doesn't carry it (older
+# backend). Shared by WoltaData's default and the profile read so the sensor never
+# reports a different minimum than the evaluation assumed.
+_DETECT_MIN_DAYS_DEFAULT = 30
 # A picked compensation sensor that never yields a figure (spec 2026-08-28). The
 # usual cause is the wrong state_class: only `total`/`total_increasing` produce the
 # SUM statistics monthly_amounts reads, while `measurement` yields min/mean/max and
@@ -185,6 +194,11 @@ class WoltaData:
     last_uploaded: datetime | None
     n_days: int
     pending: bool  # server-side job running
+    # Serverns batteristämpel ur profil-GET:en (spec 2026-09-14 §4). Separat från
+    # `pending` ovan: en kapacitet som ännu inte är MÄTT är inget jobb som kör.
+    battery_status: str | None = None
+    battery_detect: dict | None = None
+    detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
 
 
 type WoltaConfigEntry = ConfigEntry[WoltaCoordinator]
@@ -228,6 +242,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # false all-clear on the exact condition this repair exists to report.
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
+        # Serverns batteristämpel, senast lästa (spec 2026-09-14 §4). Ägs av profil-GET:en
+        # i båda pollarna - se _take_battery_state.
+        self._battery_status: str | None = None
+        self._battery_detect: dict | None = None
+        self._detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:
@@ -298,6 +317,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         return True
 
+    def _take_battery_state(self, profile: dict) -> None:
+        """Read the server's battery stamp off a profile GET and (re)evaluate the repair.
+
+        Called from BOTH polls - the 6h main cycle and the 5 min side-poll - because the
+        stamp flips to needs_input on the server's own schedule, not on ours: waiting for
+        the main cycle would leave the user unasked for up to six hours while the plant
+        has no grade at all. Both fields are stored raw; the pending→needs_input rule
+        lives in the backend (spec 2026-09-14 §4) and is never re-derived here."""
+        self._battery_status = profile.get("battery_status")
+        self._battery_detect = profile.get("battery_detect")
+        self._detect_min_days = int(
+            profile.get("detect_min_days") or _DETECT_MIN_DAYS_DEFAULT
+        )
+        self._evaluate_battery_pending()
+
     async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
         """Side-poll (every 5 min): pick up web-side profile edits within minutes.
 
@@ -315,7 +349,24 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Profile side-poll failed; retrying next tick", exc_info=True)
             return
-        if self._apply_profile_sync(profile):
+        # A CHANGED battery stamp also warrants the refresh: the stamp is not part of
+        # entry.data, so _apply_profile_sync can't see it, and without a rebuilt WoltaData
+        # the status sensor would keep saying "measuring" for up to 6h while the repair
+        # already asks for the nameplate. Only on a change - refreshing on every tick
+        # would run the whole upload cycle every 5 minutes.
+        # Stämpelläsningen ligger INNE i try:t: _take_battery_state indexerar
+        # battery_detect som dict och int():ar detect_min_days, så en missbildad rad
+        # (icke-dict, osiffrigt) kastar. Utanför try:t hade det brutit docstringens
+        # "Never raises" var 5:e minut i all oändlighet – servern skickar samma rad
+        # nästa tick, så felet hade aldrig läkt av sig självt.
+        try:
+            previous_status = self._battery_status
+            self._take_battery_state(profile)
+            battery_changed = self._battery_status != previous_status
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
+            battery_changed = False
+        if self._apply_profile_sync(profile) or battery_changed:
             _LOGGER.debug("Web-side profile change detected; refreshing results")
             await self.async_request_refresh()
 
@@ -336,6 +387,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
                 else:
                     self._apply_profile_sync(profile)
+                    self._take_battery_state(profile)
 
             # Visningsläge: bara resultat-pollen. Hela strömningsmaskineriet (invert-/
             # entitets-självläkning, bookmark, statistikläsning, PUT /data, recompute-
@@ -482,6 +534,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         until the next slow poll (up to 6h). Poll fast while pending so the grade shows
         up within ~one minute; back to the slow rate once it's done."""
         job = results.get("job") or {}
+        # Batteristämpeln hoistas in i results av samma skäl som applied_tariff ligger där:
+        # sensorernas value_fn ser BARA results, aldrig dataobjektet (attr_fn ser båda).
+        results = {**results, "battery_status": self._battery_status}
         data = WoltaData(
             results=results,
             last_uploaded=last_uploaded,
@@ -490,6 +545,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 results.get("status") in ("pending", "running")
                 or job.get("status") in ("pending", "running")
             ),
+            battery_status=self._battery_status,
+            battery_detect=self._battery_detect,
+            detect_min_days=self._detect_min_days,
         )
         self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
         return data
@@ -944,6 +1002,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             )
         else:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    def _evaluate_battery_pending(self) -> None:
+        """Repair när backend gett upp mätningen (spec 2026-09-14 §7.2). Ingen ignore-väg:
+        utan värden finns inget betyg. Tas bort så fort statusen lämnar needs_input.
+
+        Visningsläge fyrar aldrig: där äger anläggningens bindning profilen, så frågan
+        skulle nå fel person - och servern 409:ar skrivningen ändå."""
+        detect = self._battery_detect or {}
+        days = int(detect.get("n_days") or 0)
+        fire = self._battery_status == BATTERY_STATUS_NEEDS_INPUT and not self._view_only
+        self._set_measured_issue(
+            _ISSUE_BATTERY_NEEDS_INPUT,
+            fire=fire,
+            translation_key=_ISSUE_BATTERY_NEEDS_INPUT,
+            placeholders={"days": str(days)} if fire else {},
+            # A custom RepairsFlow does not inherit the issue's translation_placeholders,
+            # so the day count the flow's text references has to travel on the issue data.
+            data={"days": days} if fire else {},
+        )
 
     def _evaluate_measured_params(self, results: dict) -> None:
         """Evaluate all measured-parameter adopt repairs (capacity, power, efficiency).

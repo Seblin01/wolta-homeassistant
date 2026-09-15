@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
@@ -625,3 +627,54 @@ async def test_mint_claim_code_skickar_bunden_timeout(aioclient_mock) -> None:
     tmo = sedda.get("timeout")
     assert tmo is not None, "mint_claim_code skickade ingen timeout"
     assert tmo.total is not None and tmo.total <= 30, f"otillracklig grans: {tmo.total}"
+
+
+# ---------------------------------------------------------------------------
+# create_profile – battery_declared (spec 2026-09-14 §7.1) + get_control_systems
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_profile_declared_utan_par():
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"profile_token": "t"})
+    tok = await client.create_profile(zone="SE3", has_solar=False, share_profile=False,
+                                      battery_declared=True, control_system="huawei")
+    assert tok == "t"
+    payload = client._request.await_args.kwargs["json"]
+    assert payload["battery_declared"] is True
+    assert "battery_kwh" not in payload and "battery_kw" not in payload and "eff" not in payload
+
+
+@pytest.mark.asyncio
+async def test_create_profile_med_par_som_forr():
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"profile_token": "t"})
+    await client.create_profile(zone="SE3", has_solar=False, share_profile=False,
+                                battery_kwh=10, battery_kw=5, eff=0.9)
+    payload = client._request.await_args.kwargs["json"]
+    assert payload["battery_kwh"] == 10 and payload["battery_kw"] == 5 and payload["eff"] == 0.9
+    assert "battery_declared" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_control_systems():
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value=[{"id": "huawei", "label": "Huawei", "ha_domains": ["huawei_solar"]}])
+    assert (await client.get_control_systems())[0]["id"] == "huawei"
+    assert client._request.await_args.args[:2] == ("GET", "/control-systems")
+
+
+@pytest.mark.asyncio
+async def test_get_control_systems_skickar_bunden_timeout():
+    """Samma grund som de två mintarna: uppslaget awaitas INLINE i övergången
+    entities → plant, alltså medan användaren väntar på att nästa steg ska ritas.
+    Utan egen timeout gällde aiohttps default (total=300 s), så en blackholead
+    anslutning kunde frysa onboardingen i fem minuter för ett FÖRSLAG som ändå
+    degraderar tyst (broad except i config_flow → inget förslag)."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value=[])
+    await client.get_control_systems()
+    tmo = client._request.await_args.kwargs.get("timeout")
+    assert tmo is not None, "get_control_systems skickade ingen timeout - default 300 s galler da"
+    assert tmo.total is not None and tmo.total <= 15, f"otillräcklig gräns: {tmo.total}"

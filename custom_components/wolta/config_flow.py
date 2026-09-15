@@ -36,7 +36,11 @@ from homeassistant.util import dt as dt_util
 
 from . import stats
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
+from .control_system_prefill import battery_platforms, suggest_control_system
 from .const import (
+    BATTERY_STATUS_NEEDS_INPUT,
+    BATTERY_STATUS_NONE,
+    BATTERY_STATUS_PENDING,
     CONF_BATT_IN,
     CONF_CREATED_BY_HA,
     CONF_BATT_OUT,
@@ -58,6 +62,7 @@ from .const import (
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
     CONF_PLANT_ID,
+    CONF_PREFILL_PURCHASE_DATE,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
@@ -163,15 +168,30 @@ async def _energy_dashboard_defaults(hass: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _zone_selector() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value=zone_id, label=label)
-                for zone_id, label in SUPPORTED_ZONES
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
+_ZONE_SUGGESTED_LABEL: dict[str, str] = {
+    "sv": "föreslaget ur din position",
+    "en": "suggested from your location",
+}
+
+
+def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSelector:
+    """Zonlistan. Med `suggested` ligger den zonen FÖRST med en etikett – men utan default
+    (V14: SelectSelector väljer inget tyst; ordningen bevaras eftersom sort defaultar
+    False, dvs. sorteringen är stabil och bara flyttar den föreslagna raden upp)."""
+    lang = lang if lang in _ZONE_SUGGESTED_LABEL else "en"
+    rows = list(SUPPORTED_ZONES)
+    if suggested in dict(rows):
+        rows.sort(key=lambda r: r[0] != suggested)
+    options = [
+        SelectOptionDict(
+            value=zone_id,
+            label=(f"{label} – {_ZONE_SUGGESTED_LABEL[lang]}"
+                   if zone_id == suggested else label),
         )
+        for zone_id, label in rows
+    ]
+    return SelectSelector(
+        SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
     )
 
 
@@ -299,6 +319,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         self._link_token: str | None = None
         self._link_profile: dict[str, Any] | None = None
         self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
+        # Styrsystem-förslaget ur batterisensorernas integrationsdomän (sätts i
+        # entitetssteget). None = inget förslag → plant-fältet får ingen default.
+        self._cs_suggest: str | None = None
         # Stable plant identity for this entry, minted once here and persisted in entry.data.
         # Minted at flow start (not at entry creation) because BOTH the create path and the
         # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
@@ -341,7 +364,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             else:
                 prof = self._link_profile or {}
-                if not prof.get(CONF_BATTERY_KWH) or not prof.get(CONF_BATTERY_KW):
+                # Spec 2026-09-14 §7.2: en VÄNTANDE rad har inget kWh/kW-par än (backend
+                # mäter det) men har ett batteri, så par-regeln nedan hade avvisat den.
+                # `battery_status` är auktoriteten när servern skickar den; en äldre
+                # server utan fältet faller tillbaka på den gamla par-regeln.
+                status = prof.get("battery_status")
+                no_battery = (
+                    status == BATTERY_STATUS_NONE if status is not None
+                    else not (prof.get(CONF_BATTERY_KWH) and prof.get(CONF_BATTERY_KW))
+                )
+                if no_battery:
                     # Solar-only-profil: integrationen förutsätter batteri (grade-
                     # semantiken + reauth läser battery_kwh/kw ur entry.data).
                     errors["profile_input"] = "profile_no_battery"
@@ -403,13 +435,18 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Plant parameters (create path) – prefilled from HA config + history
+    # Plant step (create path) – the LAST step: it also creates the profile
     # ------------------------------------------------------------------
 
     async def async_step_plant(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Plant parameters, prefilled from HA location and battery history."""
+        """Elområde + styrsystem + delning + sensorriktning (spec 2026-09-14 §7.1).
+
+        Kapacitet, effekt och verkningsgrad frågas inte: backend mäter dem ur
+        uppladdningen (battery_declared). Skapar profilen och entryn direkt – inget
+        privacy-steg (delningsvalet ligger sist i det här formuläret i stället).
+        """
         errors: dict[str, str] = {}
         if user_input is not None:
             # "other" without a free-text name gives zero segmentation signal -
@@ -419,89 +456,64 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_CONTROL_SYSTEM_NAME] = "control_system_name_required"
             if not errors:
                 self._plant_data = user_input
-                return await self.async_step_privacy()
+                return await self._create_profile_and_entry()
 
+        return self._show_plant_form(errors, user_input)
+
+    def _show_plant_form(
+        self, errors: dict[str, str], user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Visa (eller åter-visa med fel) plant-formuläret.
+
+        One place builds the schema AND the zone hint, because the form renders from
+        three directions - first show, a validation error, and a failed POST in
+        _create_profile_and_entry - and a divergence between them would show the user
+        different fields depending on which way they arrived.
+        """
         from .zone_prefill import suggest_zone  # noqa: PLC0415
 
         supported = {z for z, _ in SUPPORTED_ZONES}
         guess = suggest_zone(self.hass.config.country, self.hass.config.latitude)
-        # Zone is an ACTIVE choice (Sebastian's directive 2026-08-24): it selects the
-        # price series the grade AND the economics are computed against, and it is
-        # IMMUTABLE server-side after plant creation (fixing a wrong zone means
-        # delete-and-recreate). A pre-selected dropdown is acceptance-by-inaction, so
-        # the location guess below is surfaced as INFORMATION in the description
-        # only - never as a schema default (mirrors CONF_CONTROL_SYSTEM below).
-        # See _zone_hint()/_ZONE_HINT_GUESS above for why this text is localized
-        # in Python rather than in strings.json.
+        guess = guess if guess in supported else None
+        lang = (self.hass.config.language or "en").split("-")[0]
+        # See _zone_hint()/_ZONE_HINT_GUESS above for why this text is localized in
+        # Python rather than in strings.json.
         zone_hint = _zone_hint(self.hass.config.language, guess, supported)
-        eff_suggested = self._prefill.get("eff")
-        date_suggested = self._prefill.get("purchase_date")
         invert_default = bool(self._prefill.get("invert_suspected"))
 
+        # The control-system SUGGESTION may be a default (unlike the zone): it is
+        # corrigible in options afterwards, the domain -> system mapping comes from the
+        # backend rather than from a guess, and a plant whose battery integration we
+        # recognise is not an inattentive user being parked in a bucket. No suggestion
+        # (unknown domain, a tie, a failed fetch) -> no default, as before.
+        cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=self._cs_suggest)
+                    if self._cs_suggest else vol.Required(CONF_CONTROL_SYSTEM))
         schema = vol.Schema(
             {
                 # Deliberately NO default: the zone is an ACTIVE choice (directive
-                # 2026-08-24) - the location guess above is surfaced via
-                # description_placeholders instead. See the comment above.
-                vol.Required(CONF_ZONE): _zone_selector(),
-                vol.Required(CONF_BATTERY_KWH, default=DEFAULT_BATTERY_KWH): _number_selector(
-                    min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
-                ),
-                vol.Optional(CONF_NAMEPLATE_KWH): _number_selector(
-                    min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"
-                ),
-                vol.Required(CONF_BATTERY_KW, default=DEFAULT_BATTERY_KW): _number_selector(
-                    min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"
-                ),
-                vol.Optional(CONF_NAMEPLATE_KW): _number_selector(
-                    min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"
-                ),
-                # Uppmätt AC-round-trip ur användarens egen historik när underlaget
-                # räcker (stats.analyze_battery_history) – bättre än databladsgissning.
-                vol.Required(CONF_EFF, default=eff_suggested or DEFAULT_EFF): _number_selector(
-                    min_val=0.5, max_val=1.0, step=0.01
-                ),
-                # Deliberately NO default: the control system is an ACTIVE choice
-                # (audit 2026-08-24 - a silent default would put every inattentive
-                # user in the same corpus bucket, like the web guide's old SE3 zone).
-                vol.Required(CONF_CONTROL_SYSTEM): _control_system_selector(),
+                # 2026-08-24) - it selects the price series the grade AND the economics
+                # are computed against, and it is immutable server-side after creation.
+                # A pre-selected dropdown is acceptance-by-inaction, so the location
+                # guess is surfaced by moving that zone to the TOP of the list with a
+                # label (and repeated as text in the description) instead.
+                vol.Required(CONF_ZONE): _zone_selector(guess, lang),
+                cs_field: _control_system_selector(),
                 vol.Optional(CONF_CONTROL_SYSTEM_NAME): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
-                vol.Optional(CONF_RESERVE_PCT): _number_selector(
-                    min_val=0.0, max_val=100.0, step=1.0, unit="%"
+                vol.Required(CONF_SHARE, default=DEFAULT_SHARE): BooleanSelector(
+                    BooleanSelectorConfig()
                 ),
-                vol.Optional(CONF_COST_SEK): _number_selector(
-                    min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"
-                ),
-                vol.Optional(
-                    CONF_PURCHASE_DATE,
-                    description={"suggested_value": date_suggested} if date_suggested else None,
-                ): _date_selector(),
-                vol.Optional(CONF_GRID_VAR_ORE): _number_selector(
-                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
-                ),
-                vol.Optional(CONF_SURCHARGE_ORE): _number_selector(
-                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
-                ),
-                vol.Optional(CONF_EXPORT_EXTRA_ORE): _number_selector(
-                    min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh"
-                ),
-                vol.Optional(CONF_GRID_VAR_PCT): _number_selector(
-                    min_val=0.0, max_val=100.0, step=0.01, unit="% of spot"
-                ),
-                vol.Optional(CONF_EXPORT_EXTRA_PCT): _number_selector(
-                    min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot"
-                ),
-                # Förvald när historiken visar stadigt ur > in (omkastade sensorer)
+                # Visas ALLTID (beslut 2026-09-14), förbockad vid misstanke ur
+                # historiken (stadigt ur > in = omkastade batterisensorer).
                 vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
                     BooleanSelectorConfig()
                 ),
             }
         )
 
-        # Re-show after a validation error keeps what the user typed (suggested
-        # values), instead of wiping the form back to prefill defaults.
+        # Re-show after an error keeps what the user chose (suggested values), instead
+        # of wiping the form back to prefill defaults.
         if errors and user_input is not None:
             schema = self.add_suggested_values_to_schema(schema, user_input)
         return self.async_show_form(
@@ -510,6 +522,90 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"zone_hint": zone_hint},
         )
+
+    async def _create_profile_and_entry(self) -> ConfigFlowResult:
+        """POST /profile med vad de två stegen samlat in, och skapa config-entryn.
+
+        Batteriet DEKLARERAS (battery_declared): kapacitet/effekt/verkningsgrad
+        utelämnas ur både payloaden och entry.data, eftersom backend mäter dem ur
+        uppladdningen. Ett cachat gissningsvärde här hade återsänts av reauth och
+        skrivit över mätningen.
+        """
+        errors: dict[str, str] = {}
+        zone = self._plant_data[CONF_ZONE]
+        share = self._plant_data.get(CONF_SHARE, DEFAULT_SHARE)
+        solar = self._entities_data.get(CONF_SOLAR)
+        # Client-local upload transformation (same nature as invert_battery below):
+        # empty string (cleared selector) normalises to absence, never PATCHed to
+        # the server.
+        external_control = self._entities_data.get(CONF_EXTERNAL_CONTROL) or None
+        # The ENTITY ID is client-local config and is never sent to the server -
+        # only the monthly amounts it yields are, via the coordinator's PATCH.
+        flex_compensation = self._entities_data.get(CONF_FLEX_COMPENSATION) or None
+        control_system: str | None = self._plant_data.get(CONF_CONTROL_SYSTEM)
+        # The name only means something together with "other" (the web sends the
+        # same pair); a stray name next to a brand value would be orphaned.
+        control_system_name: str | None = (
+            (self._plant_data.get(CONF_CONTROL_SYSTEM_NAME) or "").strip() or None
+            if control_system == "other" else None
+        )
+
+        try:
+            session = async_get_clientsession(self.hass)
+            client = WoltaApiClient(session)
+            token = await client.create_profile(
+                zone=zone,
+                has_solar=bool(solar),
+                share_profile=share,
+                battery_declared=True,
+                client_plant_id=self._plant_id,
+                control_system=control_system,
+                control_system_name=control_system_name,
+            )
+        except WoltaApiError as err:
+            _LOGGER.error("Failed to create Wolta profile: %s", err)
+            if getattr(err, "status", None) == 422:
+                errors["base"] = "invalid_input"
+            else:
+                errors["base"] = "cannot_connect"
+            return self._show_plant_form(errors, self._plant_data)
+
+        unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
+
+        entry_data: dict[str, Any] = {
+            CONF_TOKEN: token,
+            CONF_PLANT_ID: self._plant_id,
+            CONF_ZONE: zone,
+            CONF_BATT_IN: self._entities_data[CONF_BATT_IN],
+            CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
+            CONF_GRID_IN: self._entities_data[CONF_GRID_IN],
+            CONF_GRID_OUT: self._entities_data[CONF_GRID_OUT],
+            CONF_SHARE: share,
+            CONF_CREATED_BY_HA: True,
+            CONF_INVERT_BATTERY: bool(
+                self._plant_data.get(CONF_INVERT_BATTERY, False)
+            ),
+        }
+        if solar:
+            entry_data[CONF_SOLAR] = solar
+        if control_system is not None:
+            entry_data[CONF_CONTROL_SYSTEM] = control_system
+        if control_system_name is not None:
+            entry_data[CONF_CONTROL_SYSTEM_NAME] = control_system_name
+        if external_control:
+            entry_data[CONF_EXTERNAL_CONTROL] = external_control
+        if flex_compensation:
+            entry_data[CONF_FLEX_COMPENSATION] = flex_compensation
+        # Datumförslaget ur statistiken skickas INTE till servern (första datapunkten
+        # är inte nödvändigtvis ett inköpsdatum, och ett tyst ifyllt datum styr
+        # återbetalningskalkylen). Det lagras här och erbjuds som suggested_value för
+        # purchase_date i options → Economy, där användaren bekräftar det.
+        if self._prefill.get("purchase_date"):
+            entry_data[CONF_PREFILL_PURCHASE_DATE] = self._prefill["purchase_date"]
+
+        return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
 
     # ------------------------------------------------------------------
     # Step 2: entity selectors (with energy-dashboard prefill)
@@ -544,6 +640,34 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 except Exception:  # pylint: disable=broad-except
                     _LOGGER.debug("Prefill analysis failed; using defaults", exc_info=True)
                     self._prefill = {}
+                # Spec 2026-09-14 §7.1: styrsystem-förslag ur batterisensorernas
+                # integrationsdomän, uppslaget mot backendens mappning. Nätfel ⇒ inget
+                # förslag (fältet utan default, som i dag) – ett halvt uppslag får
+                # aldrig stoppa onboardingen. Bara skapa-spåret frågar efter styrsystem,
+                # så koppla-spåret slipper anropet.
+                self._cs_suggest = None
+                if self._link_token is None:
+                    try:
+                        platforms = battery_platforms(
+                            self.hass,
+                            list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
+                        )
+                        mapping = await WoltaApiClient(
+                            async_get_clientsession(self.hass)
+                        ).get_control_systems()
+                        suggestion = suggest_control_system(platforms, mapping)
+                        # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
+                        # ett id vi inte känner igen som default hade förvalt ett värde som
+                        # SelectSelector själv avvisar → MultipleInvalid i sista
+                        # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
+                        self._cs_suggest = (
+                            suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
+                            else None
+                        )
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug(
+                            "control_system prefill failed; no suggestion", exc_info=True
+                        )
                 if self._link_token is not None:
                     if self._prefill.get("invert_suspected"):
                         return await self.async_step_invert_check()
@@ -613,153 +737,6 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="entities",
             data_schema=schema,
             errors=errors,
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3: privacy consent + create profile
-    # ------------------------------------------------------------------
-
-    async def async_step_privacy(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle the privacy/consent step and create the profile."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            share = user_input.get(CONF_SHARE, DEFAULT_SHARE)
-            zone = self._plant_data[CONF_ZONE]
-            solar = self._entities_data.get(CONF_SOLAR)
-            # Client-local upload transformation (same nature as invert_battery below):
-            # empty string (cleared selector) normalises to absence, never PATCHed to
-            # the server.
-            external_control = self._entities_data.get(CONF_EXTERNAL_CONTROL) or None
-            # The ENTITY ID is client-local config and is never sent to the server -
-            # only the monthly amounts it yields are, via the coordinator's PATCH.
-            flex_compensation = self._entities_data.get(CONF_FLEX_COMPENSATION) or None
-            cost_sek: float | None = self._plant_data.get(CONF_COST_SEK) or None
-            purchase_date: str | None = self._plant_data.get(CONF_PURCHASE_DATE) or None
-            # Tariff fields (and reserve_pct) use a plain .get() (NOT `.get() or None`
-            # like cost_sek): 0.0 is a MEANINGFUL value here (a user whose grid fee or
-            # export premium is genuinely zero, or whose control system keeps zero
-            # reserve floor), so it must reach the backend, not be swallowed as "unset".
-            # Do not "consistency-refactor" these to `or None`.
-            grid_var_ore: float | None = self._plant_data.get(CONF_GRID_VAR_ORE)
-            surcharge_ore: float | None = self._plant_data.get(CONF_SURCHARGE_ORE)
-            export_extra_ore: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_ORE)
-            grid_var_pct: float | None = self._plant_data.get(CONF_GRID_VAR_PCT)
-            export_extra_pct: float | None = self._plant_data.get(CONF_EXPORT_EXTRA_PCT)
-            reserve_pct: float | None = self._plant_data.get(CONF_RESERVE_PCT)
-            nameplate_kwh: float | None = self._plant_data.get(CONF_NAMEPLATE_KWH)
-            nameplate_kw: float | None = self._plant_data.get(CONF_NAMEPLATE_KW)
-            control_system: str | None = self._plant_data.get(CONF_CONTROL_SYSTEM)
-            # The name only means something together with "other" (the web sends the
-            # same pair); a stray name next to a brand value would be orphaned.
-            control_system_name: str | None = (
-                (self._plant_data.get(CONF_CONTROL_SYSTEM_NAME) or "").strip() or None
-                if control_system == "other" else None
-            )
-
-            try:
-                session = async_get_clientsession(self.hass)
-                client = WoltaApiClient(session)
-                token = await client.create_profile(
-                    zone=zone,
-                    battery_kwh=self._plant_data[CONF_BATTERY_KWH],
-                    battery_kw=self._plant_data[CONF_BATTERY_KW],
-                    eff=self._plant_data[CONF_EFF],
-                    has_solar=bool(solar),
-                    share_profile=share,
-                    cost_sek=cost_sek,
-                    purchase_date=purchase_date,
-                    grid_var_ore=grid_var_ore,
-                    surcharge_ore=surcharge_ore,
-                    export_extra_ore=export_extra_ore,
-                    grid_var_pct=grid_var_pct,
-                    export_extra_pct=export_extra_pct,
-                    reserve_pct=reserve_pct,
-                    nameplate_kwh=nameplate_kwh,
-                    nameplate_kw=nameplate_kw,
-                    client_plant_id=self._plant_id,
-                    control_system=control_system,
-                    control_system_name=control_system_name,
-                )
-            except WoltaApiError as err:
-                _LOGGER.error("Failed to create Wolta profile: %s", err)
-                if getattr(err, "status", None) == 422:
-                    errors["base"] = "invalid_input"
-                else:
-                    errors["base"] = "cannot_connect"
-            else:
-                unique_id = hashlib.sha256(token.encode()).hexdigest()[:16]
-                await self.async_set_unique_id(unique_id)
-                self._abort_if_unique_id_configured()
-
-                entry_data: dict[str, Any] = {
-                    CONF_TOKEN: token,
-                    CONF_PLANT_ID: self._plant_id,
-                    CONF_ZONE: zone,
-                    CONF_BATT_IN: self._entities_data[CONF_BATT_IN],
-                    CONF_BATT_OUT: self._entities_data[CONF_BATT_OUT],
-                    CONF_GRID_IN: self._entities_data[CONF_GRID_IN],
-                    CONF_GRID_OUT: self._entities_data[CONF_GRID_OUT],
-                    CONF_BATTERY_KWH: self._plant_data[CONF_BATTERY_KWH],
-                    CONF_BATTERY_KW: self._plant_data[CONF_BATTERY_KW],
-                    CONF_EFF: self._plant_data[CONF_EFF],
-                    CONF_SHARE: share,
-                }
-                if solar:
-                    entry_data[CONF_SOLAR] = solar
-                if cost_sek is not None:
-                    entry_data[CONF_COST_SEK] = cost_sek
-                if purchase_date is not None:
-                    entry_data[CONF_PURCHASE_DATE] = purchase_date
-                if grid_var_ore is not None:
-                    entry_data[CONF_GRID_VAR_ORE] = grid_var_ore
-                if surcharge_ore is not None:
-                    entry_data[CONF_SURCHARGE_ORE] = surcharge_ore
-                if export_extra_ore is not None:
-                    entry_data[CONF_EXPORT_EXTRA_ORE] = export_extra_ore
-                if grid_var_pct is not None:
-                    entry_data[CONF_GRID_VAR_PCT] = grid_var_pct
-                if export_extra_pct is not None:
-                    entry_data[CONF_EXPORT_EXTRA_PCT] = export_extra_pct
-                if reserve_pct is not None:
-                    entry_data[CONF_RESERVE_PCT] = reserve_pct
-                if nameplate_kwh is not None:
-                    entry_data[CONF_NAMEPLATE_KWH] = nameplate_kwh
-                if nameplate_kw is not None:
-                    entry_data[CONF_NAMEPLATE_KW] = nameplate_kw
-                if control_system is not None:
-                    entry_data[CONF_CONTROL_SYSTEM] = control_system
-                if control_system_name is not None:
-                    entry_data[CONF_CONTROL_SYSTEM_NAME] = control_system_name
-                entry_data[CONF_CREATED_BY_HA] = True
-                entry_data[CONF_INVERT_BATTERY] = bool(
-                    self._plant_data.get(CONF_INVERT_BATTERY, False)
-                )
-                if external_control:
-                    entry_data[CONF_EXTERNAL_CONTROL] = external_control
-                if flex_compensation:
-                    entry_data[CONF_FLEX_COMPENSATION] = flex_compensation
-
-                return self.async_create_entry(
-                    title=f"Wolta ({zone})",
-                    data=entry_data,
-                )
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_SHARE, default=DEFAULT_SHARE): BooleanSelector(
-                    BooleanSelectorConfig()
-                ),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="privacy",
-            data_schema=schema,
-            errors=errors,
-            description_placeholders={},
         )
 
     # ------------------------------------------------------------------
@@ -986,11 +963,20 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # for linked entries (created_by_ha False); the plant price is owned/edited on the
                 # web anyway. HA-created entries (default True) are battery-scoped → send it.
                 created_by_ha = entry_data.get(CONF_CREATED_BY_HA, True)
+                # Paret skickas bara när cachen har det HELT. Allt annat återskapas
+                # DEKLARERAT och mäts om av backend: en väntande entry (ingen kapacitet
+                # i cachen) men också en HALV cache, eftersom alternativet vore att
+                # skicka `battery_kwh: null, battery_kw: null` utan deklaration – vilket
+                # 422:ar eller skapar en batterilös rad. Ett halvt par går aldrig ut.
+                has_pair = (entry_data.get(CONF_BATTERY_KWH) is not None
+                            and entry_data.get(CONF_BATTERY_KW) is not None)
+                declared = not has_pair
                 new_token = await client.create_profile(
                     zone=entry_data[CONF_ZONE],
-                    battery_kwh=entry_data[CONF_BATTERY_KWH],
-                    battery_kw=entry_data[CONF_BATTERY_KW],
-                    eff=entry_data[CONF_EFF],
+                    battery_kwh=entry_data.get(CONF_BATTERY_KWH) if has_pair else None,
+                    battery_kw=entry_data.get(CONF_BATTERY_KW) if has_pair else None,
+                    eff=entry_data.get(CONF_EFF),
+                    battery_declared=declared,
                     has_solar=bool(entry_data.get(CONF_SOLAR)),
                     share_profile=entry_data.get(CONF_SHARE, DEFAULT_SHARE),
                     reserve_pct=entry_data.get(CONF_RESERVE_PCT),
@@ -1257,6 +1243,21 @@ class WoltaOptionsFlow(OptionsFlow):
                     if key in sec_input:
                         flat[key] = sec_input[key]
 
+            # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
+            # (se battery_pending nedan), så ett ensamt värde är submitbart – och ett halvt
+            # par här blir ett halvt par i cachen, som reauth sedan bara kan deklarera bort
+            # (backend avvisar ett halvt par). Felet sätts på det SAKNADE fältet.
+            kwh_in = flat.get(CONF_BATTERY_KWH)
+            kw_in = flat.get(CONF_BATTERY_KW)
+            if (kwh_in is None) != (kw_in is None):
+                errors[CONF_BATTERY_KWH if kwh_in is None else CONF_BATTERY_KW] = (
+                    "battery_pair_incomplete"
+                )
+                # Även på "base": fältfelet sitter på ett fält INUTI section("battery"),
+                # och renderar frontend inte fältfel i sektioner ser användaren bara ett
+                # formulär som vägrar spara utan att säga varför.
+                errors["base"] = "battery_pair_incomplete"
+
             # cost_scope (backend 2026-07-18): "plant" = the scalar price covers the
             # WHOLE plant (solar + battery; wolta.se guide profiles adopted into HA).
             # Our field is explicitly battery-only, so it is hidden from the form for
@@ -1293,7 +1294,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 entry.data.get(CONF_INVERT_BATTERY, False)
             )
 
-            if patch_fields:
+            if patch_fields and not errors:
                 try:
                     await client.patch_profile(token, **patch_fields)
                 except WoltaApiError as err:
@@ -1301,7 +1302,12 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors["base"] = "cannot_connect"
 
             if not errors:
-                if patch_fields or invert_changed:
+                # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
+                # nu visat det, så nyckeln tas bort. Utan det hade varje senare sparning
+                # föreslagit datumet igen och därmed återuppväckt ett datum användaren
+                # medvetet rensade.
+                prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
+                if patch_fields or invert_changed or prefill_offered:
                     new_data = dict(entry.data)
                     for key, val in patch_fields.items():
                         if val is None:
@@ -1310,6 +1316,7 @@ class WoltaOptionsFlow(OptionsFlow):
                             new_data[key] = val
                     if invert_changed:
                         new_data[CONF_INVERT_BATTERY] = invert_new
+                    new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
                 coordinator = getattr(entry, "runtime_data", None)
@@ -1360,23 +1367,67 @@ class WoltaOptionsFlow(OptionsFlow):
             )
             return marker, selector
 
+        # Väntande/needs_input-rad (spec 2026-09-14): servern HAR inget kapacitetspar
+        # än – backend mäter det ur uppladdningen. Då får formuläret inte KRÄVA paret:
+        # ett vol.Required hade renderat DEFAULT_BATTERY_KWH och skrivit den gissningen
+        # över mätningen så fort användaren sparade något annat i dialogen. Diff-logiken
+        # ovan är oförändrad: fälten ligger kvar i _REQUIRED_FIELDS, så de jämförs rakt
+        # mot server-snapshotet – tomt mot tomt (den väntande raden) PATCH:ar ingenting,
+        # medan ett rensat visat värde PATCH:ar null precis som förut. Ett komplett par
+        # nollställer flaggan server-side (plan A Task 7).
+        battery_pending = srv.get("battery_status") in (
+            BATTERY_STATUS_PENDING, BATTERY_STATUS_NEEDS_INPUT
+        )
+        kwh_selector = _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")
+        kw_selector = _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")
+        eff_selector = _number_selector(min_val=0.5, max_val=1.0, step=0.01)
+        # eff är Required i BÅDA grenarna – bara KAPACITETSPARET går Optional. Backend
+        # lagrar alltid eff (0.9) på en deklarerad rad, så fältet är förifyllt även
+        # medan paret mäts; det finns ingen mätning att skriva över. Som Optional hade
+        # det gått att rensa → PATCH eff: null → backend 422 ("eff kan inte tas bort"),
+        # som i dialogen bara syns som cannot_connect.
+        #
+        # `or DEFAULT` och inte `srv.get(key, DEFAULT)`: servern kan skicka nyckeln MED
+        # null (inte bara utelämna den), och då ger tvåargumentsformen None →
+        # vol.Required(default=None) går inte att spara alls.
+        eff_row = (vol.Required(CONF_EFF, default=srv.get(CONF_EFF) or DEFAULT_EFF),
+                   eff_selector)
+        if battery_pending:
+            kwh_row = _opt(CONF_BATTERY_KWH, kwh_selector)
+            kw_row = _opt(CONF_BATTERY_KW, kw_selector)
+        else:
+            kwh_row = (vol.Required(CONF_BATTERY_KWH,
+                                    default=srv.get(CONF_BATTERY_KWH) or DEFAULT_BATTERY_KWH),
+                       kwh_selector)
+            kw_row = (vol.Required(CONF_BATTERY_KW,
+                                   default=srv.get(CONF_BATTERY_KW) or DEFAULT_BATTERY_KW),
+                      kw_selector)
         battery_schema = vol.Schema(dict([
-            (vol.Required(CONF_BATTERY_KWH, default=srv.get(CONF_BATTERY_KWH, DEFAULT_BATTERY_KWH)),
-             _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
+            kwh_row,
             _opt(CONF_NAMEPLATE_KWH, _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
-            (vol.Required(CONF_BATTERY_KW, default=srv.get(CONF_BATTERY_KW, DEFAULT_BATTERY_KW)),
-             _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")),
+            kw_row,
             _opt(CONF_NAMEPLATE_KW, _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")),
-            (vol.Required(CONF_EFF, default=srv.get(CONF_EFF, DEFAULT_EFF)),
-             _number_selector(min_val=0.5, max_val=1.0, step=0.01)),
+            eff_row,
             _opt(CONF_RESERVE_PCT, _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
         ]))
         # Se plant_scoped_cost-kommentaren i diff-grenen ovan: fältet döljs helt för
         # plant-scopade profiler (redigeras på wolta.se där etiketterna stämmer).
+        # Datumförslaget ur statistiken skickades aldrig till servern (spec 2026-09-14
+        # §7.1) – HÄR är stället där användaren bekräftar det. Serverns eget datum
+        # vinner: förslaget erbjuds bara när servern saknar ett.
+        date_suggested = (srv.get(CONF_PURCHASE_DATE)
+                          or entry.data.get(CONF_PREFILL_PURCHASE_DATE))
+        date_row = (
+            vol.Optional(
+                CONF_PURCHASE_DATE,
+                description={"suggested_value": date_suggested} if date_suggested else None,
+            ),
+            _date_selector(),
+        )
         economy_schema = vol.Schema(dict(
             ([] if srv.get("cost_scope") == "plant"
              else [_opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"))])
-            + [_opt(CONF_PURCHASE_DATE, _date_selector())]
+            + [date_row]
         ))
         tariffs_schema = vol.Schema(dict([
             _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),

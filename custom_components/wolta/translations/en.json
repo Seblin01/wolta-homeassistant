@@ -87,6 +87,19 @@
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
+    },
+    "battery_needs_input": {
+      "title": "Wolta needs your battery's nameplate values",
+      "fix_flow": {
+        "step": {
+          "set_nameplate": {
+            "title": "Enter the battery's nameplate values",
+            "description": "Wolta could not measure your battery's size from the data uploaded so far ({days} days): the battery never charges fully, or one of the battery streams is empty. Enter the manufacturer's figures – Wolta works out the usable capacity itself and switches to the measured value once the data allows.",
+            "data": { "nameplate_kwh": "Nameplate capacity (kWh)", "nameplate_kw": "Nameplate power (kW)" }
+          }
+        },
+        "abort": { "entry_not_found": "The Wolta integration this repair belonged to has been removed." }
+      }
     }
   },
   "config": {
@@ -108,13 +121,6 @@
           "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten."
         }
       },
-      "privacy": {
-        "title": "Data & privacy",
-        "description": "Your 15-minute energy data is stored at Wolta until you remove the integration. It is never shared unless you tick the contribution checkbox below.",
-        "data": {
-          "share": "Contribute anonymised data to improve Wolta"
-        }
-      },
       "reauth_confirm": {
         "title": "Re-authenticate Wolta",
         "description": "Your Wolta profile token has expired or been deleted. Confirm to create a new profile and re-link this integration.",
@@ -133,42 +139,20 @@
         }
       },
       "plant": {
-        "title": "Battery and economy",
-        "description": "Prefilled where possible from your Home Assistant location and sensor history – check the values and adjust. {zone_hint}",
+        "title": "Price zone and control system",
+        "description": "Battery capacity, power and efficiency are measured from your uploaded data – nothing to type. {zone_hint}",
         "data": {
           "zone": "Electricity price zone",
-          "battery_kwh": "Usable battery capacity (kWh)",
-          "nameplate_kwh": "Nameplate capacity (kWh) – optional",
-          "battery_kw": "Battery max power (kW)",
-          "nameplate_kw": "Nameplate power (kW) – optional",
-          "eff": "Round-trip efficiency (0.5–1.0)",
           "control_system": "Control system",
           "control_system_name": "Control system name (when Other)",
-          "reserve_pct": "Reserve floor (%) – optional",
-          "cost_sek": "What you paid for the battery (kr) – battery only, optional",
-          "purchase_date": "Purchase date – optional",
-          "grid_var_ore": "Grid fee (öre/ct per kWh) – optional",
-          "surcharge_ore": "Electricity supplier markup (öre/ct per kWh) – optional",
-          "export_extra_ore": "Export premium/discount (öre/ct per kWh) – optional",
-          "grid_var_pct": "Grid fee, percent of spot (% of spot) – optional",
-          "export_extra_pct": "Export compensation, percent of spot (% of spot) – optional",
+          "share": "Contribute anonymised data to improve Wolta",
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
-          "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side). This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
-          "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
-          "battery_kw": "Maximum battery charge/discharge power.",
-          "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable AC power above; the rated figure lets wolta.se explain the difference when the measured power at the meter is lower (inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
-          "eff": "Round-trip efficiency measured on the AC side (energy out ÷ energy in, at the meter). Not the DC/cell figure from the manufacturer app.",
-          "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice.",
-          "cost_sek": "What you actually paid for the BATTERY ONLY (not solar panels/installation), in SEK. Enter the invoice total, after any green deduction. Used to calculate the battery's IRR and payback. Optional. Bought the battery in stages, or want to record your solar cost and see the whole plant's return? Those are edited on your wolta.se profile.",
-          "purchase_date": "Date the battery (or solar+battery) system was installed (YYYY-MM-DD). Used to calculate this year's actual savings. Optional. When suggested from your sensor history, the date is the start of the first recorded month — adjust if you know the exact date. Date in the future (a planned purchase)? The results only show the actual outcome so far — for a planned purchase, use the decision calculator on wolta.se instead.",
-          "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
-          "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Leave blank to use your country's standard tariff.",
-          "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Leave blank to use your country's standard tariff.",
-          "grid_var_pct": "The variable part of your grid fee expressed as a percent of the spot price (common in southern Sweden since 2026: fixed öre part + percent part). Leave blank if your grid fee is öre-only.",
-          "export_extra_pct": "Export compensation expressed as a percent of the spot price (can be negative). Leave blank if your compensation is öre-only.",
-          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
+          "zone": "Cannot be changed after the plant is created – it decides which price series your grade and economics are measured against.",
+          "control_system": "Prefilled from your battery sensors' integration when Wolta recognises it – change it if it is wrong. Does not affect the grade; lets Wolta compare you with plants on the same system.",
+          "share": "Off by default. Your 15-minute energy data is stored at Wolta until you remove the integration and is never shared unless you tick this.",
+          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Preselected when your history shows more energy leaving the battery than entering it."
         }
       },
       "link": {
@@ -216,7 +200,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
-      "invalid_input": "Invalid battery configuration – battery capacity and power must both be greater than zero.",
+      "invalid_input": "Wolta rejected the plant details – check the price zone and control system and try again.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
       "unknown": "Unexpected error",
@@ -258,9 +242,9 @@
               "reserve_pct": "Reserve floor (%)"
             },
             "data_description": {
-              "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side). This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
+              "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side) – leave empty while Wolta is measuring. This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
               "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
-              "battery_kw": "Maximum charge/discharge power in kW.",
+              "battery_kw": "Maximum charge/discharge power in kW – leave empty while Wolta is measuring.",
               "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable AC power above; the rated figure lets wolta.se explain the difference when the measured power at the meter is lower (inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
               "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
@@ -317,6 +301,7 @@
       }
     },
     "error": {
+      "battery_pair_incomplete": "Capacity and power go together: fill in both, or leave both empty and let Wolta measure them.",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },
@@ -333,6 +318,8 @@
           "done": "Done",
           "computing": "Computing",
           "waiting_for_data": "Waiting for data",
+          "measuring_battery": "Measuring battery",
+          "needs_battery_input": "Needs battery values",
           "error": "Error"
         }
       },
