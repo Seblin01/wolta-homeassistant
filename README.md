@@ -28,7 +28,7 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 | `sensor.wolta_payback_time` | yr | Payback of the battery investment from the battery-only savings stream. `unknown` when the stream never repays the cost within the projection horizon. SE zones only. |
 | `sensor.wolta_actual_savings_this_year` | SEK / EUR | Actual battery revenue this year. SE zones only. |
 | `sensor.wolta_data_status` | timestamp | Last data point uploaded (diagnostic). Always available. |
-| `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `error` (displayed translated). Always available. |
+| `sensor.wolta_status` | enum | Computation status: `done` / `computing` / `waiting_for_data` / `measuring_battery` / `needs_battery_input` / `error` (displayed translated). The two battery states apply only while the backend is measuring a newly declared battery — see Setup flow. Always available. |
 
 A **Recompute** button lets you trigger an immediate recompute outside the automatic schedule.
 
@@ -85,21 +85,12 @@ No account or API token is required. Setup starts with a choice:
   token (create one on the plant page on wolta.se while signed in).
 
 **Step 1 – Energy sensors**
-- Map your HA energy sensors for battery charge, battery discharge, grid import and grid export. The integration prefills these from the HA Energy dashboard if it is configured.
-- Solar production is optional.
+- Map your HA energy sensors for battery charge, battery discharge, grid import and grid export (prefilled from the Energy dashboard). Solar is optional.
 
-**Step 2 – Zone & battery (create path)**
-- Select your Nordpool/ENTSO-E price zone (e.g. SE3). Nothing is preselected — you have to pick one. Your Home Assistant country and, for Sweden, latitude are used to *suggest* a likely zone in the step's description, but the suggestion never fills the field for you: the zone decides which price series your grade and economics are measured against, and it cannot be changed after the plant is created.
-- Enter your battery's **usable** capacity (kWh) and peak power (kW). Usable means what the battery actually delivers *to the house on a full discharge* (the AC/meter side) — this is lower than the nameplate rating, and lower than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. Use the meter-side value, not nameplate, so the grade compares you fairly against a perfect controller on your own hardware. Both are required and must be greater than zero. (After a couple of months of history, Wolta measures this for you and can offer the value as a Repair — see Troubleshooting.)
-- Set the round-trip efficiency (default 0.9), measured on the AC side — not the DC/cell figure. With a few months of battery history in Home Assistant, the field is prefilled with your plant's *measured* AC round-trip efficiency, and the purchase date is suggested from the first recorded data point.
-- Optionally add economy details: what you paid for the battery and the purchase date (used for IRR, payback and this year's actual savings — enter the invoice total, after any green deduction), and your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Leave any tariff field blank to use your country's standard tariff.
-- Optionally set a **reserve floor (%)** — the share of usable capacity your control system never discharges below (e.g. a backup reserve). Enter usable capacity above; the reserve is subtracted here, don't subtract it twice.
-
-If your history shows more energy leaving the battery than entering it, the **Battery charge/discharge reversed** toggle is preselected (linked profiles get a separate confirmation step) — see Troubleshooting.
-
-**Step 3 – Privacy (create path)**
-- Opt in to anonymised data sharing (off by default) if you want to contribute to the Wolta benchmark.
-- Confirm to create the profile and complete setup.
+**Step 2 – Price zone and control system (create path)**
+- Pick your price zone. Nothing is preselected: the zone suggested from your Home Assistant location is listed first and labelled, but you have to choose it — the zone cannot be changed after the plant is created.
+- Confirm the control system (prefilled when Wolta recognises the integration behind your battery sensors), choose whether to contribute anonymised data, and check the charge/discharge direction toggle (preselected when your history looks reversed).
+- Submit. **You are not asked for battery capacity, power or efficiency**: Wolta measures them from the data the integration uploads. The status sensor shows *Measuring battery* until then (typically 30 days with a few full charges). If the data cannot yield them — the battery never charges fully, or one stream is empty — a Repair asks for the nameplate values instead; you can also enter them any time under Configure → Settings.
 
 ## Shared profile with wolta.se
 
@@ -111,9 +102,9 @@ Because a linked profile belongs to your wolta.se usage, **removing the integrat
 
 Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Settings** to adjust values without removing the integration. (The other menu options — **Link to a wolta.se account** and **Correct the price zone** — are covered under [Account linking](#account-linking) and [Correcting the price zone](#correcting-the-price-zone) below.) The form is grouped into **Battery**, **Economy** and **Tariffs** sections:
 
-- Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score.
+- Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score. While Wolta is still measuring a newly created battery (status sensor shows *Measuring battery* or *Needs battery values*), these three fields are blank and optional rather than required, so saving other settings doesn't overwrite the pending measurement with a guess. Entering the manufacturer's nameplate figures here has the same effect as the Repair: Wolta derives the usable capacity from them right away and switches to the measured value once the data allows.
 - Nameplate capacity (kWh) and nameplate power (kW) — optional manufacturer-rated figures. The grade itself always uses the usable/deliverable values above; the rated figures let wolta.se compare per-kWh prices fairly in the expansion calculator and explain measured-vs-rated differences. Clearing a field removes the value.
-- What you paid for the battery, and the purchase date — used for IRR, payback and this year's actual savings. Enter the invoice total, after any green deduction; it is treated as the whole investment. Clearing a field removes the value.
+- What you paid for the battery, and the purchase date — used for IRR, payback and this year's actual savings. Enter the invoice total, after any green deduction; it is treated as the whole investment. If Home Assistant's sensor history suggests a purchase date, it's offered as a one-time suggestion here rather than being set automatically — accept it, type your own, or leave it blank. Clearing a field removes the value.
 - Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Clearing a field reverts it to your country's standard tariff.
 - Reserve floor (%) — the share of usable capacity your control system never discharges below. Clearing the field removes the reserve.
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
@@ -223,6 +214,8 @@ Leaving the field empty — the default — changes nothing: no extra sensor is 
 **Payback time shows `unknown`.** The sensor has no payback year to report because the battery doesn't reach break-even — typically a small or expensive battery whose modelled internal rate of return (IRR) is negative. This is a real result, not an error; the IRR sensor shows the (negative) return. Increasing the battery capacity or lowering the entered purchase price moves it towards a payback.
 
 **The grade sensor has a `capacity_hint` attribute (v0.8.0+).** The backend sets it when the battery capacity you entered is clearly higher than the usable capacity your measured data shows — a nameplate-vs-usable mix-up. The grade compares you against a perfect dispatch on the capacity you *entered*, so an oversized entry unfairly lowers the score. Open **Configure** and set the battery capacity to the attribute's `suggested_kwh` (or your own better estimate of usable capacity); the grade is recomputed automatically. No hint means no mismatch was detected.
+
+**"Wolta needs your battery's nameplate values" repair appears (v0.36.0+).** On a newly created plant, Wolta measures battery capacity, power and efficiency from the data you upload instead of asking for them at setup — the status sensor shows *Measuring battery* while that's in progress. If the data can't yield a measurement after enough time has passed — the battery never charges fully, or one of the battery streams is empty — this repair fires and asks for the manufacturer's nameplate capacity and power instead. Wolta derives the usable capacity from the nameplate pair and switches to the measured value later if the data allows it. You can also enter the nameplate values proactively at any time under Configure → Settings, without waiting for the repair.
 
 **Measured-parameter repairs appear (v0.12.0+).** Once there are a couple of months of history, Wolta measures the grade-affecting battery parameters at the meter and, if one clearly disagrees with what you configured, raises a fixable repair. They only appear when the measurement is mature and confident (≥60 days and a real gap), and the measured values are all-time figures, so they're stable across seasons. Each repair opens on a menu: **adopt the measured value** or **ignore and keep your value** (v0.26.0+) — ignoring is remembered so the repair stops reappearing, which is the right choice if you simply haven't fully cycled the battery in the period, or if a spiky sensor has biased the measurement.
 
