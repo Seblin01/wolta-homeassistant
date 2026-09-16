@@ -11,12 +11,6 @@ helper one hop to its source sensor and reads *that* sensor's integration instea
 One hop only — a helper built on another helper still gives no suggestion. The
 field remains a suggestion you confirm; nothing is chosen for you.
 
-**Three more integrations are recognised on the Wolta side:** CheckWatt
-(`checkwatt`), Greenely (`greenely`) and Emaldo (`emaldo`), read from the
-respective integrations' manifests. Pixii and Reduxi have no Home Assistant
-integration (Reduxi reaches HA over MQTT, and the generic `mqtt` platform is never
-mapped), so they stay unsuggested.
-
 **A malformed battery stamp no longer interrupts the main upload cycle.** The
 5-minute side-poll already ignored a malformed `battery_status` row from the
 server; the 6-hour main cycle did not, so a display field could abort a whole
