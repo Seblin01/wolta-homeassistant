@@ -57,3 +57,12 @@ def test_translation_has_same_keys_as_strings(path: Path):
     extra = sorted(actual - expected)
     assert not missing, f"{path.name} is missing keys from strings.json: {missing}"
     assert not extra, f"{path.name} has keys strings.json does not: {extra}"
+
+
+@pytest.mark.parametrize("lang, needle", [("en", "prefilled"), ("sv", "förifyll")])
+def test_eff_beskrivningen_sager_att_faltet_ar_forifyllt(lang: str, needle: str) -> None:
+    """Efterpost plan C: eff-fältet i Configure → Battery renderas med serverns lagrade värde,
+    men beskrivningen sa inget om det – ägaren kunde tro att 0,84 var ett förslag att fylla i."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    desc = data["options"]["step"]["settings"]["sections"]["battery"]["data_description"]["eff"]
+    assert needle in desc.lower()

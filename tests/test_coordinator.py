@@ -3013,3 +3013,20 @@ async def test_battery_status_absent_on_old_backend(hass: HomeAssistant, mock_en
     assert data.battery_status is None
     assert data.results["battery_status"] is None
     assert data.detect_min_days == 30
+
+
+@pytest.mark.asyncio
+async def test_missbildad_batteristampel_faller_inte_huvudcykeln(hass: HomeAssistant, mock_entry):
+    """Sidopollen skyddar _take_battery_state (missbildad rad → debug-logg), men HUVUDcykeln
+    gjorde det inte: `int("abc")` på detect_min_days gav UpdateFailed-liknande avbrott av
+    hela uppladdningscykeln – för ett visningsfält. Stämpeln ska ignoreras, cykeln gå vidare."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_status": "pending",
+        "battery_detect": "trasig", "detect_min_days": "abc",
+    })
+    coordinator, data = await _sync_refresh(hass, mock_entry, client)
+    assert data.results["status"] == RESULTS_PAYLOAD["status"]
+    # Ingen halv stämpel: status och dygn sätts atomärt eller inte alls.
+    assert data.battery_status is None
+    assert data.detect_min_days == 30

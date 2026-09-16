@@ -95,10 +95,15 @@
           "set_nameplate": {
             "title": "Enter the battery's nameplate values",
             "description": "Wolta could not measure your battery's size from the data uploaded so far ({days} days): the battery never charges fully, or one of the battery streams is empty. Enter the manufacturer's figures – Wolta works out the usable capacity itself and switches to the measured value once the data allows.",
-            "data": { "nameplate_kwh": "Nameplate capacity (kWh)", "nameplate_kw": "Nameplate power (kW)" }
+            "data": {
+              "nameplate_kwh": "Nameplate capacity (kWh)",
+              "nameplate_kw": "Nameplate power (kW)"
+            }
           }
         },
-        "abort": { "entry_not_found": "The Wolta integration this repair belonged to has been removed." }
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+        }
       }
     }
   },
@@ -244,7 +249,7 @@
               "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
               "battery_kw": "Maximum charge/discharge power in kW – leave empty while Wolta is measuring.",
               "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable AC power above; the rated figure lets wolta.se explain the difference when the measured power at the meter is lower (inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
-              "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Changing plant values triggers a server-side regrade.",
+              "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Prefilled with the value stored at Wolta. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
             }
           },
