@@ -20,7 +20,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_LINK_TOKEN, DOMAIN, WOLTA_API_BASE, link_url
+from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
 
 
@@ -315,7 +315,7 @@ _BATTERY_STATUS_FIRST = {"pending": "measuring_battery", "needs_input": "needs_b
 def _status_value(r: dict) -> str:
     # Batteritillståndet har företräde (spec 2026-09-14 §7.2): utan känd kapacitet finns
     # inget jobb att rapportera status för.
-    bs = _BATTERY_STATUS_FIRST.get(r.get("battery_status") or "")
+    bs = _BATTERY_STATUS_FIRST.get(r.get(KEY_BATTERY_STATUS) or "")
     return bs or _STATUS_MAP.get(r.get("status"), "waiting_for_data")
 
 
@@ -332,7 +332,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
             "step": (data.results.get("job") or {}).get("step"),
             # Mätningens framsteg (spec 2026-09-14 §7.2): dygn hittills mot serverns
             # minsta krav, så väntan går att visa utan att gissa hur länge den håller på.
-            "battery_status": data.battery_status,
+            KEY_BATTERY_STATUS: data.battery_status,
             "detect_days": (data.battery_detect or {}).get("n_days"),
             "detect_min_days": data.detect_min_days,
         },

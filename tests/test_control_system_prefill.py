@@ -45,3 +45,36 @@ async def test_battery_platforms_lasser_ur_registret(hass):
 @pytest.mark.asyncio
 async def test_battery_platforms_tom_lista(hass):
     assert battery_platforms(hass, []) == []
+
+
+@pytest.mark.asyncio
+async def test_battery_platforms_foljer_riemann_hjalparens_kalla(hass):
+    """Energy-dashboardens batterisensorer är ofta HA:s `integration`-hjälpare (Riemann-summa
+    kWh ur en effektsensor). Deras platform är `integration`, som ingen mappning matchar –
+    förslaget tände därför sällan för den VANLIGASTE uppsättningen (verifierat på Bronäs
+    2026-09-15). Följ hjälparens `source`-entitet ETT hopp och läs DEN plattformen."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    reg = er.async_get(hass)
+    src = reg.async_get_or_create("sensor", "huawei_solar", "batt_power").entity_id
+    helper_entry = MockConfigEntry(domain="integration", options={"source": src})
+    helper_entry.add_to_hass(hass)
+    helper = reg.async_get_or_create(
+        "sensor", "integration", "batt_kwh", config_entry=helper_entry
+    ).entity_id
+    assert battery_platforms(hass, [helper]) == ["huawei_solar"]
+
+
+@pytest.mark.asyncio
+async def test_battery_platforms_hjalpare_utan_kand_kalla_forblir_hjalparen(hass):
+    """Saknas källan i registret (eller är hjälparen inte en `integration`) gäller
+    entitetens egen plattform – ett hopp, aldrig gissning."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    reg = er.async_get(hass)
+    helper_entry = MockConfigEntry(domain="integration", options={"source": "sensor.borta"})
+    helper_entry.add_to_hass(hass)
+    helper = reg.async_get_or_create(
+        "sensor", "integration", "batt_kwh2", config_entry=helper_entry
+    ).entity_id
+    assert battery_platforms(hass, [helper]) == ["integration"]

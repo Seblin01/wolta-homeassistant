@@ -69,6 +69,8 @@ CONF_VIEW_ONLY = "view_only"
 CONF_PREFILL_PURCHASE_DATE = "prefill_purchase_date"
 # Serverns battery_status (profil-GET, spec 2026-09-14 §4). Bara stämpeln renderas; regeln
 # pending→needs_input bor i backend.
+# Serverns batteristämpel i profil-GET:en (spec 2026-09-14 §4) – EN nyckel för alla lässiten.
+KEY_BATTERY_STATUS = "battery_status"
 BATTERY_STATUS_NONE = "none"
 BATTERY_STATUS_PENDING = "pending"
 BATTERY_STATUS_NEEDS_INPUT = "needs_input"

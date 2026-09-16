@@ -13,15 +13,44 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 
+# HA:s Riemann-summa-hjälpare (domän `integration`, kWh integrerat ur en effektsensor) är den
+# VANLIGASTE batterisensorn i Energy-dashboarden (verifierat på Bronäs 2026-09-15). Dess
+# platform är `integration`, som ingen mappning matchar, så förslaget tände sällan. Hjälparens
+# config entry bär källan under `source` (homeassistant/components/integration/const.py,
+# CONF_SOURCE_SENSOR) – följ den ETT hopp och läs källans plattform.
+_SOURCE_HELPER_DOMAINS = frozenset({"integration"})
+_CONF_SOURCE = "source"
+
+
 def battery_platforms(hass: HomeAssistant, entity_ids: list[str]) -> list[str]:
-    """Integrationsdomänen (RegistryEntry.platform) för varje entitet som finns i registret."""
+    """Integrationsdomänen (RegistryEntry.platform) för varje entitet som finns i registret.
+
+    En `integration`-hjälpare rapporterar sin KÄLLAS plattform om källan finns i registret;
+    annars sin egen. Ett hopp, aldrig rekursion – en hjälpare på en hjälpare är inte värd
+    en gissning."""
     reg = er.async_get(hass)
     out: list[str] = []
     for eid in entity_ids:
         entry = reg.async_get(eid)
-        if entry is not None and entry.platform:
-            out.append(entry.platform)
+        if entry is None or not entry.platform:
+            continue
+        out.append(_source_platform(hass, reg, entry) or entry.platform)
     return out
+
+
+def _source_platform(
+    hass: HomeAssistant, reg: er.EntityRegistry, entry: er.RegistryEntry
+) -> str | None:
+    if entry.platform not in _SOURCE_HELPER_DOMAINS or not entry.config_entry_id:
+        return None
+    cfg = hass.config_entries.async_get_entry(entry.config_entry_id)
+    if cfg is None:
+        return None
+    source_id = cfg.options.get(_CONF_SOURCE) or cfg.data.get(_CONF_SOURCE)
+    if not isinstance(source_id, str):
+        return None
+    src = reg.async_get(source_id)
+    return src.platform if src is not None and src.platform else None
 
 
 def suggest_control_system(platforms: list[str], mapping: list[dict]) -> str | None:

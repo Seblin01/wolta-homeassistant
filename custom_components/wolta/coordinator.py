@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .const import (
+    KEY_BATTERY_STATUS,
     BATTERY_STATUS_NEEDS_INPUT,
     CONF_BATT_IN,
     CONF_BATT_OUT,
@@ -325,11 +326,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         the main cycle would leave the user unasked for up to six hours while the plant
         has no grade at all. Both fields are stored raw; the pending→needs_input rule
         lives in the backend (spec 2026-09-14 §4) and is never re-derived here."""
-        self._battery_status = profile.get("battery_status")
-        self._battery_detect = profile.get("battery_detect")
-        self._detect_min_days = int(
-            profile.get("detect_min_days") or _DETECT_MIN_DAYS_DEFAULT
-        )
+        # Atomärt: läs alla tre fälten INNAN något tilldelas, så en missbildad rad (anroparna
+        # fångar och ignorerar) inte lämnar en halv stämpel (status satt, dygn ej) bakom sig.
+        status = profile.get(KEY_BATTERY_STATUS)
+        detect = profile.get("battery_detect")
+        min_days = int(profile.get("detect_min_days") or _DETECT_MIN_DAYS_DEFAULT)
+        self._battery_status = status
+        self._battery_detect = detect
+        self._detect_min_days = min_days
         self._evaluate_battery_pending()
 
     async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
@@ -387,7 +391,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
                 else:
                     self._apply_profile_sync(profile)
-                    self._take_battery_state(profile)
+                    # Samma skydd som sidopollen: stämpeln är ett VISNINGSFÄLT, och en
+                    # missbildad rad (icke-dict battery_detect, osiffrig detect_min_days)
+                    # får inte fälla hela uppladdningscykeln.
+                    try:
+                        self._take_battery_state(profile)
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
 
             # Visningsläge: bara resultat-pollen. Hela strömningsmaskineriet (invert-/
             # entitets-självläkning, bookmark, statistikläsning, PUT /data, recompute-
@@ -536,7 +546,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         job = results.get("job") or {}
         # Batteristämpeln hoistas in i results av samma skäl som applied_tariff ligger där:
         # sensorernas value_fn ser BARA results, aldrig dataobjektet (attr_fn ser båda).
-        results = {**results, "battery_status": self._battery_status}
+        results = {**results, KEY_BATTERY_STATUS: self._battery_status}
         data = WoltaData(
             results=results,
             last_uploaded=last_uploaded,

@@ -95,10 +95,15 @@
           "set_nameplate": {
             "title": "Ange batteriets märkdata",
             "description": "Wolta kunde inte mäta batteriets storlek ur datan som laddats upp hittills ({days} dygn): batteriet fulladdas aldrig, eller så är en av batteriströmmarna tom. Ange tillverkarens värden – Wolta räknar själv ut den användbara kapaciteten och byter till det uppmätta värdet så fort datan räcker.",
-            "data": { "nameplate_kwh": "Märkt kapacitet (kWh)", "nameplate_kw": "Märkeffekt (kW)" }
+            "data": {
+              "nameplate_kwh": "Märkt kapacitet (kWh)",
+              "nameplate_kw": "Märkeffekt (kW)"
+            }
           }
         },
-        "abort": { "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort." }
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
+        }
       }
     }
   },
@@ -244,7 +249,7 @@
               "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
               "battery_kw": "Maximal ladd-/urladdningseffekt i kW – lämna tomt medan Wolta mäter.",
               "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara AC-effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt vid mätaren är lägre (växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
-              "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Ändrade anläggningsvärden räknar om betyget server-side.",
+              "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Förifyllt med värdet som är sparat hos Wolta. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
             }
           },

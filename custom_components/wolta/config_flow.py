@@ -38,6 +38,7 @@ from . import stats
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .control_system_prefill import battery_platforms, suggest_control_system
 from .const import (
+    KEY_BATTERY_STATUS,
     BATTERY_STATUS_NEEDS_INPUT,
     BATTERY_STATUS_NONE,
     BATTERY_STATUS_PENDING,
@@ -367,7 +368,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # mäter det) men har ett batteri, så par-regeln nedan hade avvisat den.
                 # `battery_status` är auktoriteten när servern skickar den; en äldre
                 # server utan fältet faller tillbaka på den gamla par-regeln.
-                status = prof.get("battery_status")
+                status = prof.get(KEY_BATTERY_STATUS)
                 no_battery = (
                     status == BATTERY_STATUS_NONE if status is not None
                     else not (prof.get(CONF_BATTERY_KWH) and prof.get(CONF_BATTERY_KW))
@@ -1383,7 +1384,7 @@ class WoltaOptionsFlow(OptionsFlow):
         # mot server-snapshotet – tomt mot tomt (den väntande raden) PATCH:ar ingenting,
         # medan ett rensat visat värde PATCH:ar null precis som förut. Ett komplett par
         # nollställer flaggan server-side (plan A Task 7).
-        battery_pending = srv.get("battery_status") in (
+        battery_pending = srv.get(KEY_BATTERY_STATUS) in (
             BATTERY_STATUS_PENDING, BATTERY_STATUS_NEEDS_INPUT
         )
         kwh_selector = _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")
