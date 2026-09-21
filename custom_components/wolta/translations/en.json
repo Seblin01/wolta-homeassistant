@@ -293,7 +293,7 @@
       },
       "account_link": {
         "title": "Link to a wolta.se account",
-        "description": "Your linking code is **{code}**.\n\nSign in or create an account at wolta.se, go to Account → Link plant and enter the code. The code is valid for 10 minutes. Minting a new code invalidates any earlier one, even if it hasn't expired yet."
+        "description": "Your linking code is **{code}**.\n\nGo to wolta.se/konto, enter your email address and paste the code — if you do not have an account yet, one is created when you confirm the email. If you are already signed in, go to Account → Link plant instead. The code is valid for 10 minutes. Minting a new code invalidates any earlier one, even if it hasn't expired yet."
       },
       "zone_correction": {
         "title": "Correct the price zone",
