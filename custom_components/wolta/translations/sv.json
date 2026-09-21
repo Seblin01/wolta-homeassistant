@@ -293,7 +293,7 @@
       },
       "account_link": {
         "title": "Koppla till ett wolta.se-konto",
-        "description": "Din kopplingskod är **{code}**.\n\nLogga in eller skapa ett konto på wolta.se, gå till Konto → Koppla anläggning och ange koden. Koden gäller i 10 minuter. En ny kod gör en tidigare kod ogiltig, även om den inte hunnit gå ut."
+        "description": "Din kopplingskod är **{code}**.\n\nGå till wolta.se/konto, ange din e-postadress och klistra in koden — har du inget konto skapas det när du bekräftar mailet. Är du redan inloggad går du i stället till Konto → Koppla anläggning. Koden gäller i 10 minuter. En ny kod gör en tidigare kod ogiltig, även om den inte hunnit gå ut."
       },
       "zone_correction": {
         "title": "Rätta elområdet",
