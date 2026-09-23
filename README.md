@@ -243,6 +243,14 @@ Your 15-minute energy data is stored on Wolta's servers to power the analysis. N
 
 **Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
+**Every request identifies the integration and its version** (since v0.37.3), as
+`wolta-hacs/0.37.4 HomeAssistant/2026.9.3 aiohttp/3.14.3 Python/3.14` in the User-Agent —
+the second half is what Home Assistant already sends to every server it talks to. This is
+what makes it possible to keep older installations working, or to tell you plainly when
+yours has fallen too far behind, instead of leaving you with a bare `405`. It names
+software versions and nothing else: no identifier for you, your plant, your tokens or
+your data.
+
 Your anonymised optimisation grade is always included in the public corpus comparison — there is no checkbox to opt out of it, and there never actually was one that did anything: the setting used to sit in the plant step, but it did not gate corpus membership or the raw-data retention described above, and it only had one real effect — disabling the expansion calculator (see [v0.37.0 release notes](docs/release-notes-v0.37.0.md)). See [wolta.se/om](https://wolta.se/om) for the full privacy policy.
 
 ## Links
