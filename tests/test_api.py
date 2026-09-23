@@ -678,3 +678,57 @@ async def test_get_control_systems_skickar_bunden_timeout():
     tmo = client._request.await_args.kwargs.get("timeout")
     assert tmo is not None, "get_control_systems skickade ingen timeout - default 300 s galler da"
     assert tmo.total is not None and tmo.total <= 15, f"otillräcklig gräns: {tmo.total}"
+
+
+# ---------------------------------------------------------------------------
+# Client version in the User-Agent
+# ---------------------------------------------------------------------------
+#
+# The backend had no way to tell an old client from a new one: nothing in the
+# request carried the integration version. That mattered on 2026-09-22, when the
+# question "should we delete old releases that no longer work against the current
+# backend?" could not be answered - GET /grade/check-plant is 405 today, so some
+# old version WOULD fail, but nobody could tell whether anyone still runs one.
+#
+# The User-Agent is the cheapest place to carry it: wolta.se's nginx already logs
+# "$http_user_agent" in its own `proxied` format, which ships to Loki. No backend
+# change, no deploy - the answer simply shows up in the logs.
+
+
+@pytest.mark.asyncio
+async def test_every_request_identifies_the_integration_version(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """The User-Agent names the integration and its version from the manifest."""
+    import json
+    from pathlib import Path
+
+    manifest = json.loads(
+        (Path("custom_components/wolta/manifest.json")).read_text(encoding="utf-8")
+    )
+    aioclient_mock.get(f"{BASE_URL}/api/v1/profile", status=200, json={})
+
+    await _client(aioclient_mock).get_profile(TOKEN)
+
+    sent = aioclient_mock.mock_calls[0][3]
+    ua = sent.get("User-Agent", "")
+    assert "wolta-hacs" in ua, f"User-Agent identifierar inte integrationen: {ua!r}"
+    assert manifest["version"] in ua, (
+        f"User-Agent bär inte manifestets version {manifest['version']}: {ua!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_agent_does_not_clobber_the_auth_header(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """Adding the User-Agent must leave the caller's own headers intact."""
+    aioclient_mock.get(f"{BASE_URL}/api/v1/profile", status=200, json={})
+
+    await _client(aioclient_mock).get_profile(TOKEN)
+
+    sent = aioclient_mock.mock_calls[0][3]
+    assert sent.get("Authorization") == f"Bearer {TOKEN}", (
+        f"auth-headern gick förlorad när User-Agent lades till: {sent!r}"
+    )
+    assert "wolta-hacs" in sent.get("User-Agent", "")

@@ -2,12 +2,47 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _integration_version() -> str:
+    """The version from manifest.json, or "unknown" if it cannot be read.
+
+    Read from the manifest rather than duplicated in a constant: a second copy
+    drifts the first time someone bumps only one of them, and a User-Agent that
+    lies about its version is worse than one that says nothing.
+    """
+    try:
+        manifest = json.loads(
+            (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
+        )
+        return str(manifest.get("version") or "unknown")
+    except (OSError, ValueError):  # missing, unreadable or malformed manifest
+        return "unknown"
+
+
+# Sent on every request so the backend can tell an old client from a new one.
+#
+# Why this exists (2026-09-22): nothing in a request carried the integration
+# version, so "does anyone still run a version that breaks against the current
+# backend?" was unanswerable. GET /grade/check-plant is 405 today, so some old
+# version WOULD fail - but deleting its GitHub release fixes nothing, because the
+# files already sit on the user's disk. Measuring first is the cheap move.
+#
+# Why the User-Agent and not a custom header: wolta.se's nginx logs
+# "$http_user_agent" in its own `proxied` log_format, which ships to Loki. The
+# answer therefore shows up with no backend change and no deploy.
+USER_AGENT = (
+    f"wolta-hacs/{_integration_version()} "
+    "(+https://github.com/Seblin01/wolta-homeassistant)"
+)
 
 # Bounded timeouts for the two mints. HA's shared session sets no ClientTimeout,
 # so aiohttp's default applied: total=300 s, sock_connect=30 s (measured against
@@ -114,6 +149,9 @@ class WoltaApiClient:
             WoltaApiError: for any other non-2xx response.
         """
         url = f"{self._base}{path}"
+        # The caller's headers win: they carry auth, and a future call site that
+        # needs its own User-Agent should get it rather than ours.
+        kwargs["headers"] = {"User-Agent": USER_AGENT, **(kwargs.get("headers") or {})}
         async with self._session.request(method, url, **kwargs) as resp:
             if resp.status == 404:
                 raise WoltaAuthError(f"404 from {url}")
