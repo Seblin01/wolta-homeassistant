@@ -732,3 +732,28 @@ async def test_user_agent_does_not_clobber_the_auth_header(
         f"auth-headern gick förlorad när User-Agent lades till: {sent!r}"
     )
     assert "wolta-hacs" in sent.get("User-Agent", "")
+
+
+@pytest.mark.asyncio
+async def test_user_agent_keeps_home_assistants_own(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """Ours is PREPENDED to Home Assistant's User-Agent, never a replacement.
+
+    v0.37.3 replaced it, and the loss showed up in the logs within hours: HA's
+    shared session already sends "HomeAssistant/<core version> aiohttp/... ",
+    which is how the backend could see WHICH Home Assistant releases are in the
+    field - the very thing hacs.json's minimum (2025.12.0) is about. Carrying the
+    integration version must add information, not trade one fact for another.
+    """
+    ha_ua = "HomeAssistant/2026.9.3 aiohttp/3.14.3 Python/3.14"
+    session = aioclient_mock.create_session({})
+    session.headers["User-Agent"] = ha_ua        # what HA's shared session sets
+    client = WoltaApiClient(session, base_url=BASE_URL)
+    aioclient_mock.get(f"{BASE_URL}/api/v1/profile", status=200, json={})
+
+    await client.get_profile(TOKEN)
+
+    ua = aioclient_mock.mock_calls[0][3].get("User-Agent", "")
+    assert "wolta-hacs/" in ua, f"integrationens version saknas: {ua!r}"
+    assert ha_ua in ua, f"Home Assistants egen User-Agent gick förlorad: {ua!r}"

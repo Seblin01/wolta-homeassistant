@@ -149,9 +149,18 @@ class WoltaApiClient:
             WoltaApiError: for any other non-2xx response.
         """
         url = f"{self._base}{path}"
-        # The caller's headers win: they carry auth, and a future call site that
-        # needs its own User-Agent should get it rather than ours.
-        kwargs["headers"] = {"User-Agent": USER_AGENT, **(kwargs.get("headers") or {})}
+        # PREPENDED to Home Assistant's own User-Agent, never a replacement.
+        # v0.37.3 replaced it and the loss showed up in the logs within hours: HA's
+        # shared session already sends "HomeAssistant/<core version> aiohttp/...",
+        # which is how the backend sees WHICH Home Assistant releases are in the
+        # field - exactly what hacs.json's minimum is about. Carrying the
+        # integration version has to ADD a fact, not trade one for another.
+        #
+        # The caller's headers still win: they carry auth, and a future call site
+        # that needs its own User-Agent should get it rather than ours.
+        ha_ua = self._session.headers.get("User-Agent")
+        ua = f"{USER_AGENT} {ha_ua}" if ha_ua else USER_AGENT
+        kwargs["headers"] = {"User-Agent": ua, **(kwargs.get("headers") or {})}
         async with self._session.request(method, url, **kwargs) as resp:
             if resp.status == 404:
                 raise WoltaAuthError(f"404 from {url}")
