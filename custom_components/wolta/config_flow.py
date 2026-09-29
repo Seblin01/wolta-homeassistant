@@ -37,6 +37,7 @@ from homeassistant.util import dt as dt_util
 from . import stats
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .control_system_prefill import battery_platforms, suggest_control_system
+from .solar_source_check import huawei_ac_yield_sensors
 from .const import (
     KEY_BATTERY_STATUS,
     BATTERY_STATUS_NEEDS_INPUT,
@@ -322,6 +323,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # Styrsystem-förslaget ur batterisensorernas integrationsdomän (sätts i
         # entitetssteget). None = inget förslag → plant-fältet får ingen default.
         self._cs_suggest: str | None = None
+        # Huawei-solsensorn på AC-sidan (solar_source_check): ägaren har bekräftat valet,
+        # sensorvalet ska visas igen med ägarens EGNA val (inte Energy-dashboardens förval),
+        # resp. en omkonfigurering som väntar på bekräftelse innan den skrivs.
+        self._solar_confirmed = False
+        self._entities_defaults: dict[str, Any] | None = None
+        self._pending_reconfigure: dict[str, Any] | None = None
         # Stable plant identity for this entry, minted once here and persisted in entry.data.
         # Minted at flow start (not at entry creation) because BOTH the create path and the
         # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
@@ -628,60 +635,77 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
             if not errors:
                 self._entities_data = user_input
-                # Auto-prefill ur användarens egen historik (eff/datum/invert-detektion).
-                try:
-                    charged, discharged, first_ts = await stats.async_fetch_lifetime(
-                        self.hass,
-                        user_input[CONF_BATT_IN],
-                        user_input[CONF_BATT_OUT],
-                    )
-                    self._prefill = stats.analyze_battery_history(
-                        charged, discharged, first_ts, dt_util.utcnow()
-                    )
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.debug("Prefill analysis failed; using defaults", exc_info=True)
-                    self._prefill = {}
-                # Spec 2026-09-14 §7.1: styrsystem-förslag ur batterisensorernas
-                # integrationsdomän, uppslaget mot backendens mappning. Nätfel ⇒ inget
-                # förslag (fältet utan default, som i dag) – ett halvt uppslag får
-                # aldrig stoppa onboardingen. Bara skapa-spåret frågar efter styrsystem,
-                # så koppla-spåret slipper anropet.
-                self._cs_suggest = None
-                if self._link_token is None:
-                    try:
-                        platforms = battery_platforms(
-                            self.hass,
-                            list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
-                        )
-                        mapping = await WoltaApiClient(
-                            async_get_clientsession(self.hass)
-                        ).get_control_systems()
-                        suggestion = suggest_control_system(platforms, mapping)
-                        # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
-                        # ett id vi inte känner igen som default hade förvalt ett värde som
-                        # SelectSelector själv avvisar → MultipleInvalid i sista
-                        # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
-                        self._cs_suggest = (
-                            suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
-                            else None
-                        )
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug(
-                            "control_system prefill failed; no suggestion", exc_info=True
-                        )
-                if self._link_token is not None:
-                    if self._prefill.get("invert_suspected"):
-                        return await self.async_step_invert_check()
-                    return self._create_linked_entry(invert=False)
-                return await self.async_step_plant()
+                if not self._solar_confirmed and huawei_ac_yield_sensors(
+                    self.hass, list(user_input.get(CONF_SOLAR) or [])
+                ):
+                    return await self.async_step_solar_source()
+                return await self._after_entities(user_input)
 
         # Prefill from HA energy dashboard if configured (returns lists)
-        # When re-showing after errors, use submitted values as defaults
+        # When re-showing after errors, use submitted values as defaults. After "change
+        # solar sensor" (solar_source step) show the owner's OWN choices - the dashboard
+        # defaults would silently throw away everything they just picked.
         if errors and user_input is not None:
             defaults = user_input
+        elif self._entities_defaults is not None:
+            defaults = self._entities_defaults
         else:
             defaults = await _energy_dashboard_defaults(self.hass)
+        return self._show_entities_form(defaults, errors)
 
+    async def _after_entities(self, user_input: dict[str, Any]) -> ConfigFlowResult:
+        """Everything the entities step does once the selection is accepted."""
+        # Auto-prefill ur användarens egen historik (eff/datum/invert-detektion).
+        try:
+            charged, discharged, first_ts = await stats.async_fetch_lifetime(
+                self.hass,
+                user_input[CONF_BATT_IN],
+                user_input[CONF_BATT_OUT],
+            )
+            self._prefill = stats.analyze_battery_history(
+                charged, discharged, first_ts, dt_util.utcnow()
+            )
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Prefill analysis failed; using defaults", exc_info=True)
+            self._prefill = {}
+        # Spec 2026-09-14 §7.1: styrsystem-förslag ur batterisensorernas
+        # integrationsdomän, uppslaget mot backendens mappning. Nätfel ⇒ inget
+        # förslag (fältet utan default, som i dag) – ett halvt uppslag får
+        # aldrig stoppa onboardingen. Bara skapa-spåret frågar efter styrsystem,
+        # så koppla-spåret slipper anropet.
+        self._cs_suggest = None
+        if self._link_token is None:
+            try:
+                platforms = battery_platforms(
+                    self.hass,
+                    list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
+                )
+                mapping = await WoltaApiClient(
+                    async_get_clientsession(self.hass)
+                ).get_control_systems()
+                suggestion = suggest_control_system(platforms, mapping)
+                # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
+                # ett id vi inte känner igen som default hade förvalt ett värde som
+                # SelectSelector själv avvisar → MultipleInvalid i sista
+                # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
+                self._cs_suggest = (
+                    suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
+                    else None
+                )
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.debug(
+                    "control_system prefill failed; no suggestion", exc_info=True
+                )
+        if self._link_token is not None:
+            if self._prefill.get("invert_suspected"):
+                return await self.async_step_invert_check()
+            return self._create_linked_entry(invert=False)
+        return await self.async_step_plant()
+
+    def _show_entities_form(
+        self, defaults: dict[str, Any], errors: dict[str, str]
+    ) -> ConfigFlowResult:
+        """Render the entity-selector form with `defaults` pre-filled."""
         schema = vol.Schema(
             {
                 vol.Required(
@@ -773,12 +797,22 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_EXTERNAL_CONTROL: user_input.get(CONF_EXTERNAL_CONTROL) or None,
                     CONF_FLEX_COMPENSATION: user_input.get(CONF_FLEX_COMPENSATION) or None,
                 }
+                # Huawei-solsensor på AC-sidan: fråga INNAN något skrivs – en omkonfigurering
+                # laddar om hela historiken från de nya sensorerna.
+                if not self._solar_confirmed and huawei_ac_yield_sensors(
+                    self.hass, list(data_updates[CONF_SOLAR])
+                ):
+                    self._pending_reconfigure = data_updates
+                    return await self.async_step_solar_source()
                 # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
                 # full re-backfill skriver över historiken från de nya sensorerna.
                 return self.async_update_reload_and_abort(entry, data_updates=data_updates)
 
+        # After "change solar sensor" the form shows the owner's pending choices, not the
+        # stored ones they were about to replace.
+        source = self._pending_reconfigure or entry.data
         defaults = {
-            k: entry.data.get(k)
+            k: source.get(k)
             for k in (
                 CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR,
                 CONF_EXTERNAL_CONTROL, CONF_FLEX_COMPENSATION,
@@ -894,6 +928,51 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             zone = entry_data[CONF_ZONE]
             return self.async_create_entry(title=f"Wolta ({zone})", data=entry_data)
         return self.async_show_form(step_id="view_only", data_schema=vol.Schema({}))
+
+    async def async_step_solar_source(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Huawei-solsensorn mäter AC-sidan (Total yield): fråga innan vi går vidare.
+
+        En bekräftelse, inte ett fel: med ett AC-kopplat batteri är sensorn rätt, och den
+        ägaren ska inte låsas ute. Se solar_source_check för bakgrunden."""
+        data = self._pending_reconfigure or self._entities_data
+        suspects = huawei_ac_yield_sensors(self.hass, list(data.get(CONF_SOLAR) or []))
+        return self.async_show_menu(
+            step_id="solar_source",
+            menu_options=["solar_source_change", "solar_source_keep"],
+            description_placeholders={
+                "sensors": ", ".join(self._entity_label(eid) for eid in suspects)
+            },
+        )
+
+    async def async_step_solar_source_change(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Tillbaka till sensorvalet med ägarens egna val förifyllda."""
+        if self._pending_reconfigure is not None:
+            return await self.async_step_reconfigure()
+        self._entities_defaults = dict(self._entities_data)
+        return await self.async_step_entities()
+
+    async def async_step_solar_source_keep(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ägaren behåller sensorn – fortsätt precis som om steget aldrig visats."""
+        self._solar_confirmed = True
+        if self._pending_reconfigure is not None:
+            entry = self._get_reconfigure_entry()
+            await self.async_set_unique_id(entry.unique_id)
+            self._abort_if_unique_id_mismatch()
+            return self.async_update_reload_and_abort(
+                entry, data_updates=self._pending_reconfigure
+            )
+        return await self._after_entities(self._entities_data)
+
+    def _entity_label(self, entity_id: str) -> str:
+        state = self.hass.states.get(entity_id)
+        name = state.name if state is not None else None
+        return f"{name} ({entity_id})" if name and name != entity_id else entity_id
 
     async def async_step_invert_check(
         self, user_input: dict[str, Any] | None = None

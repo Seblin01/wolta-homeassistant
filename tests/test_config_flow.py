@@ -3662,3 +3662,170 @@ def test_zone_group_never_crosses_currency() -> None:
     # A single-zone country yields one entry, which is why async_step_init hides the menu
     # item in that case rather than offering a form with only the current value.
     assert len(_zone_group("SE3")) > 1
+
+
+# ---------------------------------------------------------------------------
+# Huawei-solsensor på AC-sidan (Total yield) → bekräftelsesteg (2026-09-29)
+# ---------------------------------------------------------------------------
+#
+# Prod 2026-09-29, anläggning 156: huawei_solars *Total yield* som solsensor med DC-kopplat
+# batteri gav 21,8 % omöjlig energi och ett betyg utanför korpusen. Flödet ska fånga valet
+# INNAN historiken laddas upp – som ett bekräftelsesteg, inte ett blockerande fel (ett
+# AC-kopplat batteri är ett legitimt skäl att behålla sensorn).
+
+_AC_SOLAR = "sensor.inverter_total_yield"
+_DC_SOLAR = "sensor.inverter_total_dc_input_energy"
+
+
+def _register_huawei_solar(hass: HomeAssistant) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    reg = er.async_get(hass)
+    reg.async_get_or_create("sensor", "huawei_solar", "HV23A_accumulated_yield_energy",
+                            translation_key="accumulated_yield_energy",
+                            suggested_object_id="inverter_total_yield")
+    reg.async_get_or_create("sensor", "huawei_solar", "HV23A_total_dc_input_power",
+                            translation_key="total_dc_input_power",
+                            suggested_object_id="inverter_total_dc_input_energy")
+
+
+async def _create_to_entities(hass: HomeAssistant):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "create"})
+    assert result["step_id"] == "entities"
+    return result
+
+
+@pytest.mark.asyncio
+async def test_create_huawei_total_yield_shows_solar_source_step(hass: HomeAssistant) -> None:
+    _register_huawei_solar(hass)
+    with _patched(_mock_client()):
+        result = await _create_to_entities(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOLAR: [_AC_SOLAR]})
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "solar_source"
+    assert result["menu_options"] == ["solar_source_change", "solar_source_keep"]
+    assert _AC_SOLAR in result["description_placeholders"]["sensors"]
+
+
+@pytest.mark.asyncio
+async def test_create_huawei_solar_source_keep_continues_with_chosen_sensor(
+    hass: HomeAssistant,
+) -> None:
+    _register_huawei_solar(hass)
+    with _patched(_mock_client()):
+        result = await _create_to_entities(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOLAR: [_AC_SOLAR]})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "solar_source_keep"})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "plant"
+
+
+@pytest.mark.asyncio
+async def test_create_huawei_solar_source_change_reshows_entities_with_choices(
+    hass: HomeAssistant,
+) -> None:
+    """Byt sensor ska visa sensorvalet med ägarens egna val kvar – inte Energy-dashboardens
+    förval, som hade raderat allt hen just valt."""
+    _register_huawei_solar(hass)
+    chosen = {**STEP_ENTITIES_DATA, CONF_SOLAR: [_AC_SOLAR]}
+    with _patched(_mock_client()):
+        result = await _create_to_entities(hass)
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], chosen)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "solar_source_change"})
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "entities"
+        assert _plant_schema_default(result, CONF_BATT_IN) == chosen[CONF_BATT_IN]
+        assert _plant_schema_default(result, CONF_SOLAR) == [_AC_SOLAR]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**chosen, CONF_SOLAR: [_DC_SOLAR]})
+    assert result["step_id"] == "plant"
+
+
+@pytest.mark.asyncio
+async def test_create_huawei_dc_input_energy_goes_straight_to_plant(hass: HomeAssistant) -> None:
+    _register_huawei_solar(hass)
+    with _patched(_mock_client()):
+        result = await _create_to_entities(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOLAR: [_DC_SOLAR]})
+    assert result["step_id"] == "plant"
+
+
+@pytest.mark.asyncio
+async def test_link_huawei_solar_source_keep_creates_entry(hass: HomeAssistant) -> None:
+    _register_huawei_solar(hass)
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOLAR: [_AC_SOLAR]})
+        assert result["step_id"] == "solar_source"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "solar_source_keep"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SOLAR] == [_AC_SOLAR]
+
+
+def _reconfigure_input(solar: str) -> dict:
+    return {
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: [solar],
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_huawei_total_yield_keep_updates_entry(hass: HomeAssistant) -> None:
+    _register_huawei_solar(hass)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], _reconfigure_input(_AC_SOLAR))
+        assert result["type"] == FlowResultType.MENU
+        assert result["step_id"] == "solar_source"
+        # Inget får ha skrivits innan ägaren bekräftat.
+        assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_SOLAR] == [
+            "sensor.solar"]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "solar_source_keep"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_SOLAR] == [_AC_SOLAR]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_huawei_total_yield_change_reshows_form(hass: HomeAssistant) -> None:
+    _register_huawei_solar(hass)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], _reconfigure_input(_AC_SOLAR))
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "solar_source_change"})
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reconfigure"
+        assert _plant_schema_default(result, CONF_SOLAR) == [_AC_SOLAR]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], _reconfigure_input(_DC_SOLAR))
+    assert result["reason"] == "reconfigure_successful"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_SOLAR] == [_DC_SOLAR]

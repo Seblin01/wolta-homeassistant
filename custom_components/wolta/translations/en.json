@@ -215,6 +215,14 @@
         "data": {
           "profile_input": "Profile link or token"
         }
+      },
+      "solar_source": {
+        "title": "Check the solar sensor",
+        "description": "The solar sensor you picked ({sensors}) is the Huawei inverter's AC output (Total yield). With a Huawei battery on the inverter's DC side (LUNA2000) it misses the solar power that goes straight into the battery, but it does count the battery's discharge. Your home's energy then won't add up, and your grade is kept out of the comparison with other plants.\n\nPick **Total DC input energy** from the same inverter instead. If you can't find it, it may be disabled: enable it on the inverter's device page under Settings → Devices & services → Huawei Solar.\n\nKeep the sensor only if your battery is AC-coupled (connected on the AC side, not to the Huawei inverter).",
+        "menu_options": {
+          "solar_source_change": "Change solar sensor",
+          "solar_source_keep": "Keep this sensor"
+        }
       }
     },
     "error": {

@@ -215,6 +215,14 @@
         "data": {
           "profile_input": "Profillänk eller token"
         }
+      },
+      "solar_source": {
+        "title": "Kontrollera solsensorn",
+        "description": "Solsensorn du valt ({sensors}) är Huawei-växelriktarens AC-utgång (Total yield). Med ett Huawei-batteri på växelriktarens DC-sida (LUNA2000) missar den solel som går rakt in i batteriet, men räknar med batteriets urladdning. Då går husets energi inte ihop, och ditt betyg hålls utanför jämförelsen med andra anläggningar.\n\nVälj i stället **Total DC input energy** från samma växelriktare. Hittar du den inte kan den vara avstängd: aktivera den på växelriktarens enhetssida under Inställningar → Enheter och tjänster → Huawei Solar.\n\nBehåll sensorn bara om ditt batteri är AC-kopplat (anslutet på AC-sidan, inte till Huawei-växelriktaren).",
+        "menu_options": {
+          "solar_source_change": "Byt solsensor",
+          "solar_source_keep": "Behåll den här sensorn"
+        }
       }
     },
     "error": {
