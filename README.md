@@ -86,6 +86,7 @@ No account or API token is required. Setup starts with a choice:
 
 **Step 1 – Energy sensors**
 - Map your HA energy sensors for battery charge, battery discharge, grid import and grid export (prefilled from the Energy dashboard). Solar is optional.
+- **Huawei (huawei_solar) with a LUNA2000 battery:** use the inverter's **Total DC input energy** as the solar sensor, not *Total yield*. Total yield is the inverter's AC output — it misses solar that goes straight into the DC-coupled battery but counts the battery's discharge, so your home's energy won't add up and the grade is kept out of the comparison. If you pick Total yield (or an EMMA's *Inverter total energy yield*), setup asks you to confirm; keep it only if your battery is AC-coupled. The same check runs when you change sensors via *Reconfigure*.
 
 **Step 2 – Price zone and control system (create path)**
 - Pick your price zone. Nothing is preselected: the zone suggested from your Home Assistant location is listed first and labelled, but you have to choose it — the zone cannot be changed after the plant is created.
