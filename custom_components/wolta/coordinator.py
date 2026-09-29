@@ -98,6 +98,14 @@ _ISSUE_EFFICIENCY = "measured_efficiency"
 # nameplate pair instead. Unlike the three adopt repairs above this is not a nudge to
 # improve a value - without a capacity there is no grade at all.
 _ISSUE_BATTERY_NEEDS_INPUT = "battery_needs_input"
+# The household energy balance does not add up (backend spec 2026-09-28): the battery takes
+# more than solar and grid deliver in a large share of the data, so the sensors don't describe
+# the whole house and the grade is kept out of the peer comparison. The backend decides
+# (`energy_balance.excluded`, one derivation) - we never re-derive its threshold here. One
+# issue id per entry; the translation key carries the cause (solar_low/import_low/
+# source_missing/unclear), so a changed cause re-renders the same issue.
+_ISSUE_ENERGY_BALANCE = "energy_balance"
+_ENERGY_BALANCE_CAUSES = ("solar_low", "import_low", "source_missing", "unclear")
 # Fallback for the server's detect_min_days when the profile doesn't carry it (older
 # backend). Shared by WoltaData's default and the profile read so the sensor never
 # reports a different minimum than the evaluation assumed.
@@ -1041,6 +1049,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         without the user having to know nameplate-vs-usable, AC-vs-DC, etc."""
         betyg = results.get("betyg")
         betyg = betyg if isinstance(betyg, dict) else {}
+        # Before the preliminary return below: unlike the adopt nudges this is not a
+        # measurement that needs a mature window - the backend's floor (a full battery charge
+        # of impossible energy) already keeps short windows from firing it.
+        self._evaluate_energy_balance_issue(betyg)
         # Preliminärt betyg (backend api 0.43.0): < 30 dygns data. Mätningen av kapacitet/
         # effekt/verkningsgrad är då systematiskt UNDERSKATTAD (batteriet har inte hunnit
         # visa hela sitt fönster) → adopt-förslagen vore falska. Vänta tills betyget mognar.
@@ -1049,6 +1061,37 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
+
+    def _evaluate_energy_balance_issue(self, betyg: dict) -> None:
+        """Non-fixable repair when the backend has excluded the grade because the household
+        energy balance does not add up. The fix is a different sensor under Reconfigure, so
+        there is no flow - the text names the mapped sensors the cause points at.
+
+        Never in view-only mode: there the data comes from a webhook/bridge, not these HA
+        sensors, so advice about the sensor mapping would reach the wrong person. A missing
+        block or a missing `excluded` (older backend) clears rather than guesses."""
+        eb = betyg.get("energy_balance") if isinstance(betyg, dict) else None
+        eb = eb if isinstance(eb, dict) else {}
+        cause = eb.get("cause") if eb.get("cause") in _ENERGY_BALANCE_CAUSES else "unclear"
+        issue_id = f"{_ISSUE_ENERGY_BALANCE}_{self.config_entry.entry_id}"
+        if eb.get("excluded") is True and not self._view_only:
+            def _names(stream: str) -> str:
+                return ", ".join(self._entity_map[self._effective_stream(stream)]) or "-"
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=f"{_ISSUE_ENERGY_BALANCE}_{cause}",
+                translation_placeholders={
+                    "solar": _names("solar"),
+                    "grid_in": _names("grid_in"),
+                    "batt_in": _names("batt_in"),
+                },
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
     def _evaluate_capacity_issue(self, betyg: dict) -> None:
         """Adopt the measured usable capacity. observed_capacity is the all-time DISPATCHABLE

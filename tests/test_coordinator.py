@@ -3030,3 +3030,83 @@ async def test_missbildad_batteristampel_faller_inte_huvudcykeln(hass: HomeAssis
     # Ingen halv stämpel: status och dygn sätts atomärt eller inte alls.
     assert data.battery_status is None
     assert data.detect_min_days == 30
+
+
+# ---------------------------------------------------------------------------
+# Husets energibalans (backend !202/!203): repair per orsak när grinden fäller
+# ---------------------------------------------------------------------------
+
+_EB_ISSUE_ID = "energy_balance_test_entry_id"
+
+
+def _eb_results(excluded, cause="solar_low", *, preliminary=False):
+    return {"betyg": {"preliminary": preliminary,
+                      "energy_balance": {"share": 0.4, "impossible_kwh": 500.0,
+                                         "cause": cause, "excluded": excluded}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["solar_low", "import_low", "source_missing", "unclear"])
+async def test_energy_balance_issue_fires_per_cause(hass, mock_entry, cause):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_eb_results(True, cause))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == f"energy_balance_{cause}"
+    assert issue.is_fixable is False
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_names_the_mapped_sensors(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_eb_results(True, "solar_low"))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID)
+    assert issue.translation_placeholders["solar"] == "sensor.solar"
+    assert issue.translation_placeholders["grid_in"] == "sensor.grid_in"
+    assert issue.translation_placeholders["batt_in"] == "sensor.batt_in"
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_follows_backend_not_own_threshold(hass, mock_entry):
+    """HACS räknar aldrig om tröskeln: share 0,4 men excluded False → ingen repair."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_eb_results(False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_clears_when_balance_recovers(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_eb_results(True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is not None
+    c._evaluate_measured_params(_eb_results(False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_fires_also_when_preliminary(hass, mock_entry):
+    """Adopt-repairerna väntar på moget betyg; balansen gör det inte - backendens golv (en
+    hel batteriladdning) skyddar redan korta fönster."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_eb_results(True, preliminary=True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_never_in_view_only(hass, mock_entry):
+    """Visningsläge: datan kommer från webhooken/bryggan, inte HA-sensorerna - ett råd om
+    sensormappning vore riktat till fel person."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+    c = await _cap_coordinator(hass, mock_entry)
+    c._view_only = True
+    c._evaluate_measured_params(_eb_results(True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_energy_balance_issue_absent_block_or_old_backend(hass, mock_entry):
+    """Block saknas (äldre backend) eller saknar excluded → ingen repair, aldrig en gissning."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params({"betyg": {}})
+    c._evaluate_measured_params({"betyg": {"energy_balance": {"share": 0.9, "cause": "unclear"}}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
