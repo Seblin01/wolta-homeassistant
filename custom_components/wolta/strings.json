@@ -105,6 +105,22 @@
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
+    },
+    "energy_balance_solar_low": {
+      "title": "Wolta: your solar sensor probably reads too low",
+      "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nIt happens mostly while the sun produces, so your solar sensor ({solar}) probably reads too low. If the battery sits on the DC side of your inverter, the solar sensor must show solar production before the battery (the inverter's DC input), not the inverter's AC output. If you have several inverters or strings, all of them must be included.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."
+    },
+    "energy_balance_import_low": {
+      "title": "Wolta: your grid import or charge sensor doesn't add up",
+      "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nIt happens mostly when you buy electricity from the grid, for example when charging at night. Check that the grid import sensor ({grid_in}) measures the whole installation's import (all phases) and that the charge sensor ({batt_in}) is the battery's own counter for charged energy.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."
+    },
+    "energy_balance_source_missing": {
+      "title": "Wolta: a solar or grid sensor seems to be missing",
+      "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nThe battery charges while neither solar nor grid import shows any energy. A sensor is probably missing from the configuration - check that both solar ({solar}) and grid import ({grid_in}) are selected.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."
+    },
+    "energy_balance_unclear": {
+      "title": "Wolta: your energy data doesn't add up",
+      "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nCheck that solar ({solar}), grid import ({grid_in}), export and the battery's charge ({batt_in}) and discharge are mapped to the right sensors.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."
     }
   },
   "config": {

@@ -105,6 +105,22 @@
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
+    },
+    "energy_balance_solar_low": {
+      "title": "Wolta: solsensorn visar troligen för lite",
+      "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nDet händer mest när solen producerar, så solsensorn ({solar}) visar troligen för lite. Sitter batteriet på växelriktarens DC-sida ska solsensorn visa solproduktionen före batteriet (växelriktarens DC-ingång), inte växelriktarens AC-utgång. Har du flera växelriktare eller strängar ska alla räknas med.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
+    },
+    "energy_balance_import_low": {
+      "title": "Wolta: import- eller laddsensorn går inte ihop",
+      "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nDet händer mest när du köper el från nätet, till exempel vid nattladdning. Kontrollera att importsensorn ({grid_in}) mäter hela anläggningens import (alla faser) och att laddsensorn ({batt_in}) är batteriets egen räknare för laddad energi.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
+    },
+    "energy_balance_source_missing": {
+      "title": "Wolta: en sol- eller nätsensor verkar saknas",
+      "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nBatteriet laddar när varken sol eller import syns. En sensor saknas troligen i konfigurationen – kontrollera att både sol ({solar}) och nätimport ({grid_in}) är valda.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
+    },
+    "energy_balance_unclear": {
+      "title": "Wolta: energin i din data går inte ihop",
+      "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nKontrollera att sol ({solar}), nätimport ({grid_in}), export och batteriets laddning ({batt_in}) och urladdning är mappade till rätt sensorer.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
     }
   },
   "config": {
