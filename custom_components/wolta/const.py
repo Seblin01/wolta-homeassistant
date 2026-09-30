@@ -140,6 +140,7 @@ CONTROL_SYSTEMS: list[tuple[str, str]] = [
     ("reduxi", "Reduxi"),
     ("huawei", "Huawei"),
     ("pixii", "Pixii"),
+    ("keepai", "KeepAI"),
     ("emhass", "EMHASS"),
     ("self_consumption", "Self-consumption (passive)"),
     ("manual", "Manual"),
