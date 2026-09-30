@@ -96,3 +96,11 @@ def test_readme_does_not_promise_removing_sensor_months_on_the_web():
     assert "no Remove button" in readme, (
         "README no longer says the sensor rows cannot be removed from the card"
     )
+
+
+def test_keepai_is_a_control_system():
+    """Backendens CONTROL_SYSTEMS fick 'keepai' (migration 0056) - HACS-listan måste följa,
+    annars går ett KeepAI-styrt batteri inte att välja i konfigurationsdialogen."""
+    from custom_components.wolta.const import CONTROL_SYSTEMS
+
+    assert ("keepai", "KeepAI") in CONTROL_SYSTEMS
