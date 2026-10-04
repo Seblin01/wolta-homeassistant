@@ -966,24 +966,27 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # A naive value would break the comparisons with the aware window bounds.
         return parsed if parsed.tzinfo else None
 
-    @staticmethod
-    def _next_soc_bookmark(soc: list[dict], flow_bookmark: str) -> str:
+    def _next_soc_bookmark(self, soc: list[dict], flow_bookmark: str) -> str:
         """The new SoC bookmark after a delivered read.
 
-        With rows: the EARLIEST over the sensors of each sensor's latest row start, so a
-        sensor whose statistics lag is not skipped; whatever the others delivered beyond
-        it is read again next time (idempotent upsert, the same principle as the flow
-        bookmark being the last row's own ts). Without rows (the read worked, there was
+        With rows: the LATEST row start over all sensors, minus one hour. HA compiles the
+        statistics of all sensors in the same run, so sensors do not lag each other; the
+        hour is the re-read margin for a late compile (idempotent upsert, so the overlap
+        costs nothing). Deliberately NOT the earliest sensor's last row: a selected sensor
+        that went silent would then pin the bookmark at its last row, which stays in the
+        window for good, and every cycle would re-read and re-upload an ever-growing span
+        for all sensors up to the 365-day floor. Without rows (the read worked, there was
         nothing): the new flow bookmark, so a sensor without statistics does not make the
-        window grow every cycle."""
-        latest: dict[str, datetime] = {}
-        for row in soc:
-            ts = datetime.fromisoformat(row["ts"])
-            if row["unit"] not in latest or ts > latest[row["unit"]]:
-                latest[row["unit"]] = ts
-        if not latest:
-            return flow_bookmark
-        return min(latest.values()).isoformat()
+        window grow either.
+
+        The bookmark never moves backwards."""
+        if soc:
+            candidate = (max(datetime.fromisoformat(row["ts"]) for row in soc)
+                         - timedelta(hours=1))
+        else:
+            candidate = datetime.fromisoformat(flow_bookmark)
+        previous = self._soc_bookmark()
+        return max(candidate, previous).isoformat() if previous else candidate.isoformat()
 
     async def _soc_state(
         self, start: datetime, now: datetime, *, hourly_until: datetime
