@@ -1780,6 +1780,31 @@ async def test_view_only_network_failure_skips_upload_repair_tracking(hass: Home
 
 
 @pytest.mark.asyncio
+async def test_view_only_with_soc_sensors_never_reads_soc(hass: HomeAssistant, mock_entry):
+    """A view-only plant's data is owned by its binding and the server 409s every write, so
+    SoC sensors picked on such an entry (e.g. a leftover choice) are never read: no
+    recorder query, no PUT, and none of the SoC state keys (a pending backfill flag or a
+    bookmark would be bookkeeping for an upload that can never happen)."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+
+    mock_entry.data = {CONF_TOKEN: TOKEN, CONF_ZONE: ZONE, CONF_VIEW_ONLY: True,
+                       CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client(results=RESULTS_DONE_JOB_SETTLED)
+    client.get_profile = AsyncMock(side_effect=Exception("sync skipped in test"))
+    coordinator = await _make_coordinator(hass, mock_entry, client)
+    measurement_mock = AsyncMock(side_effect=AssertionError("view-only far inte lasa SoC"))
+
+    with patch("custom_components.wolta.coordinator.async_fetch_measurement",
+               measurement_mock):
+        await coordinator._async_update_data()
+
+    measurement_mock.assert_not_awaited()
+    client.put_data.assert_not_awaited()
+    assert not any(key in coordinator._state
+                   for key in ("applied_soc", "soc_backfill_pending", "soc_uploaded_ts"))
+
+
+@pytest.mark.asyncio
 async def test_measured_params_skipped_for_preliminary_grade(hass, mock_entry):
     """Ett preliminärt betyg (< 30 dygns data, backend api 0.43.0) får inte driva
     measured-params-repairs: 7 dygns observerad kapacitet är systematiskt UNDERSKATTAD

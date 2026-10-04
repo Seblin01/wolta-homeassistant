@@ -783,6 +783,22 @@ async def test_put_data_without_soc_sends_exactly_rows():
 
 
 @pytest.mark.asyncio
+async def test_put_data_more_flow_chunks_than_soc_chunks_carries_soc_only_once():
+    """6 000 flow rows need two calls, 10 SoC rows one: SoC rides with the first call only.
+    The second call is flows alone - exactly {"rows": chunk}, no battery_state and no
+    battery_sources - so the SoC rows are not sent twice."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"ok": True})
+    rows, soc = _flow_rows(6_000), _soc_rows(10)
+    sources = [{"unit": "sensor.soc", "source": "ha", "semantics": "mean"}]
+    await client.put_data(TOKEN, rows, battery_state=soc, battery_sources=sources)
+    assert client._request.await_count == 2
+    first, second = (c.kwargs["json"] for c in client._request.await_args_list)
+    assert first == {"rows": rows[:5_000], "battery_state": soc, "battery_sources": sources}
+    assert second == {"rows": rows[5_000:]}
+
+
+@pytest.mark.asyncio
 async def test_put_data_soc_chunks_follow_flow_chunks_and_repeat_the_last():
     """6 000 SoC rows need two calls though 10 flow rows need one: the second call repeats
     the last flow chunk (`rows` is mandatory, the upsert is idempotent)."""

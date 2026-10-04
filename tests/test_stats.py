@@ -524,6 +524,46 @@ class TestFetchChangeUnits:
         assert args[6] == {"change"}
 
 
+class TestFetchMeasurement:
+    """async_fetch_measurement reads mean/min/max for state-of-charge sensors. The call
+    shape is the contract with the recorder: positional arguments in the order of
+    statistics_during_period, no unit conversion (the sensor's own percent - a kWh dict
+    would be wrong for it), and through the executor, never on the event loop."""
+
+    @pytest.mark.asyncio
+    async def test_calls_statistics_during_period_with_exact_arguments(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from homeassistant.components.recorder import statistics as statistics_mod
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+            return {"sensor.soc": []}
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        hass = MagicMock()
+        start = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
+        result = await stats.async_fetch_measurement(hass, {"sensor.soc"}, start, end, "hour")
+
+        assert result == {"sensor.soc": []}
+        instance.async_add_executor_job.assert_awaited_once()
+        assert captured["fn"] is statistics_mod.statistics_during_period
+        # statistics_during_period(hass, start, end, ids, period, units, types)
+        assert captured["args"] == (
+            hass, start, end, {"sensor.soc"}, "hour", None, {"mean", "min", "max"},
+        )
+
+
 # ---------------------------------------------------------------------------
 # monthly_amounts - flex-compensation read (spec 2026-08-28)
 # ---------------------------------------------------------------------------
