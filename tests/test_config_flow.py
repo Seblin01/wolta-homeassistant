@@ -2946,7 +2946,8 @@ async def test_entities_step_rejects_soc_sensor_not_in_percent(
 async def test_entities_step_rejects_unavailable_soc_sensor(
     hass: HomeAssistant,
 ) -> None:
-    """A sensor with no state at all cannot be vetted, so it is not accepted."""
+    """A sensor with no state at all cannot be vetted, so it is not accepted - and the
+    error says it is missing, not that it is the wrong kind of sensor."""
     mock_client = _mock_client()
 
     with _patched(mock_client):
@@ -2954,7 +2955,47 @@ async def test_entities_step_rejects_unavailable_soc_sensor(
             hass, {**STEP_ENTITIES_DATA, CONF_SOC: ["sensor.no_such_soc"]}, mock_client
         )
 
-    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_soc_entity_id_over_128_chars(
+    hass: HomeAssistant,
+) -> None:
+    """The API's `unit` is at most 128 characters; a longer id would never be sent, so
+    the picker says so instead of accepting a sensor that is silently skipped."""
+    long_id = "sensor." + "s" * 122  # 129 chars
+    hass.states.async_set(long_id, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [long_id]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_id_too_long"}
+
+
+@pytest.mark.asyncio
+async def test_soc_error_order_unavailable_before_not_measurement_before_too_long(
+    hass: HomeAssistant,
+) -> None:
+    """Order: unavailable -> not_measurement -> id_too_long -> too_many."""
+    from custom_components.wolta.config_flow import _soc_error
+
+    long_id = "sensor." + "s" * 122
+    hass.states.async_set(long_id, "55", SOC_ATTRS)
+    hass.states.async_set("sensor.kwh", "5", {"state_class": "measurement",
+                                              "unit_of_measurement": "kWh"})
+    many = [f"sensor.battery_soc_{i}" for i in range(17)]
+    for entity_id in many:
+        hass.states.async_set(entity_id, "55", SOC_ATTRS)
+
+    assert _soc_error(hass, [long_id, "sensor.kwh", "sensor.missing"]) == "soc_unavailable"
+    assert _soc_error(hass, [long_id, "sensor.kwh"]) == "soc_not_measurement"
+    assert _soc_error(hass, [*many, long_id]) == "soc_id_too_long"
+    assert _soc_error(hass, many) == "soc_too_many"
+    assert _soc_error(hass, many[:16]) is None
 
 
 @pytest.mark.asyncio

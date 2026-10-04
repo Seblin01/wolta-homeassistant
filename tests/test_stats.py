@@ -1447,3 +1447,19 @@ def test_battery_state_rows_clamps_mean_into_min_max_before_rounding():
     rows = stats.battery_state_rows({"sensor.soc": {t: (55.12500000000001, 55.125, 55.125)}},
                                     3600)
     assert rows and rows[0]["soc_min"] <= rows[0]["soc_mean"] <= rows[0]["soc_max"]
+
+
+def test_soc_unit_ok_is_the_apis_unit_limit():
+    """ONE predicate for the API's `unit` limit (128), shared by rows and sources."""
+    assert stats.soc_unit_ok("s" * 128)
+    assert not stats.soc_unit_ok("s" * 129)
+
+
+def test_battery_state_rows_drops_unit_the_shared_predicate_rejects(monkeypatch):
+    """battery_state_rows filters through soc_unit_ok, not a private copy of the limit -
+    otherwise rows and sources can disagree on which sensors are sent."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    monkeypatch.setattr(stats, "soc_unit_ok", lambda entity_id: entity_id != "sensor.no")
+    rows = stats.battery_state_rows({"sensor.no": {t: (50.0, 40.0, 60.0)},
+                                     "sensor.yes": {t: (50.0, 40.0, 60.0)}}, 3600)
+    assert [r["unit"] for r in rows] == ["sensor.yes"]

@@ -3418,6 +3418,43 @@ async def test_removing_soc_sensors_never_backfills(
 
 
 @pytest.mark.asyncio
+async def test_soc_sensor_over_api_length_limits_is_left_out_of_rows_and_sources(
+    hass: HomeAssistant, mock_entry
+):
+    """One rule for rows AND sources: a sensor whose entity id exceeds 128 characters
+    (`unit`), or whose source label 'ha:<platform>:<entity_id>' exceeds 200, is left out
+    of the read, the rows and battery_sources alike. A source without rows - or rows
+    without a source - would 422 the whole call, flows included."""
+    from homeassistant.helpers import entity_registry as er
+
+    reg = er.async_get(hass)
+    reg.async_get_or_create("sensor", "testplatform", "soc-uid", suggested_object_id="soc")
+    # entity id 120 chars (fine as a unit) but source 'ha:' + 80 + ':' + 120 = 204 chars.
+    long_source = reg.async_get_or_create(
+        "sensor", "p" * 80, "soc-long-src", suggested_object_id="s" * 113).entity_id
+    assert len(long_source) == 120
+    long_unit = "sensor." + "u" * 122  # 129 chars, not in the registry
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY, long_source, long_unit]}
+    client = _mock_client()
+    asked: list[set] = []
+
+    async def measurement(h, ids, start, end, period):
+        asked.append(set(ids))
+        q = _SOC_QUARTER.timestamp()
+        return {e: [{"start": q + k, "mean": 50.0, "min": 49.0, "max": 51.0}
+                    for k in (0, 300, 600)] for e in ids}
+
+    await _run_soc_cycles(hass, mock_entry, client, [measurement],
+                          {**_SETTLED_STATE, "applied_soc": sorted(
+                              [_SOC_ENTITY, long_source, long_unit])})
+
+    assert asked and all(ids == {_SOC_ENTITY} for ids in asked)
+    _, kwargs = client.put_data.call_args
+    assert {r["unit"] for r in kwargs["battery_state"]} == {_SOC_ENTITY}
+    assert [s["unit"] for s in kwargs["battery_sources"]] == [_SOC_ENTITY]
+
+
+@pytest.mark.asyncio
 async def test_upgrade_without_soc_sensors_records_empty_choice_only(
     hass: HomeAssistant, mock_entry
 ):

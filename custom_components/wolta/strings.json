@@ -228,6 +228,8 @@
       "required_sensor": "At least one sensor is required for this stream.",
       "soc_not_measurement": "Pick sensors in % with state_class measurement - others have no statistics to read.",
       "soc_too_many": "Pick at most 16 state-of-charge sensors.",
+      "soc_unavailable": "The selected state-of-charge sensor isn't available right now. Check that it exists and has a value.",
+      "soc_id_too_long": "The sensor's entity ID is longer than 128 characters. Rename the entity and try again.",
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",

@@ -61,6 +61,7 @@ from .stats import (
     async_fetch_measurement,
     battery_state_rows,
     merge_streams,
+    soc_unit_ok,
     soc_from_hourly,
     soc_quarters_from_5min,
     split_hour_to_quarters,
@@ -79,6 +80,9 @@ _BACKFILL_DAYS = 365
 
 # Short-term statistics window — data older than this is only in LTS
 _SHORT_TERM_DAYS = 9
+
+# The API's length limit for battery_sources `source` ('ha:<platform>:<entity_id>').
+_SOC_SOURCE_MAX = 200
 
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
@@ -923,7 +927,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         the error type only: entity ids stay out of the log."""
         if not self._soc_entities:
             return [], True
-        ids = set(self._soc_entities)
+        ids = {s["unit"] for s in self._soc_sources()}
+        if not ids:
+            return [], True
         rows: list[dict] = []
         try:
             if hourly_until > start:
@@ -947,16 +953,23 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         return rows, True
 
     def _soc_sources(self) -> list[dict]:
-        """One battery_sources entry per configured SoC sensor. The platform comes from the
+        """One battery_sources entry per SENDABLE SoC sensor. The platform comes from the
         entity registry ('unknown' for a sensor not in it); semantics stay 'unknown' - the
-        sensor says nothing about whether it reports usable or total capacity."""
+        sensor says nothing about whether it reports usable or total capacity.
+
+        This list is also what _soc_state reads, so one filter decides for the read, the
+        rows and the sources alike: a sensor whose id breaks the API's `unit` limit
+        (stats.soc_unit_ok) or whose label breaks the `source` limit is left out of all
+        three. A source without rows, or rows without a source, 422s the whole call."""
         registry = er.async_get(self.hass)
         out = []
         for entity_id in sorted(self._soc_entities):
             reg_entry = registry.async_get(entity_id)
             platform = reg_entry.platform if reg_entry else "unknown"
-            out.append({"unit": entity_id, "source": f"ha:{platform}:{entity_id}",
-                        "semantics": "unknown"})
+            source = f"ha:{platform}:{entity_id}"
+            if not soc_unit_ok(entity_id) or len(source) > _SOC_SOURCE_MAX:
+                continue
+            out.append({"unit": entity_id, "source": source, "semantics": "unknown"})
         return out
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:

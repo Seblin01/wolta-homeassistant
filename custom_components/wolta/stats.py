@@ -607,6 +607,18 @@ def soc_quarters_from_5min(rows: list[dict]) -> dict[datetime, tuple[float, floa
     return out
 
 
+# The API's length limit for battery_state/battery_sources `unit` (the entity id here).
+SOC_UNIT_MAX = 128
+
+
+def soc_unit_ok(entity_id: str) -> bool:
+    """Whether an entity id fits the API's `unit` limit. The ONE rule for that limit:
+    battery_state_rows filters rows with it and the coordinator filters sources with it -
+    a source without rows, or rows without a source, would 422 the whole call, flows
+    included."""
+    return len(entity_id) <= SOC_UNIT_MAX
+
+
 def battery_state_rows(per_entity: dict[str, dict[datetime, tuple[float, float, float]]],
                        period_s: int) -> list[dict[str, Any]]:
     """PUT rows for battery_state. Values are rounded FIRST to the API's storage precision
@@ -616,7 +628,7 @@ def battery_state_rows(per_entity: dict[str, dict[datetime, tuple[float, float, 
     quarter. One invalid row otherwise 422s the entire call, flows included."""
     rows: list[dict[str, Any]] = []
     for entity, series in sorted(per_entity.items()):
-        if len(entity) > 128:      # the API's limit for `unit` - one too-long row 422s the call
+        if not soc_unit_ok(entity):   # one too-long `unit` 422s the whole call
             continue
         for ts in sorted(series):
             raw_mean, raw_lo, raw_hi = series[ts]

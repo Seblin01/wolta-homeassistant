@@ -228,6 +228,8 @@
       "required_sensor": "Minst en sensor krävs för detta flöde.",
       "soc_not_measurement": "Välj sensorer i % med state_class measurement – andra saknar statistik att läsa.",
       "soc_too_many": "Välj högst 16 sensorer för laddningsnivå.",
+      "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
+      "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
