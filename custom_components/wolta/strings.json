@@ -135,11 +135,13 @@
           "grid_out": "Grid export energy",
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
-          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)"
+          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
+          "soc_entities": "Battery state of charge (%, optional, one per battery)"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
-          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten."
+          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
+          "soc_entities": "Optional. Lets Wolta collect your battery's state of charge to measure its capacity later. Does not change your grade."
         }
       },
       "reauth_confirm": {
@@ -198,11 +200,13 @@
           "grid_out": "Grid export energy",
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
-          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)"
+          "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
+          "soc_entities": "Battery state of charge (%, optional, one per battery)"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
-          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten."
+          "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
+          "soc_entities": "Optional. Lets Wolta collect your battery's state of charge to measure its capacity later. Does not change your grade."
         }
       },
       "view_only": {
@@ -222,6 +226,8 @@
       "invalid_input": "Wolta rejected the plant details – check the price zone and control system and try again.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
+      "soc_not_measurement": "Pick sensors in % with state_class measurement - others have no statistics to read.",
+      "soc_too_many": "Pick at most 16 state-of-charge sensors.",
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
