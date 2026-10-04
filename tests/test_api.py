@@ -757,3 +757,44 @@ async def test_user_agent_keeps_home_assistants_own(
     ua = aioclient_mock.mock_calls[0][3].get("User-Agent", "")
     assert "wolta-hacs/" in ua, f"integrationens version saknas: {ua!r}"
     assert ha_ua in ua, f"Home Assistants egen User-Agent gick förlorad: {ua!r}"
+
+
+# ---------------------------------------------------------------------------
+# put_data – battery_state (SoC) alongside the flow rows
+# ---------------------------------------------------------------------------
+
+
+def _flow_rows(n: int) -> list[dict]:
+    return [{"ts": f"r{i}"} for i in range(n)]
+
+
+def _soc_rows(n: int) -> list[dict]:
+    return [{"unit": "sensor.soc", "ts": f"s{i}"} for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_put_data_without_soc_sends_exactly_rows():
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"ok": True})
+    rows = _flow_rows(3)
+    await client.put_data(TOKEN, rows)
+    assert client._request.await_count == 1
+    assert client._request.await_args.kwargs["json"] == {"rows": rows}
+
+
+@pytest.mark.asyncio
+async def test_put_data_soc_chunks_follow_flow_chunks_and_repeat_the_last():
+    """6 000 SoC rows need two calls though 10 flow rows need one: the second call repeats
+    the last flow chunk (`rows` is mandatory, the upsert is idempotent)."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"ok": True})
+    rows, soc = _flow_rows(10), _soc_rows(6_000)
+    sources = [{"unit": "sensor.soc", "source": "ha", "semantics": "mean"}]
+    await client.put_data(TOKEN, rows, battery_state=soc, battery_sources=sources)
+    assert client._request.await_count == 2
+    first, second = (c.kwargs["json"] for c in client._request.await_args_list)
+    assert first["rows"] == rows and second["rows"] == rows
+    assert first["battery_state"] == soc[:5_000]
+    assert second["battery_state"] == soc[5_000:]
+    assert len(first["battery_state"]) == 5_000 and len(second["battery_state"]) == 1_000
+    assert first["battery_sources"] == sources and second["battery_sources"] == sources

@@ -1395,3 +1395,55 @@ class TestFetchStates:
         end = datetime(2026, 8, 2, tzinfo=timezone.utc)
         result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# SoC statistics -> battery_state rows
+# ---------------------------------------------------------------------------
+
+_H = 1_767_225_600  # 2026-01-01T00:00:00Z
+
+
+def test_soc_from_hourly_skips_incomplete_rows():
+    rows = [{"start": float(_H), "mean": 50.0, "min": 40.0, "max": 60.0},
+            {"start": float(_H + 3600), "mean": None, "min": 40.0, "max": 60.0}]
+    out = stats.soc_from_hourly(rows)
+    assert list(out.values()) == [(50.0, 40.0, 60.0)]
+
+
+def test_soc_quarter_needs_all_three_5min_periods():
+    full = [{"start": float(_H + 300 * i), "mean": 50.0 + i, "min": 49.0 + i, "max": 51.0 + i}
+            for i in range(3)]
+    partial = [{"start": float(_H + 900 + 300 * i), "mean": 50.0, "min": 50.0, "max": 50.0}
+               for i in range(2)]
+    out = stats.soc_quarters_from_5min(full + partial)
+    assert len(out) == 1
+    assert next(iter(out.values())) == (51.0, 49.0, 53.0)
+
+
+def test_battery_state_rows_drops_out_of_range_and_rounds():
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows({"sensor.soc": {t: (50.123, 40.0, 60.0),
+                                                    t.replace(hour=1): (101.0, 99.0, 102.0)}},
+                                    3600)
+    assert rows == [{"unit": "sensor.soc", "ts": t.isoformat(), "period_s": 3600,
+                     "soc_mean": 50.12, "soc_min": 40.0, "soc_max": 60.0}]
+
+
+def test_battery_state_rows_keeps_full_battery_despite_float_overshoot():
+    """HA's time-weighted mean at 100 % can be 100.00000000000001 - it rounds to 100.0
+    and is kept, instead of being dropped or giving a 422."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows(
+        {"sensor.soc": {t: (100.00000000000001, 100.0, 100.00000000000001)}}, 3600)
+    assert rows == [{"unit": "sensor.soc", "ts": t.isoformat(), "period_s": 3600,
+                     "soc_mean": 100.0, "soc_min": 100.0, "soc_max": 100.0}]
+
+
+def test_battery_state_rows_clamps_mean_into_min_max_before_rounding():
+    """Constant 55.125 with float noise in the mean: without the clamp the mean rounds to
+    55.13 and min/max to 55.12 (the API 422s); with it all three are 55.12."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows({"sensor.soc": {t: (55.12500000000001, 55.125, 55.125)}},
+                                    3600)
+    assert rows and rows[0]["soc_min"] <= rows[0]["soc_mean"] <= rows[0]["soc_max"]

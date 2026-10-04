@@ -570,3 +570,79 @@ async def async_fetch_states(
 
     result = await get_instance(hass).async_add_executor_job(_job)
     return [(s.last_changed, s.state) for s in result.get(entity_id, [])]
+
+
+def soc_from_hourly(rows: list[dict]) -> dict[datetime, tuple[float, float, float]]:
+    """Hourly statistics (mean/min/max) for a state-of-charge sensor. Rows missing any of
+    the three values are skipped - no information is not zero (same principle as the
+    energy streams)."""
+    out: dict[datetime, tuple[float, float, float]] = {}
+    for row in rows:
+        mean, lo, hi = row.get("mean"), row.get("min"), row.get("max")
+        if mean is None or lo is None or hi is None:
+            continue
+        unix = int(row["start"])
+        out[datetime.fromtimestamp(unix - unix % 3600, tz=timezone.utc)] = (
+            float(mean), float(lo), float(hi))
+    return out
+
+
+def soc_quarters_from_5min(rows: list[dict]) -> dict[datetime, tuple[float, float, float]]:
+    """A quarter from 5-minute statistics, only when all three periods exist (spec 6.5):
+    min of mins, max of maxes, mean of means (the periods are equally long)."""
+    by_q: dict[int, dict[int, tuple[float, float, float]]] = {}
+    for row in rows:
+        mean, lo, hi = row.get("mean"), row.get("min"), row.get("max")
+        if mean is None or lo is None or hi is None:
+            continue
+        unix = int(row["start"])
+        by_q.setdefault(unix - unix % 900, {})[unix] = (float(mean), float(lo), float(hi))
+    out: dict[datetime, tuple[float, float, float]] = {}
+    for q, parts in by_q.items():
+        if sorted(parts) != [q, q + 300, q + 600]:
+            continue
+        vals = [parts[k] for k in sorted(parts)]
+        out[datetime.fromtimestamp(q, tz=timezone.utc)] = (
+            sum(v[0] for v in vals) / 3, min(v[1] for v in vals), max(v[2] for v in vals))
+    return out
+
+
+def battery_state_rows(per_entity: dict[str, dict[datetime, tuple[float, float, float]]],
+                       period_s: int) -> list[dict[str, Any]]:
+    """PUT rows for battery_state. Values are rounded FIRST to the API's storage precision
+    (2 decimals) and bounds-checked AFTER (0 <= min <= mean <= max <= 100, finite): the API
+    validates the UNROUNDED value, so a mean of 100.00000000000001 on a full battery would
+    422 the whole call - and a filter before the rounding would instead drop every full
+    quarter. One invalid row otherwise 422s the entire call, flows included."""
+    rows: list[dict[str, Any]] = []
+    for entity, series in sorted(per_entity.items()):
+        if len(entity) > 128:      # the API's limit for `unit` - one too-long row 422s the call
+            continue
+        for ts in sorted(series):
+            raw_mean, raw_lo, raw_hi = series[ts]
+            if not all(math.isfinite(v) for v in (raw_mean, raw_lo, raw_hi)):
+                continue
+            # The true mean always lies within [min, max]; a deviation is float noise and
+            # could otherwise round the other way from min/max (55.125 -> 55.13 vs 55.12)
+            # -> 422.
+            raw_mean = min(max(raw_mean, raw_lo), raw_hi)
+            mean, lo, hi = (round(v, 2) for v in (raw_mean, raw_lo, raw_hi))
+            if not 0.0 <= lo <= mean <= hi <= 100.0:
+                continue
+            rows.append({"unit": entity, "ts": ts.isoformat(), "period_s": period_s,
+                         "soc_mean": mean, "soc_min": lo, "soc_max": hi})
+    return rows
+
+
+async def async_fetch_measurement(hass: Any, statistic_ids: set[str], start: datetime,
+                                  end: datetime | None, period: str) -> dict[str, list]:
+    """mean/min/max for measurement sensors, in the sensor's own unit (percent)."""
+    from homeassistant.components.recorder import get_instance  # noqa: PLC0415
+    from homeassistant.components.recorder.statistics import (  # noqa: PLC0415
+        statistics_during_period,
+    )
+
+    return await get_instance(hass).async_add_executor_job(
+        statistics_during_period, hass, start, end, statistic_ids, period, None,
+        {"mean", "min", "max"},
+    )

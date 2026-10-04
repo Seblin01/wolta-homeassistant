@@ -319,21 +319,36 @@ class WoltaApiClient:
         payload = {} if client_plant_id is None else {"client_plant_id": client_plant_id}
         return await self._request("POST", "/profile/adopt", json=payload, headers=self._auth(token))
 
-    async def put_data(self, token: str, rows: list[dict]) -> dict:
-        """Upload energy rows for the given profile.
+    async def put_data(
+        self,
+        token: str,
+        rows: list[dict],
+        battery_state: list[dict] | None = None,
+        battery_sources: list[dict] | None = None,
+    ) -> dict:
+        """Upload energy rows (and optionally state-of-charge rows) for the given profile.
 
-        PUT /api/v1/profile/data (Authorization: Bearer <token>) with {"rows": [...]}
-        Automatically chunks if len(rows) > MAX_ROWS_PER_PUT.
+        PUT /api/v1/profile/data (Authorization: Bearer <token>), chunked at
+        MAX_ROWS_PER_PUT. Without battery_state the body is exactly {"rows": chunk}, as
+        before. SoC chunk k travels with flow chunk k; if there are more SoC chunks than
+        flow chunks they carry the last flow chunk again (the upsert is idempotent and
+        `rows` is mandatory).
         Returns the last chunk's response dict.
         """
+        flow_chunks = [
+            rows[i : i + MAX_ROWS_PER_PUT]
+            for i in range(0, max(len(rows), 1), MAX_ROWS_PER_PUT)
+        ]
+        soc = battery_state or []
+        soc_chunks = [soc[i : i + MAX_ROWS_PER_PUT] for i in range(0, len(soc), MAX_ROWS_PER_PUT)]
         last_response: dict = {}
-        for start in range(0, max(len(rows), 1), MAX_ROWS_PER_PUT):
-            chunk = rows[start : start + MAX_ROWS_PER_PUT]
+        for k in range(max(len(flow_chunks), len(soc_chunks))):
+            body: dict[str, Any] = {"rows": flow_chunks[min(k, len(flow_chunks) - 1)]}
+            if k < len(soc_chunks):
+                body["battery_state"] = soc_chunks[k]
+                body["battery_sources"] = battery_sources or []
             last_response = await self._request(
-                "PUT",
-                "/profile/data",
-                json={"rows": chunk},
-                headers=self._auth(token),
+                "PUT", "/profile/data", json=body, headers=self._auth(token)
             )
         return last_response
 
