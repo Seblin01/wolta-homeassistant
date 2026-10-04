@@ -252,8 +252,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # energy row, and therefore stays out of the entity fingerprint (B8).
         self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
         # Optional state-of-charge sensors (spec 2026-10-03). Their statistics ride along
-        # with the flow rows as battery_state; unlike the flex sensor they DO enter the
-        # entity fingerprint, because adding one must backfill the SoC history.
+        # with the flow rows as battery_state. Like the flex sensor they stay OUT of the
+        # entity fingerprint (a flow re-backfill would coarsen a year of quarter data);
+        # adding one runs a SoC-only backfill instead, see _track_soc_selection.
         self._soc_entities: list[str] = list(entry.data.get(CONF_SOC) or [])
         # Per-entry issue id (the form _set_measured_issue already uses), NOT the
         # shared id the two older non-fixable issues carry: with two Wolta entries a
@@ -456,11 +457,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _fp_map = dict(self._entity_map)
             if self._external_entity:
                 _fp_map["external_control"] = [self._external_entity]
-            # Only when SoC sensors are chosen - otherwise the fingerprint changes for every
-            # existing install on upgrade (same reason as external_control above). Adding
-            # a SoC sensor therefore re-backfills flows + SoC (spec 6.5).
-            if self._soc_entities:
-                _fp_map["soc"] = sorted(self._soc_entities)
+            # The SoC sensors are deliberately NOT part of this fingerprint (spec §6.5, §16):
+            # a flow re-backfill rewrites day 9-365 from HOURLY statistics split over four
+            # quarters, overwriting quarter data that once came from 5-minute statistics HA
+            # has since purged - irreversible, and it recomputes the grade. SoC has its own
+            # bookkeeping in _track_soc_selection.
             entities_now = json.dumps(_fp_map, sort_keys=True)
             applied_entities = self._state.get("applied_entities")
             if applied_entities is None:
@@ -472,26 +473,40 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 self._state["pending_invert_recompute"] = True
                 await self._store.async_save(self._state)
 
+            await self._track_soc_selection()
+
             bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
 
+            # The SoC window follows the flow branch: (start, hourly_until). Hourly
+            # statistics before hourly_until, 5-minute quarters after it.
+            backfill_start = now - timedelta(days=_BACKFILL_DAYS)
+            short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
             if bookmark is None:
                 rows = await self._backfill_rows(now)
-                soc = await self._soc_state(now - timedelta(days=_BACKFILL_DAYS), now,
-                                            hourly_until=now - timedelta(days=_SHORT_TERM_DAYS))
+                soc_window = (backfill_start, short_term_start)
             else:
                 start = datetime.fromisoformat(bookmark)
                 if now - start > timedelta(days=_SHORT_TERM_DAYS):
                     rows = await self._heal_rows(start, now)
-                    soc = await self._soc_state(start, now, hourly_until=now)
+                    soc_window = (start, now)
                 else:
                     rows = await self._incremental_rows(start, now)
-                    soc = await self._soc_state(start, now, hourly_until=start)
+                    soc_window = (start, start)
+            # A pending SoC backfill (sensor added, or first start with sensors chosen)
+            # widens ONLY the SoC read to the whole backfill window. The flow rows stay
+            # those of the branch above - the flow bookmark is never steered by SoC.
+            soc_backfill = bool(self._state.get("soc_backfill_pending"))
+            if soc_backfill:
+                soc_window = (backfill_start, short_term_start)
 
             if rows:
+                # Read here, not per branch: SoC only rides along with flow rows (the API
+                # requires at least one row), so a cycle without rows reads nothing.
+                soc, soc_ok = await self._soc_state(
+                    soc_window[0], now, hourly_until=soc_window[1])
                 try:
                     # Without SoC the call stays exactly (token, rows): the fleet default is
-                    # byte-identical to the pre-feature upload. SoC only rides along when
-                    # there are flow rows - the API requires at least one row.
+                    # byte-identical to the pre-feature upload.
                     soc_kwargs = (
                         {"battery_state": soc, "battery_sources": self._soc_sources()}
                         if soc else {}
@@ -516,6 +531,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 else:
                     ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
                     self._state["last_uploaded_ts"] = rows[-1]["ts"]
+                    # The SoC backfill is done only when the read raised nothing AND the
+                    # PUT carrying it went through; otherwise the next cycle retries it.
+                    if soc_backfill and soc_ok:
+                        self._state.pop("soc_backfill_pending", None)
                     await self._store.async_save(self._state)
                     # Clear failure counter on success
                     self._state.pop("consecutive_failure_days", None)
@@ -869,14 +888,41 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         await self._store.async_save(self._state)
         ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
 
+    async def _track_soc_selection(self) -> None:
+        """Record the SoC choice and decide whether its history must be backfilled.
+
+        This is the SoC counterpart of the applied_entities fingerprint, and it exists
+        precisely so that fingerprint never sees SoC (spec §6.5, §16). It never touches
+        last_uploaded_ts or pending_invert_recompute: the flows and the grade are not
+        SoC's business. A sensor that is NEW to the choice - or any chosen sensor on the
+        first start that records the choice - sets soc_backfill_pending; removing
+        sensors alone just stops collecting them."""
+        soc_now = sorted(self._soc_entities)
+        applied = self._state.get("applied_soc")
+        if applied == soc_now:
+            return
+        if applied is None:
+            pending = bool(soc_now)
+        else:
+            pending = bool(set(soc_now) - set(applied))
+        self._state["applied_soc"] = soc_now
+        if pending:
+            self._state["soc_backfill_pending"] = True
+        await self._store.async_save(self._state)
+
     async def _soc_state(
         self, start: datetime, now: datetime, *, hourly_until: datetime
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """battery_state for [start, now): hourly statistics before hourly_until, quarters
-        from 5-minute statistics after it. A failure here must never stop the flows -
-        they are the product (spec §6) - so it degrades to 'no SoC this cycle'."""
+        from 5-minute statistics after it. Returns (rows, ok); ok is False only when the
+        read raised, so the caller can tell 'the read failed' (keep a pending SoC backfill
+        for the next cycle) from 'there was nothing to read' (the backfill is done).
+
+        A failure here must never stop the flows - they are the product (spec §6) - so
+        it degrades to 'no SoC this cycle'. Logged on warning, with the sensor count and
+        the error type only: entity ids stay out of the log."""
         if not self._soc_entities:
-            return []
+            return [], True
         ids = set(self._soc_entities)
         rows: list[dict] = []
         try:
@@ -891,11 +937,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self.hass, ids, five_start, now, "5minute")
                 rows += battery_state_rows(
                     {e: soc_quarters_from_5min(five.get(e, [])) for e in ids}, 900)
-        except Exception:  # pylint: disable=broad-except
-            _LOGGER.debug("SoC statistics fetch failed; uploading flows without SoC",
-                          exc_info=True)
-            return []
-        return rows
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "State-of-charge statistics read failed for %d sensor(s) (%s); "
+                "uploading energy data without it",
+                len(ids), type(err).__name__,
+            )
+            return [], False
+        return rows, True
 
     def _soc_sources(self) -> list[dict]:
         """One battery_sources entry per configured SoC sensor. The platform comes from the

@@ -3120,7 +3120,10 @@ async def test_energy_balance_issue_absent_block_or_old_backend(hass, mock_entry
 #   - without SoC sensors put_data keeps its exact two-argument call, so the
 #     fleet default is byte-identical to the pre-feature output;
 #   - a failing SoC read never costs the flows (they are the product);
-#   - adding a sensor re-backfills (fingerprint), but only when one is chosen.
+#   - the SoC choice NEVER touches the flow fingerprint or the flow bookmark: a
+#     flow re-backfill would overwrite ~a year of quarter data (from 5-minute
+#     statistics HA has since purged) with hourly values / 4 and recompute the
+#     grade. Adding a sensor instead runs a separate SoC-only backfill.
 # ---------------------------------------------------------------------------
 
 _SOC_ENTITY = "sensor.soc"
@@ -3255,34 +3258,182 @@ async def test_soc_fetch_failure_still_uploads_flows(hass: HomeAssistant, mock_e
     assert coordinator._state.get("last_uploaded_ts") is not None
 
 
+_SETTLED_STATE = {"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+                  "applied_entities": _fingerprint()}
+
+
+async def _run_soc_cycles(hass, mock_entry, client, measurements, store_state):
+    """Several cycles on ONE coordinator (state carries over), one SoC read per cycle.
+
+    Returns (coordinator, async_fetch_change periods per cycle, measurement calls per
+    cycle as (start, end, period), exceptions per cycle (None when the cycle returned))."""
+    change_periods: list[list[str]] = []
+    soc_calls: list[list[tuple]] = []
+    errors: list[BaseException | None] = []
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=store_state)
+    for measurement in measurements:
+        periods: list[str] = []
+        calls: list[tuple] = []
+
+        async def mock_change(h, ids, start, end, period, _p=periods):
+            _p.append(period)
+            return _EMPTY_BATT_STATS
+
+        async def mock_measurement(h, ids, start, end, period, _c=calls, _m=measurement):
+            _c.append((start, end, period))
+            return await _m(h, ids, start, end, period)
+
+        with (
+            patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+            patch("custom_components.wolta.coordinator.async_fetch_change",
+                  side_effect=mock_change),
+            patch("custom_components.wolta.coordinator.async_fetch_measurement",
+                  side_effect=mock_measurement),
+            patch("custom_components.wolta.coordinator.merge_streams",
+                  return_value=_make_rows(NOW - timedelta(hours=1))),
+        ):
+            try:
+                await coordinator._async_update_data()
+            except Exception as err:  # noqa: BLE001 - the test inspects it
+                errors.append(err)
+            else:
+                errors.append(None)
+        change_periods.append(periods)
+        soc_calls.append(calls)
+    return coordinator, change_periods, soc_calls, errors
+
+
+async def _soc_raises(h, ids, start, end, period):
+    raise RuntimeError("recorder busy")
+
+
 @pytest.mark.asyncio
-async def test_adding_soc_sensor_resets_bookmark_for_full_rebackfill(
+@pytest.mark.parametrize("applied_soc", ["absent", "empty"])
+async def test_adding_soc_sensor_backfills_soc_without_touching_flows(
+    hass: HomeAssistant, mock_entry, applied_soc
+):
+    """Adding a SoC sensor (or upgrading with one chosen) on an entry with a bookmark:
+    the bookmark and the flow fingerprint stay, the flows are read only for the
+    incremental window, and the SoC history for the whole backfill window (hourly before
+    now - 9 d) rides along with them. Afterwards the flag is cleared."""
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS, _SHORT_TERM_DAYS
+
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    state = dict(_SETTLED_STATE)
+    if applied_soc == "empty":
+        state["applied_soc"] = []
+
+    coordinator, change_periods, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], state)
+
+    assert errors == [None]
+    # Flows: incremental only - no hourly LTS read, i.e. _backfill_rows never ran.
+    assert change_periods == [["5minute"]]
+    assert coordinator._state["applied_entities"] == _fingerprint()
+    assert "pending_invert_recompute" not in coordinator._state
+    # SoC: the whole backfill window, hourly part first.
+    assert soc_calls[0] == [
+        (NOW - timedelta(days=_BACKFILL_DAYS), NOW - timedelta(days=_SHORT_TERM_DAYS), "hour"),
+        (NOW - timedelta(days=_SHORT_TERM_DAYS), NOW, "5minute"),
+    ]
+    client.put_data.assert_awaited_once()
+    args, kwargs = client.put_data.call_args
+    assert args == (TOKEN, _make_rows(NOW - timedelta(hours=1)))
+    hourly = [r for r in kwargs["battery_state"] if r["period_s"] == 3600]
+    assert [r["ts"] for r in hourly] == [_SOC_HOUR.isoformat()]
+    # The bookmark moved exactly as a plain incremental upload moves it.
+    assert coordinator._state["last_uploaded_ts"] == args[1][-1]["ts"]
+    assert coordinator._state["applied_soc"] == [_SOC_ENTITY]
+    assert not coordinator._state.get("soc_backfill_pending")
+
+
+@pytest.mark.asyncio
+async def test_soc_backfill_flag_survives_failed_read_and_clears_next_cycle(
     hass: HomeAssistant, mock_entry
 ):
-    """Choosing a SoC sensor changes the fingerprint -> bookmark dropped -> the next cycle
-    is a full backfill (hourly + 5-minute), so SoC history arrives with the flows."""
+    """A SoC read that raises costs neither the flows nor the backfill: the flows go up
+    without SoC, the flag stays, and the next cycle retries the whole SoC window."""
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS
+
     mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
     client = _mock_client()
 
-    coordinator, change_periods, _ = await _run_soc_cycle(
-        hass, mock_entry, client, _soc_measurement,
-        store_state={"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
-                     "applied_entities": _fingerprint()})
+    coordinator, change_periods, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_raises, _soc_measurement],
+        {**_SETTLED_STATE, "applied_soc": []})
 
-    assert "hour" in change_periods, "bookmark must be reset -> backfill reads hourly LTS"
-    assert coordinator._state["applied_entities"] == _fingerprint(soc=[_SOC_ENTITY])
+    assert errors == [None, None]
+    assert all("hour" not in periods for periods in change_periods)
+    first, second = client.put_data.call_args_list
+    assert first.kwargs == {} and len(first.args) == 2
+    # Cycle 2 still asks for the full SoC window - the flag survived cycle 1.
+    assert soc_calls[1][0] == (NOW - timedelta(days=_BACKFILL_DAYS),
+                               soc_calls[1][0][1], "hour")
+    assert any(r["period_s"] == 3600 for r in second.kwargs["battery_state"])
+    assert not coordinator._state.get("soc_backfill_pending")
 
 
 @pytest.mark.asyncio
-async def test_no_soc_sensor_leaves_fingerprint_unchanged(hass: HomeAssistant, mock_entry):
-    """Upgrade safety: without a SoC sensor the fingerprint is byte-identical to the
-    pre-feature one, so existing installs do not re-backfill a year on upgrade."""
+async def test_soc_backfill_flag_survives_failed_put(hass: HomeAssistant, mock_entry):
+    """A PUT that fails (not the 422 safety net) delivers nothing - neither the bookmark
+    nor the SoC flag may move."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client(raise_on_put=WoltaApiError("server error", status=500))
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], {**_SETTLED_STATE, "applied_soc": []})
+
+    assert isinstance(errors[0], WoltaApiError)
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["soc_backfill_pending"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "before, after",
+    [([_SOC_ENTITY], []), ([_SOC_ENTITY, "sensor.soc_2"], [_SOC_ENTITY])],
+    ids=["remove_all", "remove_one"],
+)
+async def test_removing_soc_sensors_never_backfills(
+    hass: HomeAssistant, mock_entry, before, after
+):
+    """Removing sensors only stops collecting them: no SoC backfill, no flow re-backfill,
+    fingerprint unchanged."""
+    mock_entry.data = {**ENTRY_DATA, **({CONF_SOC: after} if after else {})}
     client = _mock_client()
 
-    coordinator, change_periods, _ = await _run_soc_cycle(
-        hass, mock_entry, client, _soc_measurement,
-        store_state={"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
-                     "applied_entities": _fingerprint()})
+    coordinator, change_periods, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        {**_SETTLED_STATE, "applied_soc": sorted(before)})
 
-    assert "hour" not in change_periods
+    assert errors == [None]
+    assert change_periods == [["5minute"]]
+    assert all(period != "hour" for _, _, period in soc_calls[0])
     assert coordinator._state["applied_entities"] == _fingerprint()
+    assert coordinator._state["applied_soc"] == sorted(after)
+    assert not coordinator._state.get("soc_backfill_pending")
+    assert "pending_invert_recompute" not in coordinator._state
+    assert coordinator._state["last_uploaded_ts"] != _RECENT_BOOKMARK  # moved, not reset
+
+
+@pytest.mark.asyncio
+async def test_upgrade_without_soc_sensors_records_empty_choice_only(
+    hass: HomeAssistant, mock_entry
+):
+    """Upgrade safety: an install without SoC sensors gets applied_soc=[] and nothing
+    else - no flag, no measurement read, no hourly read, a two-argument PUT and the
+    fingerprint byte-identical to the pre-feature one."""
+    client = _mock_client()
+
+    coordinator, change_periods, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], dict(_SETTLED_STATE))
+
+    assert errors == [None]
+    assert change_periods == [["5minute"]]
+    assert soc_calls == [[]]
+    assert coordinator._state["applied_soc"] == []
+    assert "soc_backfill_pending" not in coordinator._state
+    assert coordinator._state["applied_entities"] == _fingerprint()
+    args, kwargs = client.put_data.call_args
+    assert len(args) == 2 and kwargs == {}
