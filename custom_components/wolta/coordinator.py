@@ -509,13 +509,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 soc, soc_ok = await self._soc_state(
                     soc_window[0], now, hourly_until=soc_window[1])
                 try:
-                    # Without SoC the call stays exactly (token, rows): the fleet default is
-                    # byte-identical to the pre-feature upload.
-                    soc_kwargs = (
-                        {"battery_state": soc, "battery_sources": self._soc_sources()}
-                        if soc else {}
-                    )
-                    await self.client.put_data(self.token, rows, **soc_kwargs)
+                    soc_delivered = await self._put_rows(rows, soc)
                 except WoltaApiError as err:
                     if err.status == 413:
                         # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
@@ -537,7 +531,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self._state["last_uploaded_ts"] = rows[-1]["ts"]
                     # The SoC backfill is done only when the read raised nothing AND the
                     # PUT carrying it went through; otherwise the next cycle retries it.
-                    if soc_backfill and soc_ok:
+                    if soc_backfill and soc_ok and soc_delivered:
                         self._state.pop("soc_backfill_pending", None)
                     await self._store.async_save(self._state)
                     # Clear failure counter on success
@@ -891,6 +885,36 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         await self._store.async_save(self._state)
         ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
+
+    async def _put_rows(self, rows: list[dict], soc: list[dict]) -> bool:
+        """PUT the flow rows, with SoC riding along when there is any. Returns whether
+        the SoC (if any) was delivered; raises WoltaApiError like put_data otherwise.
+
+        Without SoC the call stays exactly (token, rows): the fleet default is
+        byte-identical to the pre-feature upload.
+
+        Safety net (spec §6.5, §16): a 422 on a call that carried SoC re-sends the same
+        flow rows without it. SoC must never stop the flows, not even if the server's
+        rules are tightened after this client shipped. A flow-only 422 is not ours to
+        second-guess and is raised as before."""
+        if not soc:
+            await self.client.put_data(self.token, rows)
+            return True
+        try:
+            await self.client.put_data(
+                self.token, rows,
+                battery_state=soc, battery_sources=self._soc_sources(),
+            )
+        except WoltaApiError as err:
+            if err.status != 422:
+                raise
+            _LOGGER.warning(
+                "Wolta rejected the state-of-charge data (422); "
+                "re-sending the energy data without it"
+            )
+            await self.client.put_data(self.token, rows)
+            return False
+        return True
 
     async def _track_soc_selection(self) -> None:
         """Record the SoC choice and decide whether its history must be backfilled.

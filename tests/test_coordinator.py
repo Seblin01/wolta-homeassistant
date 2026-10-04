@@ -3455,6 +3455,41 @@ async def test_soc_sensor_over_api_length_limits_is_left_out_of_rows_and_sources
 
 
 @pytest.mark.asyncio
+async def test_put_with_soc_rejected_422_resends_flows_without_soc(
+    hass: HomeAssistant, mock_entry
+):
+    """Safety net (spec §6.5, §16): if the server 422s a call that carried SoC, the same
+    flow rows go up again WITHOUT SoC (exactly two arguments). The bookmark moves as
+    usual; the SoC backfill stays pending since its rows were not delivered."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client(raise_on_put=[WoltaApiError("unprocessable", status=422), None])
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], {**_SETTLED_STATE, "applied_soc": []})
+
+    assert errors == [None]
+    first, second = client.put_data.call_args_list
+    assert "battery_state" in first.kwargs
+    assert second.args == first.args and second.kwargs == {} and len(second.args) == 2
+    assert coordinator._state["last_uploaded_ts"] == first.args[1][-1]["ts"]
+    assert coordinator._state["soc_backfill_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_put_without_soc_rejected_422_is_not_retried(hass: HomeAssistant, mock_entry):
+    """The safety net is only for calls that carried SoC: a flow-only 422 behaves as
+    before - raised, one call, bookmark untouched."""
+    client = _mock_client(raise_on_put=WoltaApiError("unprocessable", status=422))
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], dict(_SETTLED_STATE))
+
+    assert isinstance(errors[0], WoltaApiError)
+    client.put_data.assert_awaited_once()
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+
+
+@pytest.mark.asyncio
 async def test_upgrade_without_soc_sensors_records_empty_choice_only(
     hass: HomeAssistant, mock_entry
 ):
