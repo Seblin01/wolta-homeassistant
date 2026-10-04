@@ -12,6 +12,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
@@ -44,6 +45,7 @@ from .const import (
     CONF_POWER_ISSUE_IGNORED,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
+    CONF_SOC,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -56,7 +58,11 @@ from . import stats
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
+    async_fetch_measurement,
+    battery_state_rows,
     merge_streams,
+    soc_from_hourly,
+    soc_quarters_from_5min,
     split_hour_to_quarters,
     sum_quarter_dicts,
 )
@@ -245,6 +251,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # _external_entity this is NOT an upload transformation - it touches no
         # energy row, and therefore stays out of the entity fingerprint (B8).
         self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
+        # Optional state-of-charge sensors (spec 2026-10-03). Their statistics ride along
+        # with the flow rows as battery_state; unlike the flex sensor they DO enter the
+        # entity fingerprint, because adding one must backfill the SoC history.
+        self._soc_entities: list[str] = list(entry.data.get(CONF_SOC) or [])
         # Per-entry issue id (the form _set_measured_issue already uses), NOT the
         # shared id the two older non-fixable issues carry: with two Wolta entries a
         # shared id would let a healthy plant delete a broken plant's warning - a
@@ -446,6 +456,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _fp_map = dict(self._entity_map)
             if self._external_entity:
                 _fp_map["external_control"] = [self._external_entity]
+            # Only when SoC sensors are chosen - otherwise the fingerprint changes for every
+            # existing install on upgrade (same reason as external_control above). Adding
+            # a SoC sensor therefore re-backfills flows + SoC (spec 6.5).
+            if self._soc_entities:
+                _fp_map["soc"] = sorted(self._soc_entities)
             entities_now = json.dumps(_fp_map, sort_keys=True)
             applied_entities = self._state.get("applied_entities")
             if applied_entities is None:
@@ -461,16 +476,27 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
             if bookmark is None:
                 rows = await self._backfill_rows(now)
+                soc = await self._soc_state(now - timedelta(days=_BACKFILL_DAYS), now,
+                                            hourly_until=now - timedelta(days=_SHORT_TERM_DAYS))
             else:
                 start = datetime.fromisoformat(bookmark)
                 if now - start > timedelta(days=_SHORT_TERM_DAYS):
                     rows = await self._heal_rows(start, now)
+                    soc = await self._soc_state(start, now, hourly_until=now)
                 else:
                     rows = await self._incremental_rows(start, now)
+                    soc = await self._soc_state(start, now, hourly_until=start)
 
             if rows:
                 try:
-                    await self.client.put_data(self.token, rows)
+                    # Without SoC the call stays exactly (token, rows): the fleet default is
+                    # byte-identical to the pre-feature upload. SoC only rides along when
+                    # there are flow rows - the API requires at least one row.
+                    soc_kwargs = (
+                        {"battery_state": soc, "battery_sources": self._soc_sources()}
+                        if soc else {}
+                    )
+                    await self.client.put_data(self.token, rows, **soc_kwargs)
                 except WoltaApiError as err:
                     if err.status == 413:
                         # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
@@ -842,6 +868,47 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         await self._store.async_save(self._state)
         ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
+
+    async def _soc_state(
+        self, start: datetime, now: datetime, *, hourly_until: datetime
+    ) -> list[dict]:
+        """battery_state for [start, now): hourly statistics before hourly_until, quarters
+        from 5-minute statistics after it. A failure here must never stop the flows -
+        they are the product (spec §6) - so it degrades to 'no SoC this cycle'."""
+        if not self._soc_entities:
+            return []
+        ids = set(self._soc_entities)
+        rows: list[dict] = []
+        try:
+            if hourly_until > start:
+                hourly = await async_fetch_measurement(
+                    self.hass, ids, start, hourly_until, "hour")
+                rows += battery_state_rows(
+                    {e: soc_from_hourly(hourly.get(e, [])) for e in ids}, 3600)
+            five_start = max(start, hourly_until)
+            if now > five_start:
+                five = await async_fetch_measurement(
+                    self.hass, ids, five_start, now, "5minute")
+                rows += battery_state_rows(
+                    {e: soc_quarters_from_5min(five.get(e, [])) for e in ids}, 900)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("SoC statistics fetch failed; uploading flows without SoC",
+                          exc_info=True)
+            return []
+        return rows
+
+    def _soc_sources(self) -> list[dict]:
+        """One battery_sources entry per configured SoC sensor. The platform comes from the
+        entity registry ('unknown' for a sensor not in it); semantics stay 'unknown' - the
+        sensor says nothing about whether it reports usable or total capacity."""
+        registry = er.async_get(self.hass)
+        out = []
+        for entity_id in sorted(self._soc_entities):
+            reg_entry = registry.async_get(entity_id)
+            platform = reg_entry.platform if reg_entry else "unknown"
+            out.append({"unit": entity_id, "source": f"ha:{platform}:{entity_id}",
+                        "semantics": "unknown"})
+        return out
 
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""

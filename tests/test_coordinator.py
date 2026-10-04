@@ -24,6 +24,7 @@ from custom_components.wolta.const import (
     CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_SOC,
     CONF_SOLAR,
     CONF_TOKEN,
     CONF_ZONE,
@@ -3110,3 +3111,178 @@ async def test_energy_balance_issue_absent_block_or_old_backend(hass, mock_entry
     c._evaluate_measured_params({"betyg": {}})
     c._evaluate_measured_params({"betyg": {"energy_balance": {"share": 0.9, "cause": "unclear"}}})
     assert ir.async_get(hass).async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# SoC upload (spec 2026-10-03): optional state-of-charge sensors are read from
+# the recorder's mean/min/max statistics and sent with the flow rows as
+# battery_state (+ battery_sources). Three things matter:
+#   - without SoC sensors put_data keeps its exact two-argument call, so the
+#     fleet default is byte-identical to the pre-feature output;
+#   - a failing SoC read never costs the flows (they are the product);
+#   - adding a sensor re-backfills (fingerprint), but only when one is chosen.
+# ---------------------------------------------------------------------------
+
+_SOC_ENTITY = "sensor.soc"
+_SOC_HOUR = datetime(2025, 5, 1, 10, 0, 0, tzinfo=timezone.utc)
+_SOC_QUARTER = datetime(2025, 6, 1, 11, 30, 0, tzinfo=timezone.utc)
+
+
+async def _run_soc_cycle(hass, mock_entry, client, measurement, store_state=None):
+    """One cycle with flows mocked to a fixed row set and a patched SoC read.
+
+    Returns (coordinator, async_fetch_change periods, async_fetch_measurement mock)."""
+    change_periods: list[str] = []
+
+    async def mock_change(h, ids, start, end, period):
+        change_periods.append(period)
+        return _EMPTY_BATT_STATS
+
+    measurement_mock = AsyncMock(side_effect=measurement)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_change),
+        patch("custom_components.wolta.coordinator.async_fetch_measurement", measurement_mock),
+        patch("custom_components.wolta.coordinator.merge_streams",
+              return_value=_make_rows(NOW - timedelta(hours=1))),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client, store_state=store_state if store_state is not None else {})
+        await coordinator._async_update_data()
+    return coordinator, change_periods, measurement_mock
+
+
+async def _soc_measurement(h, ids, start, end, period):
+    if period == "hour":
+        return {_SOC_ENTITY: [{"start": _SOC_HOUR.timestamp(), "mean": 55.0,
+                               "min": 40.0, "max": 70.0}]}
+    q = _SOC_QUARTER.timestamp()
+    return {_SOC_ENTITY: [
+        {"start": q + 0, "mean": 50.0, "min": 49.0, "max": 51.0},
+        {"start": q + 300, "mean": 52.0, "min": 51.0, "max": 53.0},
+        {"start": q + 600, "mean": 54.0, "min": 53.0, "max": 55.0},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_soc_sent_with_flows_and_registry_source(hass: HomeAssistant, mock_entry):
+    """First run: hourly SoC for the long window, quarters from 5-minute statistics for
+    the recent one, both sent next to the flows; battery_sources names the integration
+    that owns each sensor, taken from the entity registry."""
+    from homeassistant.helpers import entity_registry as er
+
+    reg = er.async_get(hass)
+    reg.async_get_or_create("sensor", "testplatform", "soc-uid", suggested_object_id="soc")
+    assert reg.async_get(_SOC_ENTITY) is not None
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    await _run_soc_cycle(hass, mock_entry, client, _soc_measurement)
+
+    client.put_data.assert_awaited_once()
+    args, kwargs = client.put_data.call_args
+    assert args[0] == TOKEN
+    assert len(args[1]) == 4  # the flow rows are untouched
+    by_period = {r["period_s"]: r for r in kwargs["battery_state"]}
+    assert set(by_period) == {3600, 900}
+    assert by_period[3600]["unit"] == _SOC_ENTITY
+    assert by_period[3600]["ts"] == _SOC_HOUR.isoformat()
+    assert (by_period[3600]["soc_mean"], by_period[3600]["soc_min"],
+            by_period[3600]["soc_max"]) == (55.0, 40.0, 70.0)
+    assert by_period[900]["ts"] == _SOC_QUARTER.isoformat()
+    assert (by_period[900]["soc_mean"], by_period[900]["soc_min"],
+            by_period[900]["soc_max"]) == (52.0, 49.0, 55.0)
+    assert kwargs["battery_sources"] == [
+        {"unit": _SOC_ENTITY, "source": f"ha:testplatform:{_SOC_ENTITY}",
+         "semantics": "unknown"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_soc_source_falls_back_to_unknown_platform(hass: HomeAssistant, mock_entry):
+    """A sensor that is not in the entity registry (e.g. a YAML-only statistic) still gets
+    a source row - the API requires one per unit - with 'unknown' as the platform."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: ["sensor.not_registered"]}
+    client = _mock_client()
+
+    async def measurement(h, ids, start, end, period):
+        return {}
+
+    coordinator, _, _ = await _run_soc_cycle(hass, mock_entry, client, measurement)
+
+    assert coordinator._soc_sources() == [
+        {"unit": "sensor.not_registered", "source": "ha:unknown:sensor.not_registered",
+         "semantics": "unknown"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_soc_sensors_keeps_exact_two_argument_put(hass: HomeAssistant, mock_entry):
+    """Fleet default: no SoC sensor -> put_data(token, rows) with exactly two arguments, and
+    the recorder's measurement statistics are never queried."""
+    client = _mock_client()
+
+    async def measurement(h, ids, start, end, period):
+        raise AssertionError("must not read SoC statistics")
+
+    _, _, measurement_mock = await _run_soc_cycle(hass, mock_entry, client, measurement)
+
+    client.put_data.assert_awaited_once()
+    args, kwargs = client.put_data.call_args
+    assert len(args) == 2 and kwargs == {}
+    measurement_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_soc_fetch_failure_still_uploads_flows(hass: HomeAssistant, mock_entry):
+    """The flows are the product: a SoC statistics read that raises must not stop them -
+    they go up without battery_state (and without battery_sources)."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    async def measurement(h, ids, start, end, period):
+        raise RuntimeError("recorder busy")
+
+    coordinator, _, measurement_mock = await _run_soc_cycle(
+        hass, mock_entry, client, measurement)
+
+    measurement_mock.assert_awaited()
+    client.put_data.assert_awaited_once()
+    args, kwargs = client.put_data.call_args
+    assert len(args[1]) == 4
+    assert kwargs == {}
+    # The bookmark still advances: the flows were delivered.
+    assert coordinator._state.get("last_uploaded_ts") is not None
+
+
+@pytest.mark.asyncio
+async def test_adding_soc_sensor_resets_bookmark_for_full_rebackfill(
+    hass: HomeAssistant, mock_entry
+):
+    """Choosing a SoC sensor changes the fingerprint -> bookmark dropped -> the next cycle
+    is a full backfill (hourly + 5-minute), so SoC history arrives with the flows."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    coordinator, change_periods, _ = await _run_soc_cycle(
+        hass, mock_entry, client, _soc_measurement,
+        store_state={"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+                     "applied_entities": _fingerprint()})
+
+    assert "hour" in change_periods, "bookmark must be reset -> backfill reads hourly LTS"
+    assert coordinator._state["applied_entities"] == _fingerprint(soc=[_SOC_ENTITY])
+
+
+@pytest.mark.asyncio
+async def test_no_soc_sensor_leaves_fingerprint_unchanged(hass: HomeAssistant, mock_entry):
+    """Upgrade safety: without a SoC sensor the fingerprint is byte-identical to the
+    pre-feature one, so existing installs do not re-backfill a year on upgrade."""
+    client = _mock_client()
+
+    coordinator, change_periods, _ = await _run_soc_cycle(
+        hass, mock_entry, client, _soc_measurement,
+        store_state={"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+                     "applied_entities": _fingerprint()})
+
+    assert "hour" not in change_periods
+    assert coordinator._state["applied_entities"] == _fingerprint()
