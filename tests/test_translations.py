@@ -59,6 +59,34 @@ def test_translation_has_same_keys_as_strings(path: Path):
     assert not extra, f"{path.name} has keys strings.json does not: {extra}"
 
 
+@pytest.mark.parametrize("lang, key, text", [
+    ("en", "soc_unavailable", "The selected state-of-charge sensor isn't available right now. "
+                              "Check that it exists and has a value."),
+    ("sv", "soc_unavailable", "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. "
+                              "Kontrollera att den finns och har ett värde."),
+    ("en", "soc_id_too_long", "The sensor's entity ID is longer than 128 characters. "
+                              "Rename the entity and try again."),
+    ("sv", "soc_id_too_long", "Sensorns entitets-id är längre än 128 tecken. "
+                              "Byt namn på entiteten och försök igen."),
+])
+def test_soc_picker_errors_are_translated(lang: str, key: str, text: str) -> None:
+    """The two SoC picker errors config_flow._soc_error can return render as text, in
+    both the setup and the reconfigure flow (both read config.error)."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    assert data["config"]["error"][key] == text
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_soc_description_promises_no_energy_reupload(lang: str) -> None:
+    """Choosing SoC sensors never re-sends the energy data (spec §16) - the field text
+    must say so, in both the setup and the reconfigure step."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    for step in ("entities", "reconfigure"):
+        desc = data["config"]["step"][step]["data_description"]["soc_entities"]
+        needle = "energy data is not re-sent" if lang == "en" else "energidatan skickas inte om"
+        assert needle in desc, (step, desc)
+
+
 @pytest.mark.parametrize("lang, needle", [("en", "prefilled"), ("sv", "förifyll")])
 def test_eff_beskrivningen_sager_att_faltet_ar_forifyllt(lang: str, needle: str) -> None:
     """Efterpost plan C: eff-fältet i Configure → Battery renderas med serverns lagrade värde,

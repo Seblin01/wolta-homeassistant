@@ -67,6 +67,7 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
+    CONF_SOC,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -84,6 +85,71 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# The API's battery_sources takes at most 16 units; more would 422 the whole upload,
+# flows included, so the picker refuses to go past it.
+MAX_SOC_SENSORS = 16
+
+
+def _soc_unvetted(hass: Any, entity_id: str) -> bool:
+    """True when a SoC sensor cannot be vetted: it has no state at all (removed, not yet
+    loaded), or its state is `unavailable`/`unknown` AND state_class or the unit is
+    missing from the attributes.
+
+    HA keeps both attributes on an `unavailable` sensor (helpers/entity.py writes the
+    capability attributes and the unit before it checks `available`; the entity
+    registry's write_unavailable_state does the same for entities not yet loaded after a
+    restart), and an `unknown` sensor carries them as usual. So a valid sensor that is
+    offline for the moment is vetted on its attributes like any other and must not block
+    the form. Only a dead state WITHOUT them (set by hand, never reported) is
+    unvettable - judging that on its attributes would blame the sensor's kind for what
+    we simply cannot see."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return True
+    return state.state in ("unavailable", "unknown") and (
+        state.attributes.get("state_class") is None
+        or state.attributes.get("unit_of_measurement") is None
+    )
+
+
+def _soc_invalid(hass: Any, entity_ids: list[str] | None) -> bool:
+    """True if any picked SoC sensor (that can be vetted, see _soc_unvetted) cannot serve
+    as a charge-level source.
+
+    Without state_class "measurement" there are no long-term statistics to read, and
+    without unit "%" we cannot know the value is a charge level (spec 2026-10-03 §6.5).
+    A sensor that cannot be vetted (_soc_unvetted) is _soc_error's "soc_unavailable",
+    checked first.
+    """
+    for entity_id in entity_ids or []:
+        if _soc_unvetted(hass, entity_id):
+            continue
+        state = hass.states.get(entity_id)
+        if (
+            state.attributes.get("state_class") != "measurement"
+            or state.attributes.get("unit_of_measurement") != "%"
+        ):
+            return True
+    return False
+
+
+def _soc_error(hass: Any, entity_ids: list[str] | None) -> str | None:
+    """Validation error key for the SoC picker, or None when the choice is fine.
+
+    Order: unavailable -> not_measurement -> id_too_long -> too_many. "unavailable" is a
+    sensor that cannot be vetted (_soc_unvetted); an id over the API's `unit` limit would
+    never be sent (stats.soc_unit_ok, the same rule the upload uses)."""
+    ids = entity_ids or []
+    if any(_soc_unvetted(hass, entity_id) for entity_id in ids):
+        return "soc_unavailable"
+    if _soc_invalid(hass, ids):
+        return "soc_not_measurement"
+    if not all(stats.soc_unit_ok(entity_id) for entity_id in ids):
+        return "soc_id_too_long"
+    if len(ids) > MAX_SOC_SENSORS:
+        return "soc_too_many"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +665,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             entry_data[CONF_EXTERNAL_CONTROL] = external_control
         if flex_compensation:
             entry_data[CONF_FLEX_COMPENSATION] = flex_compensation
+        if self._entities_data.get(CONF_SOC):
+            entry_data[CONF_SOC] = list(self._entities_data[CONF_SOC])
         # Datumförslaget ur statistiken skickas INTE till servern (första datapunkten
         # är inte nödvändigtvis ett inköpsdatum, och ett tyst ifyllt datum styr
         # återbetalningskalkylen). Det lagras här och erbjuds som suggested_value för
@@ -625,6 +693,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 val = user_input.get(key)
                 if not val:  # None, missing, or empty list
                     errors[key] = "required_sensor"
+            soc_error = _soc_error(self.hass, user_input.get(CONF_SOC))
+            if soc_error:
+                errors[CONF_SOC] = soc_error
 
             if not errors:
                 self._entities_data = user_input
@@ -731,6 +802,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults.get(CONF_FLEX_COMPENSATION) else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                # Multi-select, but `suggested_value` rather than `default=` for the same
+                # reason as the pickers above: clearing the field must actually clear it,
+                # and a `default=` would re-fill the list from the previous submission.
+                vol.Optional(
+                    CONF_SOC,
+                    description=(
+                        {"suggested_value": defaults[CONF_SOC]}
+                        if defaults.get(CONF_SOC) else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor", multiple=True)),
             }
         )
 
@@ -761,6 +842,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
                 if not user_input.get(key):
                     errors[key] = "required_sensor"
+            soc_error = _soc_error(self.hass, user_input.get(CONF_SOC))
+            if soc_error:
+                errors[CONF_SOC] = soc_error
             if not errors:
                 await self.async_set_unique_id(entry.unique_id)
                 self._abort_if_unique_id_mismatch()
@@ -772,6 +856,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_SOLAR: user_input.get(CONF_SOLAR) or [],
                     CONF_EXTERNAL_CONTROL: user_input.get(CONF_EXTERNAL_CONTROL) or None,
                     CONF_FLEX_COMPENSATION: user_input.get(CONF_FLEX_COMPENSATION) or None,
+                    # Cleared picker -> [] (like solar), so the coordinator stops
+                    # collecting SoC.
+                    CONF_SOC: list(user_input.get(CONF_SOC) or []),
                 }
                 # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
                 # full re-backfill skriver över historiken från de nya sensorerna.
@@ -781,9 +868,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             k: entry.data.get(k)
             for k in (
                 CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_SOLAR,
-                CONF_EXTERNAL_CONTROL, CONF_FLEX_COMPENSATION,
+                CONF_EXTERNAL_CONTROL, CONF_FLEX_COMPENSATION, CONF_SOC,
             )
         }
+        # A failed submit re-shows what the user chose, not the stored value.
+        if errors and user_input is not None:
+            defaults[CONF_SOC] = user_input.get(CONF_SOC)
         schema = vol.Schema(
             {
                 vol.Required(CONF_BATT_IN, default=defaults[CONF_BATT_IN]): _energy_entity_selector(),
@@ -816,6 +906,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults[CONF_FLEX_COMPENSATION] else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                # Multi-select with `suggested_value` (see the setup step): a `default=`
+                # would make the list un-clearable.
+                vol.Optional(
+                    CONF_SOC,
+                    description=(
+                        {"suggested_value": defaults[CONF_SOC]}
+                        if defaults[CONF_SOC] else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor", multiple=True)),
             }
         )
         return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
@@ -848,6 +947,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             entry_data[CONF_EXTERNAL_CONTROL] = self._entities_data[CONF_EXTERNAL_CONTROL]
         if self._entities_data.get(CONF_FLEX_COMPENSATION):
             entry_data[CONF_FLEX_COMPENSATION] = self._entities_data[CONF_FLEX_COMPENSATION]
+        if self._entities_data.get(CONF_SOC):
+            entry_data[CONF_SOC] = list(self._entities_data[CONF_SOC])
         for key in (
             CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW,
             CONF_NAMEPLATE_KW, CONF_EFF,

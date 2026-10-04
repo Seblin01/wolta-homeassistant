@@ -135,11 +135,13 @@
           "grid_out": "Elexport till nätet",
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
-          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)"
+          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
+          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
-          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
+          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "reauth_confirm": {
@@ -198,11 +200,13 @@
           "grid_out": "Elexport till nätet",
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
-          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)"
+          "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
+          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
-          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över."
+          "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
+          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "view_only": {
@@ -222,6 +226,10 @@
       "invalid_input": "Wolta avvisade anläggningens uppgifter – kontrollera elområde och styrsystem och försök igen.",
       "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
       "required_sensor": "Minst en sensor krävs för detta flöde.",
+      "soc_not_measurement": "Välj sensorer i % med state_class measurement – andra saknar statistik att läsa.",
+      "soc_too_many": "Välj högst 16 sensorer för laddningsnivå.",
+      "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
+      "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",

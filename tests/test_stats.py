@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import inspect
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -522,6 +523,52 @@ class TestFetchChangeUnits:
         assert args[3] == {"sensor.flex_compensation"}
         assert args[4] == "month"
         assert args[6] == {"change"}
+
+
+class TestFetchMeasurement:
+    """async_fetch_measurement reads mean/min/max for state-of-charge sensors. The call
+    shape is the contract with the recorder: positional arguments in the order of
+    statistics_during_period, no unit conversion (the sensor's own percent - a kWh dict
+    would be wrong for it), and through the executor, never on the event loop."""
+
+    @pytest.mark.asyncio
+    async def test_calls_statistics_during_period_with_exact_arguments(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from homeassistant.components.recorder import statistics as statistics_mod
+
+        captured: dict = {}
+
+        async def _fake_executor_job(fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+            return {"sensor.soc": []}
+
+        instance = MagicMock()
+        instance.async_add_executor_job = AsyncMock(side_effect=_fake_executor_job)
+
+        import homeassistant.components.recorder as recorder_mod
+
+        monkeypatch.setattr(recorder_mod, "get_instance", lambda hass: instance)
+
+        hass = MagicMock()
+        start = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
+        result = await stats.async_fetch_measurement(hass, {"sensor.soc"}, start, end, "hour")
+
+        assert result == {"sensor.soc": []}
+        instance.async_add_executor_job.assert_awaited_once()
+        assert captured["fn"] is statistics_mod.statistics_during_period
+        # statistics_during_period(hass, start, end, ids, period, units, types)
+        assert captured["args"] == (
+            hass, start, end, {"sensor.soc"}, "hour", None, {"mean", "min", "max"},
+        )
+        # And the same arguments bind against the REAL signature, so a recorder that
+        # renames, reorders or drops a parameter fails here instead of in production.
+        bound = inspect.signature(statistics_mod.statistics_during_period).bind(
+            *captured["args"])
+        assert bound.arguments["period"] == "hour"
+        assert bound.arguments["types"] == {"mean", "min", "max"}
 
 
 # ---------------------------------------------------------------------------
@@ -1395,3 +1442,71 @@ class TestFetchStates:
         end = datetime(2026, 8, 2, tzinfo=timezone.utc)
         result = await stats.async_fetch_states(hass, "binary_sensor.flex", start, end)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# SoC statistics -> battery_state rows
+# ---------------------------------------------------------------------------
+
+_H = 1_767_225_600  # 2026-01-01T00:00:00Z
+
+
+def test_soc_from_hourly_skips_incomplete_rows():
+    rows = [{"start": float(_H), "mean": 50.0, "min": 40.0, "max": 60.0},
+            {"start": float(_H + 3600), "mean": None, "min": 40.0, "max": 60.0}]
+    out = stats.soc_from_hourly(rows)
+    assert list(out.values()) == [(50.0, 40.0, 60.0)]
+
+
+def test_soc_quarter_needs_all_three_5min_periods():
+    full = [{"start": float(_H + 300 * i), "mean": 50.0 + i, "min": 49.0 + i, "max": 51.0 + i}
+            for i in range(3)]
+    partial = [{"start": float(_H + 900 + 300 * i), "mean": 50.0, "min": 50.0, "max": 50.0}
+               for i in range(2)]
+    out = stats.soc_quarters_from_5min(full + partial)
+    assert len(out) == 1
+    assert next(iter(out.values())) == (51.0, 49.0, 53.0)
+
+
+def test_battery_state_rows_drops_out_of_range_and_rounds():
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows({"sensor.soc": {t: (50.123, 40.0, 60.0),
+                                                    t.replace(hour=1): (101.0, 99.0, 102.0)}},
+                                    3600)
+    assert rows == [{"unit": "sensor.soc", "ts": t.isoformat(), "period_s": 3600,
+                     "soc_mean": 50.12, "soc_min": 40.0, "soc_max": 60.0}]
+
+
+def test_battery_state_rows_keeps_full_battery_despite_float_overshoot():
+    """HA's time-weighted mean at 100 % can be 100.00000000000001 - it rounds to 100.0
+    and is kept, instead of being dropped or giving a 422."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows(
+        {"sensor.soc": {t: (100.00000000000001, 100.0, 100.00000000000001)}}, 3600)
+    assert rows == [{"unit": "sensor.soc", "ts": t.isoformat(), "period_s": 3600,
+                     "soc_mean": 100.0, "soc_min": 100.0, "soc_max": 100.0}]
+
+
+def test_battery_state_rows_clamps_mean_into_min_max_before_rounding():
+    """Constant 55.125 with float noise in the mean: without the clamp the mean rounds to
+    55.13 and min/max to 55.12 (the API 422s); with it all three are 55.12."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    rows = stats.battery_state_rows({"sensor.soc": {t: (55.12500000000001, 55.125, 55.125)}},
+                                    3600)
+    assert rows and rows[0]["soc_min"] <= rows[0]["soc_mean"] <= rows[0]["soc_max"]
+
+
+def test_soc_unit_ok_is_the_apis_unit_limit():
+    """ONE predicate for the API's `unit` limit (128), shared by rows and sources."""
+    assert stats.soc_unit_ok("s" * 128)
+    assert not stats.soc_unit_ok("s" * 129)
+
+
+def test_battery_state_rows_drops_unit_the_shared_predicate_rejects(monkeypatch):
+    """battery_state_rows filters through soc_unit_ok, not a private copy of the limit -
+    otherwise rows and sources can disagree on which sensors are sent."""
+    t = datetime.fromtimestamp(_H, tz=timezone.utc)
+    monkeypatch.setattr(stats, "soc_unit_ok", lambda entity_id: entity_id != "sensor.no")
+    rows = stats.battery_state_rows({"sensor.no": {t: (50.0, 40.0, 60.0)},
+                                     "sensor.yes": {t: (50.0, 40.0, 60.0)}}, 3600)
+    assert [r["unit"] for r in rows] == ["sensor.yes"]

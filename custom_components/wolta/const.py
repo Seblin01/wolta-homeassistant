@@ -100,6 +100,10 @@ CONF_EXTERNAL_CONTROL = "external_control_entity"
 # applied_entities-fingerprintet - den påverkar inga energirader och får inte trigga
 # re-backfill (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
 CONF_FLEX_COMPENSATION = "flex_compensation_entity"
+# Optional battery state-of-charge sensors, one per battery unit (spec 2026-10-03). The
+# entity ids are CLIENT-LOCAL configuration and never PATCHed to the server - only the
+# statistics read from them are uploaded, as battery_state rows through put_data.
+CONF_SOC = "soc_entities"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

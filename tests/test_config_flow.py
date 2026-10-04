@@ -41,6 +41,7 @@ from custom_components.wolta.const import (
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
+    CONF_SOC,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -2861,6 +2862,509 @@ async def test_flex_compensation_is_never_sent_to_create_profile(
     kwargs = mock_client.create_profile.call_args.kwargs
     assert CONF_FLEX_COMPENSATION not in kwargs
     assert "flex_compensation" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# Battery state-of-charge sensors (spec 2026-10-03): optional multi-select, one
+# sensor per battery unit. Client-local configuration like the two pickers above -
+# the entity ids never reach the server, only the statistics read from them do.
+# ---------------------------------------------------------------------------
+
+SOC_ENTITY = "sensor.battery_soc"
+SOC_ATTRS = {"state_class": "measurement", "unit_of_measurement": "%"}
+
+
+async def _drive_entities(hass, entities_input, mock_client):
+    """Meny -> create -> entities; returns the result of submitting `entities_input`."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"next_step_id": "create"}
+    )
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input=entities_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_flow_with_soc_entities(hass: HomeAssistant) -> None:
+    """Setup stores the picked SoC sensors as a list in entry.data."""
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+        assert result["step_id"] == "plant"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PLANT_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SOC] == [SOC_ENTITY]
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_soc_sensor_without_state_class(
+    hass: HomeAssistant,
+) -> None:
+    """Without state_class measurement there are no statistics to read (spec 6.5)."""
+    hass.states.async_set(SOC_ENTITY, "55", {"unit_of_measurement": "%"})
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "entities"
+    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_soc_sensor_not_in_percent(
+    hass: HomeAssistant,
+) -> None:
+    """A measurement sensor in kWh is not a charge level - unit must be %."""
+    hass.states.async_set(
+        SOC_ENTITY, "5.5", {"state_class": "measurement", "unit_of_measurement": "kWh"}
+    )
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_unavailable_soc_sensor(
+    hass: HomeAssistant,
+) -> None:
+    """A sensor with no state at all cannot be vetted, so it is not accepted - and the
+    error says it is missing, not that it is the wrong kind of sensor."""
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: ["sensor.no_such_soc"]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
+
+
+# HA keeps a sensor's capability attributes (state_class) and its unit on the state even
+# when the entity is `unavailable` (helpers/entity.py __async_calculate_state writes them
+# before it checks `available`; the entity registry's write_unavailable_state does the
+# same for entities that have not loaded yet after a restart). An `unknown` sensor is
+# available and carries everything. So a valid SoC sensor that is only offline for the
+# moment must be accepted, and the attributes are judged as for any other state.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_entities_step_accepts_valid_soc_sensor_that_is_offline(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """A measurement/% sensor whose state is `unavailable`/`unknown` (battery API down,
+    HA just restarted) still carries its attributes and is accepted."""
+    hass.states.async_set(SOC_ENTITY, dead_state, SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert not result.get("errors")
+    assert result["step_id"] == "plant"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_entities_step_offline_soc_sensor_without_attributes_is_unavailable(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """A dead state with no state_class and no unit (a state set by hand, an entity that
+    never reported) cannot be vetted - `soc_unavailable`, not the misleading
+    `soc_not_measurement`."""
+    hass.states.async_set(SOC_ENTITY, dead_state)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_soc_error_judges_attributes_of_an_offline_sensor(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """The attributes decide even when the state is dead: state_class total_increasing
+    (an energy counter, wrong kind) is `soc_not_measurement`, a measurement/% sensor
+    passes, and a sensor with neither attribute is `soc_unavailable` - which also wins
+    over a wrong-kind sensor in the same pick (order unavailable -> not_measurement)."""
+    from custom_components.wolta.config_flow import _soc_error
+
+    hass.states.async_set("sensor.counter", dead_state,
+                          {"state_class": "total_increasing",
+                           "unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.ok", dead_state, SOC_ATTRS)
+    hass.states.async_set("sensor.bare", dead_state)
+
+    assert _soc_error(hass, ["sensor.counter"]) == "soc_not_measurement"
+    assert _soc_error(hass, ["sensor.ok"]) is None
+    assert _soc_error(hass, ["sensor.bare"]) == "soc_unavailable"
+    assert _soc_error(hass, ["sensor.counter", "sensor.bare"]) == "soc_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_entities_step_offline_soc_sensor_of_wrong_kind_is_not_measurement(
+    hass: HomeAssistant,
+) -> None:
+    """unavailable + state_class total_increasing: HA did write the attributes, so the
+    sensor is judged on them."""
+    hass.states.async_set(SOC_ENTITY, "unavailable",
+                          {"state_class": "total_increasing", "unit_of_measurement": "%"})
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_soc_entity_id_over_128_chars(
+    hass: HomeAssistant,
+) -> None:
+    """The API's `unit` is at most 128 characters; a longer id would never be sent, so
+    the picker says so instead of accepting a sensor that is silently skipped."""
+    long_id = "sensor." + "s" * 122  # 129 chars
+    hass.states.async_set(long_id, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [long_id]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_id_too_long"}
+
+
+@pytest.mark.asyncio
+async def test_soc_error_order_unavailable_before_not_measurement_before_too_long(
+    hass: HomeAssistant,
+) -> None:
+    """Order: unavailable -> not_measurement -> id_too_long -> too_many."""
+    from custom_components.wolta.config_flow import _soc_error
+
+    long_id = "sensor." + "s" * 122
+    hass.states.async_set(long_id, "55", SOC_ATTRS)
+    hass.states.async_set("sensor.kwh", "5", {"state_class": "measurement",
+                                              "unit_of_measurement": "kWh"})
+    many = [f"sensor.battery_soc_{i}" for i in range(17)]
+    for entity_id in many:
+        hass.states.async_set(entity_id, "55", SOC_ATTRS)
+
+    assert _soc_error(hass, [long_id, "sensor.kwh", "sensor.missing"]) == "soc_unavailable"
+    assert _soc_error(hass, [long_id, "sensor.kwh"]) == "soc_not_measurement"
+    assert _soc_error(hass, [*many, long_id]) == "soc_id_too_long"
+    assert _soc_error(hass, many) == "soc_too_many"
+    assert _soc_error(hass, many[:16]) is None
+
+
+@pytest.mark.asyncio
+async def test_entities_step_rejects_more_than_16_soc_sensors(
+    hass: HomeAssistant,
+) -> None:
+    """The API's battery_sources takes at most 16; more would 422 the whole upload."""
+    ids = [f"sensor.battery_soc_{i}" for i in range(17)]
+    for entity_id in ids:
+        hass.states.async_set(entity_id, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: ids}, mock_client
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_SOC: "soc_too_many"}
+
+
+@pytest.mark.asyncio
+async def test_entities_step_accepts_exactly_16_soc_sensors(
+    hass: HomeAssistant,
+) -> None:
+    """The limit is inclusive."""
+    ids = [f"sensor.battery_soc_{i}" for i in range(16)]
+    for entity_id in ids:
+        hass.states.async_set(entity_id, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: ids}, mock_client
+        )
+
+    assert result["step_id"] == "plant"
+
+
+@pytest.mark.asyncio
+async def test_soc_error_does_not_mask_missing_required_stream(
+    hass: HomeAssistant,
+) -> None:
+    """Required streams are checked first; both errors are shown together."""
+    hass.states.async_set(SOC_ENTITY, "55", {"unit_of_measurement": "%"})
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass,
+            {**STEP_ENTITIES_DATA, CONF_GRID_IN: [], CONF_SOC: [SOC_ENTITY]},
+            mock_client,
+        )
+
+    assert result["errors"].get(CONF_GRID_IN) == "required_sensor"
+
+
+@pytest.mark.asyncio
+async def test_full_flow_without_soc_entities(hass: HomeAssistant) -> None:
+    """Left empty, the key is absent - the coordinator then collects no SoC at all."""
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(hass, STEP_ENTITIES_DATA, mock_client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PLANT_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert CONF_SOC not in result["data"]
+
+
+@pytest.mark.asyncio
+async def test_entities_step_clearing_soc_after_error_sticks(
+    hass: HomeAssistant,
+) -> None:
+    """A SoC list cleared after a validation error must stay cleared.
+
+    The field is declared with `suggested_value`, not `default=`: a `default=` pointing
+    at the previously submitted list would be re-filled by voluptuous whenever the
+    frontend omits the key.
+    """
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass,
+            {**STEP_ENTITIES_DATA, CONF_GRID_IN: [], CONF_SOC: [SOC_ENTITY]},
+            mock_client,
+        )
+        assert result["step_id"] == "entities"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=dict(STEP_ENTITIES_DATA)
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=STEP_PLANT_DATA
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert not result["data"].get(CONF_SOC), "the cleared SoC sensor was silently restored"
+
+
+def _reconfigure_input(**extra):
+    return {
+        CONF_BATT_IN: ["sensor.battery_charge"],
+        CONF_BATT_OUT: ["sensor.battery_discharge"],
+        CONF_GRID_IN: ["sensor.grid_import"],
+        CONF_GRID_OUT: ["sensor.grid_export"],
+        CONF_SOLAR: ["sensor.solar"],
+        **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_updates_soc_entities(hass: HomeAssistant) -> None:
+    """Reconfigure stores newly picked SoC sensors."""
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: [SOC_ENTITY]})
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_SOC] == [SOC_ENTITY]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_clears_soc_entities_when_left_empty(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing the picker stores an empty list (coordinator: no SoC collection)."""
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC: [SOC_ENTITY]})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input()
+        )
+    assert result["type"] == FlowResultType.ABORT
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_SOC] == []
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_prefills_stored_soc_entities(hass: HomeAssistant) -> None:
+    """The stored list is offered back as suggested_value, so a second visit shows it."""
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC: [SOC_ENTITY]})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+    marker = next(k for k in result["data_schema"].schema
+                  if (k.schema if hasattr(k, "schema") else str(k)) == CONF_SOC)
+    assert marker.description == {"suggested_value": [SOC_ENTITY]}
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_rejects_invalid_soc_sensor(hass: HomeAssistant) -> None:
+    """Same vetting as setup: a sensor without state_class measurement is refused."""
+    hass.states.async_set(SOC_ENTITY, "55", {"unit_of_measurement": "%"})
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: [SOC_ENTITY]})
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+    assert CONF_SOC not in hass.config_entries.async_get_entry(entry.entry_id).data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_reconfigure_accepts_valid_soc_sensor_that_is_offline(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """The case that matters: the battery's local API is down, the user reconfigures to
+    add something else, and the SoC choice saved earlier (state `unavailable`, but with
+    its state_class and unit as HA keeps them) must not block saving."""
+    hass.states.async_set(SOC_ENTITY, dead_state, SOC_ATTRS)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: [SOC_ENTITY]})
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_SOC] == [SOC_ENTITY]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_reconfigure_offline_soc_sensor_without_attributes_is_unavailable(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """No state_class and no unit on a dead state: cannot be vetted, `soc_unavailable`."""
+    hass.states.async_set(SOC_ENTITY, dead_state)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: [SOC_ENTITY]})
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
+    assert CONF_SOC not in hass.config_entries.async_get_entry(entry.entry_id).data
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_rejects_more_than_16_soc_sensors(
+    hass: HomeAssistant,
+) -> None:
+    ids = [f"sensor.battery_soc_{i}" for i in range(17)]
+    for entity_id in ids:
+        hass.states.async_set(entity_id, "55", SOC_ATTRS)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: ids})
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_SOC: "soc_too_many"}
+
+
+@pytest.mark.asyncio
+async def test_link_flow_carries_soc_entities(hass: HomeAssistant) -> None:
+    """The linked-profile path stores the SoC list like the create path does."""
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SOC] == [SOC_ENTITY]
+
+
+@pytest.mark.asyncio
+async def test_link_flow_invert_check_path_carries_soc_entities(
+    hass: HomeAssistant,
+) -> None:
+    """Also through the invert-check detour, which builds the entry from the same data."""
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+    first = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    with _patched(mock_client, lifetime=(880.0, 1000.0, first)):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]})
+        assert result["step_id"] == "invert_check"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_INVERT_BATTERY: False})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SOC] == [SOC_ENTITY]
 
 
 # ---------------------------------------------------------------------------
