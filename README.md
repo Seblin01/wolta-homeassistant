@@ -241,17 +241,17 @@ The code is valid for 10 minutes and can be used once. If it expires before you 
 
 ## State of charge (SoC) monitoring
 
-Measuring your battery's real capacity — the amount of energy it actually stores versus the manufacturer's figure — helps Wolta size the investment case fairly and track degradation over time. 
+Wolta can collect your battery's state of charge (SoC) as groundwork for later measuring the battery's real capacity, meaning how much energy it actually stores compared with the manufacturer's figure. For now the data is only collected. Nothing uses it yet, and it does not affect your grade or the economics.
 
-Both the setup flow's entity step and the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) offer an optional field: point it at up to 16 `sensor` entities with `state_class: measurement` and `unit_of_measurement: %` (a state-of-charge reading from your battery or inverter's own monitoring). The integration reads their Home Assistant statistics — per-hour min/max/average for older backfilled data, per-15-minute for new uploads — and sends them to Wolta. The entity ID and integration name identify the source so Wolta can measure from multiple SoC streams. This data is used to characterize your battery's capacity and does not affect your optimisation grade. Removing the integration deletes all recorded SoC data with the rest.
+Both the setup flow's entity step and the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) offer an optional field: point it at up to 16 `sensor` entities with `state_class: measurement` and `unit_of_measurement: %` (a state-of-charge reading from your battery or inverter's own monitoring). The integration reads their Home Assistant statistics and sends them to Wolta. Each sensor is labelled with its entity ID and integration, so each sensor can be told apart.
 
-Adding or removing a SoC sensor triggers a full re-upload of your history (up to 365 days) on the next cycle.
+The SoC data is only stored for now. It does not affect your grade or the economics. It is deleted together with the energy data. As described under Privacy, that happens on removal only for profiles the integration created, not for linked wolta.se profiles. This needs Wolta API 0.93.0 or newer; older servers silently ignore the SoC data.
 
 ## Privacy
 
 Your 15-minute energy data is stored on Wolta's servers to power the analysis. No personal data (name, address, account) is sent or required.
 
-If you select state-of-charge sensors, their hourly (backfilled data) or 15-minute (new uploads) min/max/average values are sent to Wolta along with the energy data. The sensor's entity ID and integration name identify the source. This data is used to measure your battery's capacity and does not affect your optimisation grade. Removing the integration deletes it with the rest of your data.
+If you select state-of-charge sensors, their min/max/average values are sent to Wolta along with the energy data: per hour for backfilled history, per 15 minutes for recent data. Each sensor is labelled with its entity ID and integration (for example "ha:<integration>:sensor.battery_soc"). The server stores the sensor identifier only as a keyed hash, but the label with the entity ID is stored as text. The data is only collected for now and does not affect your grade. It is deleted together with the energy data (see below for linked profiles).
 
 **Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
