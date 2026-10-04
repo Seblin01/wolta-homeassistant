@@ -92,18 +92,30 @@ MAX_SOC_SENSORS = 16
 
 
 def _soc_unvetted(hass: Any, entity_id: str) -> bool:
-    """True when a SoC sensor cannot be vetted right now: no state at all (removed, not
-    yet loaded) or a state of `unavailable`/`unknown` (device offline, integration still
-    starting). In the last two cases the sensor exists but its attributes - state_class
-    and unit - are missing, so judging them would blame the sensor's kind for what is
-    only a temporary outage."""
+    """True when a SoC sensor cannot be vetted: it has no state at all (removed, not yet
+    loaded), or its state is `unavailable`/`unknown` AND state_class or the unit is
+    missing from the attributes.
+
+    HA keeps both attributes on an `unavailable` sensor (helpers/entity.py writes the
+    capability attributes and the unit before it checks `available`; the entity
+    registry's write_unavailable_state does the same for entities not yet loaded after a
+    restart), and an `unknown` sensor carries them as usual. So a valid sensor that is
+    offline for the moment is vetted on its attributes like any other and must not block
+    the form. Only a dead state WITHOUT them (set by hand, never reported) is
+    unvettable - judging that on its attributes would blame the sensor's kind for what
+    we simply cannot see."""
     state = hass.states.get(entity_id)
-    return state is None or state.state in ("unavailable", "unknown")
+    if state is None:
+        return True
+    return state.state in ("unavailable", "unknown") and (
+        state.attributes.get("state_class") is None
+        or state.attributes.get("unit_of_measurement") is None
+    )
 
 
 def _soc_invalid(hass: Any, entity_ids: list[str] | None) -> bool:
-    """True if any picked SoC sensor (that has a usable state) cannot serve as a
-    charge-level source.
+    """True if any picked SoC sensor (that can be vetted, see _soc_unvetted) cannot serve
+    as a charge-level source.
 
     Without state_class "measurement" there are no long-term statistics to read, and
     without unit "%" we cannot know the value is a charge level (spec 2026-10-03 §6.5).
@@ -125,10 +137,9 @@ def _soc_invalid(hass: Any, entity_ids: list[str] | None) -> bool:
 def _soc_error(hass: Any, entity_ids: list[str] | None) -> str | None:
     """Validation error key for the SoC picker, or None when the choice is fine.
 
-    Order: unavailable -> not_measurement -> id_too_long -> too_many. A sensor with no
-    state at all (removed, not yet loaded) or an `unavailable`/`unknown` one cannot be
-    vetted; an id over the API's `unit` limit would never be sent (stats.soc_unit_ok, the
-    same rule the upload uses)."""
+    Order: unavailable -> not_measurement -> id_too_long -> too_many. "unavailable" is a
+    sensor that cannot be vetted (_soc_unvetted); an id over the API's `unit` limit would
+    never be sent (stats.soc_unit_ok, the same rule the upload uses)."""
     ids = entity_ids or []
     if any(_soc_unvetted(hass, entity_id) for entity_id in ids):
         return "soc_unavailable"
