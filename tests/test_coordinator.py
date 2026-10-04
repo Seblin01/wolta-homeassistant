@@ -3423,8 +3423,9 @@ async def test_soc_sensor_over_api_length_limits_is_left_out_of_rows_and_sources
 ):
     """One rule for rows AND sources: a sensor whose entity id exceeds 128 characters
     (`unit`), or whose source label 'ha:<platform>:<entity_id>' exceeds 200, is left out
-    of the read, the rows and battery_sources alike. A source without rows - or rows
-    without a source - would 422 the whole call, flows included."""
+    of the read, the rows and battery_sources alike. The server 422s the whole call, flows
+    included, on a too-long `unit`/`source` and on rows whose unit has no source (a source
+    without rows is only a no-op) - so the rows and the sources must agree."""
     from homeassistant.helpers import entity_registry as er
 
     reg = er.async_get(hass)

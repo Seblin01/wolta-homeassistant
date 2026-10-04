@@ -613,9 +613,10 @@ SOC_UNIT_MAX = 128
 
 def soc_unit_ok(entity_id: str) -> bool:
     """Whether an entity id fits the API's `unit` limit. The ONE rule for that limit:
-    battery_state_rows filters rows with it and the coordinator filters sources with it -
-    a source without rows, or rows without a source, would 422 the whole call, flows
-    included."""
+    battery_state_rows filters rows with it and the coordinator filters sources with it,
+    so a unit that is too long is neither sent as a row nor as a source. The server 422s
+    the whole call, flows included, on a too-long `unit` and on rows whose unit has no
+    source (a source without rows is only a no-op)."""
     return len(entity_id) <= SOC_UNIT_MAX
 
 

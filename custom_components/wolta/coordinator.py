@@ -1039,7 +1039,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         This list is also what _soc_state reads, so one filter decides for the read, the
         rows and the sources alike: a sensor whose id breaks the API's `unit` limit
         (stats.soc_unit_ok) or whose label breaks the `source` limit is left out of all
-        three. A source without rows, or rows without a source, 422s the whole call."""
+        three. The server 422s the whole call (flows included) on rows whose unit has no
+        source and on a `unit`/`source` over its length limit; a source without rows is
+        a no-op, so a sensor that has no statistics yet costs nothing."""
         registry = er.async_get(self.hass)
         out = []
         for entity_id in sorted(self._soc_entities):
