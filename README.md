@@ -239,9 +239,19 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 
 The code is valid for 10 minutes and can be used once. If it expires before you enter it, or you've already used it, open the menu again to mint a fresh one.
 
+## State of charge (SoC) monitoring
+
+Measuring your battery's real capacity — the amount of energy it actually stores versus the manufacturer's figure — helps Wolta size the investment case fairly and track degradation over time. 
+
+Both the setup flow's entity step and the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) offer an optional field: point it at up to 16 `sensor` entities with `state_class: measurement` and `unit_of_measurement: %` (a state-of-charge reading from your battery or inverter's own monitoring). The integration reads their Home Assistant statistics — per-hour min/max/average for older backfilled data, per-15-minute for new uploads — and sends them to Wolta. The entity ID and integration name identify the source so Wolta can measure from multiple SoC streams. This data is used to characterize your battery's capacity and does not affect your optimisation grade. Removing the integration deletes all recorded SoC data with the rest.
+
+Adding or removing a SoC sensor triggers a full re-upload of your history (up to 365 days) on the next cycle.
+
 ## Privacy
 
 Your 15-minute energy data is stored on Wolta's servers to power the analysis. No personal data (name, address, account) is sent or required.
+
+If you select state-of-charge sensors, their hourly (backfilled data) or 15-minute (new uploads) min/max/average values are sent to Wolta along with the energy data. The sensor's entity ID and integration name identify the source. This data is used to measure your battery's capacity and does not affect your optimisation grade. Removing the integration deletes it with the rest of your data.
 
 **Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
