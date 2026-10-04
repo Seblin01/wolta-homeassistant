@@ -481,33 +481,42 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
             bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
 
-            # The SoC window follows the flow branch: (start, hourly_until). Hourly
-            # statistics before hourly_until, 5-minute quarters after it.
             backfill_start = now - timedelta(days=_BACKFILL_DAYS)
             short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
             if bookmark is None:
                 rows = await self._backfill_rows(now)
-                soc_window = (backfill_start, short_term_start)
+                flow_start = backfill_start
             else:
-                start = datetime.fromisoformat(bookmark)
-                if now - start > timedelta(days=_SHORT_TERM_DAYS):
-                    rows = await self._heal_rows(start, now)
-                    soc_window = (start, now)
+                flow_start = datetime.fromisoformat(bookmark)
+                if now - flow_start > timedelta(days=_SHORT_TERM_DAYS):
+                    rows = await self._heal_rows(flow_start, now)
                 else:
-                    rows = await self._incremental_rows(start, now)
-                    soc_window = (start, start)
-            # A pending SoC backfill (sensor added, or first start with sensors chosen)
-            # widens ONLY the SoC read to the whole backfill window. The flow rows stay
-            # those of the branch above - the flow bookmark is never steered by SoC.
+                    rows = await self._incremental_rows(flow_start, now)
+
+            # The SoC read has its OWN bookmark (soc_uploaded_ts), never the flows'. The
+            # flow bookmark moves whenever the flows were delivered - also when the SoC
+            # read failed or a 422 dropped SoC from the call - and a read from there would
+            # lose the quarters in between for good, although HA keeps 5-minute statistics
+            # for ~10 days. A pending SoC backfill (sensor added, or first start with
+            # sensors chosen) widens the read to the whole backfill window; the flow rows
+            # stay those of the branch above, the flow bookmark is never steered by SoC.
             soc_backfill = bool(self._state.get("soc_backfill_pending"))
+            soc_start = flow_start  # first time with sensors and no backfill pending
+            soc_bookmark = self._soc_bookmark()
             if soc_backfill:
-                soc_window = (backfill_start, short_term_start)
+                soc_start = backfill_start
+            elif soc_bookmark is not None:
+                soc_start = soc_bookmark
+            soc_start = max(soc_start, backfill_start)
+            soc_hourly_until = max(soc_start, short_term_start)
 
             if rows:
                 # Read here, not per branch: SoC only rides along with flow rows (the API
                 # requires at least one row), so a cycle without rows reads nothing.
+                # Hours before the short-term limit, quarters after it, whatever the flow
+                # branch is.
                 soc, soc_ok = await self._soc_state(
-                    soc_window[0], now, hourly_until=soc_window[1])
+                    soc_start, now, hourly_until=soc_hourly_until)
                 try:
                     soc_delivered = await self._put_rows(rows, soc)
                 except WoltaApiError as err:
@@ -533,6 +542,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     # PUT carrying it went through; otherwise the next cycle retries it.
                     if soc_backfill and soc_ok and soc_delivered:
                         self._state.pop("soc_backfill_pending", None)
+                    # The SoC bookmark moves on the same condition, and only with sensors
+                    # chosen: without them no key is ever written (fleet default).
+                    if self._soc_entities and soc_ok and soc_delivered:
+                        self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
+                            soc, self._state["last_uploaded_ts"])
                     await self._store.async_save(self._state)
                     # Clear failure counter on success
                     self._state.pop("consecutive_failure_days", None)
@@ -937,6 +951,39 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if pending:
             self._state["soc_backfill_pending"] = True
         await self._store.async_save(self._state)
+
+    def _soc_bookmark(self) -> datetime | None:
+        """The SoC read bookmark, or None when absent or unreadable (a corrupt value then
+        just means 'start where the flows start', never an exception that stops the
+        flows)."""
+        raw = self._state.get("soc_uploaded_ts")
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            return None
+        # A naive value would break the comparisons with the aware window bounds.
+        return parsed if parsed.tzinfo else None
+
+    @staticmethod
+    def _next_soc_bookmark(soc: list[dict], flow_bookmark: str) -> str:
+        """The new SoC bookmark after a delivered read.
+
+        With rows: the EARLIEST over the sensors of each sensor's latest row start, so a
+        sensor whose statistics lag is not skipped; whatever the others delivered beyond
+        it is read again next time (idempotent upsert, the same principle as the flow
+        bookmark being the last row's own ts). Without rows (the read worked, there was
+        nothing): the new flow bookmark, so a sensor without statistics does not make the
+        window grow every cycle."""
+        latest: dict[str, datetime] = {}
+        for row in soc:
+            ts = datetime.fromisoformat(row["ts"])
+            if row["unit"] not in latest or ts > latest[row["unit"]]:
+                latest[row["unit"]] = ts
+        if not latest:
+            return flow_bookmark
+        return min(latest.values()).isoformat()
 
     async def _soc_state(
         self, start: datetime, now: datetime, *, hourly_until: datetime

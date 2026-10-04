@@ -3509,3 +3509,248 @@ async def test_upgrade_without_soc_sensors_records_empty_choice_only(
     assert coordinator._state["applied_entities"] == _fingerprint()
     args, kwargs = client.put_data.call_args
     assert len(args) == 2 and kwargs == {}
+
+
+# ---------------------------------------------------------------------------
+# SoC bookmark (soc_uploaded_ts): outside a pending SoC backfill the SoC read starts at
+# its OWN bookmark, never at the flow bookmark. Before this, a SoC read that failed (or
+# a 422 that dropped SoC) still let last_uploaded_ts move, and the next cycle read
+# 5-minute statistics only from the new flow bookmark - the quarters in between were
+# never read again although HA still holds them for ~10 days. The SoC bookmark moves only
+# when the SoC read worked AND the call carrying it went through, and it never touches
+# last_uploaded_ts, pending_invert_recompute or the flow fingerprint.
+# ---------------------------------------------------------------------------
+
+_OLD_SOC_BOOKMARK = (NOW - timedelta(hours=3)).isoformat()
+
+
+def _soc_settled_state(**extra) -> dict:
+    """Flows settled, SoC choice already recorded, SoC bookmark three hours behind."""
+    return {**_SETTLED_STATE, "applied_soc": [_SOC_ENTITY],
+            "soc_uploaded_ts": _OLD_SOC_BOOKMARK, **extra}
+
+
+@pytest.mark.asyncio
+async def test_transient_soc_read_failure_keeps_soc_bookmark_and_rereads_gap(
+    hass: HomeAssistant, mock_entry
+):
+    """Cycle 1: the SoC read raises. The flows go up and the flow bookmark moves, but the
+    SoC bookmark stays. Cycle 2 reads from the OLD SoC bookmark - not from the moved flow
+    bookmark - so the quarters of cycle 1 are not lost; when it is delivered the SoC
+    bookmark moves to the latest quarter that was read."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    coordinator, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_raises, _soc_measurement], _soc_settled_state())
+
+    assert errors == [None, None]
+    assert coordinator._state["last_uploaded_ts"] != _RECENT_BOOKMARK  # flows moved
+    # Cycle 1 asked from the old bookmark; the failure left it where it was.
+    assert soc_calls[0] == [(datetime.fromisoformat(_OLD_SOC_BOOKMARK), NOW, "5minute")]
+    # Cycle 2 asks from the SAME old bookmark although last_uploaded_ts has moved.
+    assert soc_calls[1] == [(datetime.fromisoformat(_OLD_SOC_BOOKMARK), NOW, "5minute")]
+    first, second = client.put_data.call_args_list
+    assert first.kwargs == {} and len(first.args) == 2
+    assert [r["ts"] for r in second.kwargs["battery_state"]] == [_SOC_QUARTER.isoformat()]
+    assert coordinator._state["soc_uploaded_ts"] == _SOC_QUARTER.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_soc_rejected_422_does_not_move_soc_bookmark(hass: HomeAssistant, mock_entry):
+    """The 422 safety net re-sends the flows without SoC: the flow bookmark moves, the SoC
+    bookmark does not - its rows were not delivered."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client(raise_on_put=[WoltaApiError("unprocessable", status=422), None])
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], _soc_settled_state())
+
+    assert errors == [None]
+    assert coordinator._state["last_uploaded_ts"] != _RECENT_BOOKMARK
+    assert coordinator._state["soc_uploaded_ts"] == _OLD_SOC_BOOKMARK
+
+
+@pytest.mark.asyncio
+async def test_failed_put_does_not_move_soc_bookmark(hass: HomeAssistant, mock_entry):
+    """A PUT that fails delivers nothing: neither bookmark moves."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client(raise_on_put=WoltaApiError("server error", status=500))
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], _soc_settled_state())
+
+    assert isinstance(errors[0], WoltaApiError)
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["soc_uploaded_ts"] == _OLD_SOC_BOOKMARK
+
+
+@pytest.mark.asyncio
+async def test_heal_branch_reads_soc_quarters_from_soc_bookmark_not_hours(
+    hass: HomeAssistant, mock_entry
+):
+    """The flow heal branch (flow bookmark > 9 days old) used to hand SoC an all-hourly
+    window. With a fresh SoC bookmark the SoC read is 5-minute quarters from that
+    bookmark, whatever the flow branch."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    stale_flows = (NOW - timedelta(days=12)).isoformat()
+
+    coordinator, change_periods, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(last_uploaded_ts=stale_flows))
+
+    assert errors == [None]
+    assert "hour" in change_periods[0]  # the flows really took the heal branch
+    assert soc_calls[0] == [(datetime.fromisoformat(_OLD_SOC_BOOKMARK), NOW, "5minute")]
+    assert coordinator._state["soc_uploaded_ts"] == _SOC_QUARTER.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_old_soc_bookmark_reads_hours_then_quarters(hass: HomeAssistant, mock_entry):
+    """A SoC bookmark older than the 5-minute retention reads hourly statistics up to
+    now - 9 days and quarters after it (the same split as the backfill)."""
+    from custom_components.wolta.coordinator import _SHORT_TERM_DAYS
+
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    old = NOW - timedelta(days=20)
+
+    _, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(soc_uploaded_ts=old.isoformat()))
+
+    assert errors == [None]
+    assert soc_calls[0] == [
+        (old, NOW - timedelta(days=_SHORT_TERM_DAYS), "hour"),
+        (NOW - timedelta(days=_SHORT_TERM_DAYS), NOW, "5minute"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_soc_bookmark_never_reaches_further_back_than_the_backfill_window(
+    hass: HomeAssistant, mock_entry
+):
+    """Floor: a bookmark older than the backfill window (a client that sat off for a year)
+    is read from now - 365 days at the earliest."""
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS, _SHORT_TERM_DAYS
+
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    _, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(soc_uploaded_ts=(NOW - timedelta(days=500)).isoformat()))
+
+    assert errors == [None]
+    assert soc_calls[0][0] == (NOW - timedelta(days=_BACKFILL_DAYS),
+                               NOW - timedelta(days=_SHORT_TERM_DAYS), "hour")
+
+
+@pytest.mark.asyncio
+async def test_first_soc_cycle_without_pending_backfill_starts_at_flow_bookmark(
+    hass: HomeAssistant, mock_entry
+):
+    """No SoC bookmark yet and no pending backfill (a state written before the bookmark
+    existed): the first read follows the flow branch's start, exactly as before."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    state = {**_SETTLED_STATE, "applied_soc": [_SOC_ENTITY]}
+
+    coordinator, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], state)
+
+    assert errors == [None]
+    assert soc_calls[0] == [(datetime.fromisoformat(_RECENT_BOOKMARK), NOW, "5minute")]
+    assert coordinator._state["soc_uploaded_ts"] == _SOC_QUARTER.isoformat()
+
+
+async def _soc_two_units(h, ids, start, end, period):
+    """sensor.soc has its latest complete quarter 11:30, sensor.soc_2 only 11:15."""
+    out = {}
+    for entity, q in ((_SOC_ENTITY, _SOC_QUARTER),
+                      ("sensor.soc_2", _SOC_QUARTER - timedelta(minutes=15))):
+        if entity in ids:
+            base = q.timestamp()
+            out[entity] = [{"start": base + k, "mean": 50.0, "min": 49.0, "max": 51.0}
+                           for k in (0, 300, 600)]
+    return out
+
+
+@pytest.mark.asyncio
+async def test_soc_bookmark_is_the_earliest_of_the_sensors_latest_rows(
+    hass: HomeAssistant, mock_entry
+):
+    """Two sensors with different latest quarters: the bookmark is the EARLIEST of their
+    latest row starts, so the lagging sensor is not skipped. The later sensor's overlap is
+    re-read next time (idempotent upsert)."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY, "sensor.soc_2"]}
+    client = _mock_client()
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_two_units],
+        _soc_settled_state(applied_soc=sorted([_SOC_ENTITY, "sensor.soc_2"])))
+
+    assert errors == [None]
+    assert coordinator._state["soc_uploaded_ts"] == (
+        _SOC_QUARTER - timedelta(minutes=15)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_soc_ok_without_rows_moves_soc_bookmark_to_new_flow_bookmark(
+    hass: HomeAssistant, mock_entry
+):
+    """A sensor with no statistics in the window (read fine, nothing there) must not leave
+    a window that grows every cycle: the SoC bookmark follows the flow bookmark."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    async def empty(h, ids, start, end, period):
+        return {}
+
+    coordinator, _, _, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [empty], _soc_settled_state())
+
+    assert errors == [None]
+    assert coordinator._state["soc_uploaded_ts"] == coordinator._state["last_uploaded_ts"]
+    assert coordinator._state["soc_uploaded_ts"] != _OLD_SOC_BOOKMARK
+
+
+@pytest.mark.asyncio
+async def test_pending_backfill_overrides_soc_bookmark_and_sets_it_after(
+    hass: HomeAssistant, mock_entry
+):
+    """A pending SoC backfill reads the whole window even if a bookmark exists; once it is
+    delivered the bookmark is the latest quarter read."""
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS, _SHORT_TERM_DAYS
+
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+
+    coordinator, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(soc_backfill_pending=True))
+
+    assert errors == [None]
+    assert soc_calls[0][0] == (NOW - timedelta(days=_BACKFILL_DAYS),
+                               NOW - timedelta(days=_SHORT_TERM_DAYS), "hour")
+    assert not coordinator._state.get("soc_backfill_pending")
+    assert coordinator._state["soc_uploaded_ts"] == _SOC_QUARTER.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_without_soc_sensors_no_soc_bookmark_and_no_statistics_read(
+    hass: HomeAssistant, mock_entry
+):
+    """Fleet default: no SoC sensor -> no soc_uploaded_ts key, no statistics read, a
+    two-argument put_data."""
+    client = _mock_client()
+
+    coordinator, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement], dict(_SETTLED_STATE))
+
+    assert errors == [None]
+    assert soc_calls == [[]]
+    assert "soc_uploaded_ts" not in coordinator._state
+    args, kwargs = client.put_data.call_args
+    assert len(args) == 2 and kwargs == {}
