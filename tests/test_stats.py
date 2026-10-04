@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import inspect
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -562,6 +563,12 @@ class TestFetchMeasurement:
         assert captured["args"] == (
             hass, start, end, {"sensor.soc"}, "hour", None, {"mean", "min", "max"},
         )
+        # And the same arguments bind against the REAL signature, so a recorder that
+        # renames, reorders or drops a parameter fails here instead of in production.
+        bound = inspect.signature(statistics_mod.statistics_during_period).bind(
+            *captured["args"])
+        assert bound.arguments["period"] == "hour"
+        assert bound.arguments["types"] == {"mean", "min", "max"}
 
 
 # ---------------------------------------------------------------------------

@@ -616,7 +616,8 @@ def soc_unit_ok(entity_id: str) -> bool:
     battery_state_rows filters rows with it and the coordinator filters sources with it,
     so a unit that is too long is neither sent as a row nor as a source. The server 422s
     the whole call, flows included, on a too-long `unit` and on rows whose unit has no
-    source (a source without rows is only a no-op)."""
+    source in the call (unless the server already stores one for it - we always send
+    them). A source without rows is only a no-op."""
     return len(entity_id) <= SOC_UNIT_MAX
 
 

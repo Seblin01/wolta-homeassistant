@@ -1793,12 +1793,20 @@ async def test_view_only_with_soc_sensors_never_reads_soc(hass: HomeAssistant, m
     client.get_profile = AsyncMock(side_effect=Exception("sync skipped in test"))
     coordinator = await _make_coordinator(hass, mock_entry, client)
     measurement_mock = AsyncMock(side_effect=AssertionError("view-only far inte lasa SoC"))
+    # The flow read is patched too (the coordinator's own imported name): with the
+    # view-only gate removed the cycle then fails on THIS test's assertions, not on a
+    # missing recorder instance.
+    change_mock = AsyncMock(return_value=_EMPTY_BATT_STATS)
 
-    with patch("custom_components.wolta.coordinator.async_fetch_measurement",
-               measurement_mock):
+    with (
+        patch("custom_components.wolta.coordinator.async_fetch_measurement",
+              measurement_mock),
+        patch("custom_components.wolta.coordinator.async_fetch_change", change_mock),
+    ):
         await coordinator._async_update_data()
 
     measurement_mock.assert_not_awaited()
+    change_mock.assert_not_awaited()
     client.put_data.assert_not_awaited()
     assert not any(key in coordinator._state
                    for key in ("applied_soc", "soc_backfill_pending", "soc_uploaded_ts"))
@@ -3449,8 +3457,9 @@ async def test_soc_sensor_over_api_length_limits_is_left_out_of_rows_and_sources
     """One rule for rows AND sources: a sensor whose entity id exceeds 128 characters
     (`unit`), or whose source label 'ha:<platform>:<entity_id>' exceeds 200, is left out
     of the read, the rows and battery_sources alike. The server 422s the whole call, flows
-    included, on a too-long `unit`/`source` and on rows whose unit has no source (a source
-    without rows is only a no-op) - so the rows and the sources must agree."""
+    included, on a too-long `unit`/`source` and on rows whose unit has no source in the
+    call (unless it already stores one for the unit - we always send them); a source
+    without rows is only a no-op. So the rows and the sources must agree."""
     from homeassistant.helpers import entity_registry as er
 
     reg = er.async_get(hass)
