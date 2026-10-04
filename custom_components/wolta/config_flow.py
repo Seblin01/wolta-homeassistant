@@ -91,18 +91,29 @@ _LOGGER = logging.getLogger(__name__)
 MAX_SOC_SENSORS = 16
 
 
+def _soc_unvetted(hass: Any, entity_id: str) -> bool:
+    """True when a SoC sensor cannot be vetted right now: no state at all (removed, not
+    yet loaded) or a state of `unavailable`/`unknown` (device offline, integration still
+    starting). In the last two cases the sensor exists but its attributes - state_class
+    and unit - are missing, so judging them would blame the sensor's kind for what is
+    only a temporary outage."""
+    state = hass.states.get(entity_id)
+    return state is None or state.state in ("unavailable", "unknown")
+
+
 def _soc_invalid(hass: Any, entity_ids: list[str] | None) -> bool:
-    """True if any picked SoC sensor (that has a state) cannot serve as a charge-level
-    source.
+    """True if any picked SoC sensor (that has a usable state) cannot serve as a
+    charge-level source.
 
     Without state_class "measurement" there are no long-term statistics to read, and
     without unit "%" we cannot know the value is a charge level (spec 2026-10-03 §6.5).
-    A sensor with no state at all is _soc_error's "soc_unavailable", checked first.
+    A sensor that cannot be vetted (_soc_unvetted) is _soc_error's "soc_unavailable",
+    checked first.
     """
     for entity_id in entity_ids or []:
-        state = hass.states.get(entity_id)
-        if state is None:
+        if _soc_unvetted(hass, entity_id):
             continue
+        state = hass.states.get(entity_id)
         if (
             state.attributes.get("state_class") != "measurement"
             or state.attributes.get("unit_of_measurement") != "%"
@@ -115,10 +126,11 @@ def _soc_error(hass: Any, entity_ids: list[str] | None) -> str | None:
     """Validation error key for the SoC picker, or None when the choice is fine.
 
     Order: unavailable -> not_measurement -> id_too_long -> too_many. A sensor with no
-    state at all (removed, not yet loaded) cannot be vetted; an id over the API's `unit`
-    limit would never be sent (stats.soc_unit_ok, the same rule the upload uses)."""
+    state at all (removed, not yet loaded) or an `unavailable`/`unknown` one cannot be
+    vetted; an id over the API's `unit` limit would never be sent (stats.soc_unit_ok, the
+    same rule the upload uses)."""
     ids = entity_ids or []
-    if any(hass.states.get(entity_id) is None for entity_id in ids):
+    if any(_soc_unvetted(hass, entity_id) for entity_id in ids):
         return "soc_unavailable"
     if _soc_invalid(hass, ids):
         return "soc_not_measurement"

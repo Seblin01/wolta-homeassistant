@@ -2959,6 +2959,44 @@ async def test_entities_step_rejects_unavailable_soc_sensor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_entities_step_unavailable_state_is_soc_unavailable_not_wrong_kind(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """A sensor that exists but is `unavailable`/`unknown` right now (integration still
+    loading, device offline) carries no state_class or unit attributes, so it must not
+    be reported as the wrong kind of sensor - the user would go looking for a config
+    fault that is not there. It is simply unavailable for the moment."""
+    hass.states.async_set(SOC_ENTITY, dead_state)
+    mock_client = _mock_client()
+
+    with _patched(mock_client):
+        result = await _drive_entities(
+            hass, {**STEP_ENTITIES_DATA, CONF_SOC: [SOC_ENTITY]}, mock_client
+        )
+
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_soc_error_unavailable_state_beats_not_measurement(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """Order still unavailable -> not_measurement: a dead sensor next to a wrong-kind one
+    reports the dead one first."""
+    from custom_components.wolta.config_flow import _soc_error
+
+    hass.states.async_set(SOC_ENTITY, dead_state)
+    hass.states.async_set("sensor.kwh", "5", {"state_class": "measurement",
+                                              "unit_of_measurement": "kWh"})
+
+    assert _soc_error(hass, [SOC_ENTITY]) == "soc_unavailable"
+    assert _soc_error(hass, ["sensor.kwh", SOC_ENTITY]) == "soc_unavailable"
+    assert _soc_error(hass, ["sensor.kwh"]) == "soc_not_measurement"
+
+
+@pytest.mark.asyncio
 async def test_entities_step_rejects_soc_entity_id_over_128_chars(
     hass: HomeAssistant,
 ) -> None:
@@ -3169,6 +3207,26 @@ async def test_reconfigure_rejects_invalid_soc_sensor(hass: HomeAssistant) -> No
         )
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+    assert CONF_SOC not in hass.config_entries.async_get_entry(entry.entry_id).data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dead_state", ["unavailable", "unknown"])
+async def test_reconfigure_unavailable_soc_sensor_is_soc_unavailable(
+    hass: HomeAssistant, dead_state: str
+) -> None:
+    """Same as setup: a sensor that is only unavailable/unknown for the moment is not
+    reported as the wrong kind of sensor."""
+    hass.states.async_set(SOC_ENTITY, dead_state)
+    entry = _make_mock_entry(hass)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**{CONF_SOC: [SOC_ENTITY]})
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_SOC: "soc_unavailable"}
     assert CONF_SOC not in hass.config_entries.async_get_entry(entry.entry_id).data
 
 
