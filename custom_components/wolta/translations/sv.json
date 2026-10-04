@@ -141,7 +141,7 @@
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg."
+          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "reauth_confirm": {
@@ -206,7 +206,7 @@
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg."
+          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "view_only": {

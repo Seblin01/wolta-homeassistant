@@ -76,6 +76,17 @@ def test_soc_picker_errors_are_translated(lang: str, key: str, text: str) -> Non
     assert data["config"]["error"][key] == text
 
 
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_soc_description_promises_no_energy_reupload(lang: str) -> None:
+    """Choosing SoC sensors never re-sends the energy data (spec §16) - the field text
+    must say so, in both the setup and the reconfigure step."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    for step in ("entities", "reconfigure"):
+        desc = data["config"]["step"][step]["data_description"]["soc_entities"]
+        needle = "energy data is not re-sent" if lang == "en" else "energidatan skickas inte om"
+        assert needle in desc, (step, desc)
+
+
 @pytest.mark.parametrize("lang, needle", [("en", "prefilled"), ("sv", "förifyll")])
 def test_eff_beskrivningen_sager_att_faltet_ar_forifyllt(lang: str, needle: str) -> None:
     """Efterpost plan C: eff-fältet i Configure → Battery renderas med serverns lagrade värde,
