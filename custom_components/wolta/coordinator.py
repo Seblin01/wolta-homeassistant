@@ -1007,8 +1007,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         rows: list[dict] = []
         try:
             if hourly_until > start:
+                # Hourly statistics rows START on the hour: a window that begins mid-hour
+                # (a SoC bookmark at 10:30) would lose the 10:00 row, whose start lies
+                # before it. The 5-minute read below needs no flooring.
+                hour_start = start.astimezone(timezone.utc).replace(
+                    minute=0, second=0, microsecond=0)
                 hourly = await async_fetch_measurement(
-                    self.hass, ids, start, hourly_until, "hour")
+                    self.hass, ids, hour_start, hourly_until, "hour")
                 rows += battery_state_rows(
                     {e: soc_from_hourly(hourly.get(e, [])) for e in ids}, 3600)
             five_start = max(start, hourly_until)

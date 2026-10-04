@@ -3631,6 +3631,46 @@ async def test_old_soc_bookmark_reads_hours_then_quarters(hass: HomeAssistant, m
 
 
 @pytest.mark.asyncio
+async def test_hourly_soc_read_starts_on_a_whole_hour(hass: HomeAssistant, mock_entry):
+    """HA's long-term statistics have rows that START on the hour. A bookmark in the middle
+    of an hour (10:30) used as the window start would miss the 10:00-11:00 row, since its
+    start lies before the window - and the next bookmark would then sit past it for good.
+    The hourly read is therefore floored to the whole hour (UTC); the 5-minute read keeps
+    the bookmark as it is, its rows start every five minutes."""
+    from custom_components.wolta.coordinator import _SHORT_TERM_DAYS
+
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    bookmark = (NOW - timedelta(days=20)).replace(hour=10, minute=30)
+
+    _, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(soc_uploaded_ts=bookmark.isoformat()))
+
+    assert errors == [None]
+    assert soc_calls[0] == [
+        (bookmark.replace(minute=0), NOW - timedelta(days=_SHORT_TERM_DAYS), "hour"),
+        (NOW - timedelta(days=_SHORT_TERM_DAYS), NOW, "5minute"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quarter_soc_read_keeps_a_mid_hour_bookmark(hass: HomeAssistant, mock_entry):
+    """The flooring is for the hourly read only: a recent bookmark (inside the 5-minute
+    retention) goes to the 5-minute read untouched."""
+    mock_entry.data = {**ENTRY_DATA, CONF_SOC: [_SOC_ENTITY]}
+    client = _mock_client()
+    bookmark = (NOW - timedelta(days=1)).replace(minute=30)
+
+    _, _, soc_calls, errors = await _run_soc_cycles(
+        hass, mock_entry, client, [_soc_measurement],
+        _soc_settled_state(soc_uploaded_ts=bookmark.isoformat()))
+
+    assert errors == [None]
+    assert soc_calls[0] == [(bookmark, NOW, "5minute")]
+
+
+@pytest.mark.asyncio
 async def test_soc_bookmark_never_reaches_further_back_than_the_backfill_window(
     hass: HomeAssistant, mock_entry
 ):
