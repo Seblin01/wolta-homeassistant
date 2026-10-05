@@ -74,6 +74,8 @@ KEY_BATTERY_STATUS = "battery_status"
 BATTERY_STATUS_NONE = "none"
 BATTERY_STATUS_PENDING = "pending"
 BATTERY_STATUS_NEEDS_INPUT = "needs_input"
+BATTERY_STATUS_MEASURED = "measured"
+BATTERY_STATUS_NAMEPLATE = "nameplate"
 # Set when the user dismisses the measured-power repair via its "ignore" option. observed_power
 # is only a lower bound and can be inflated by chronic sensor jumps in the cumulative HA
 # statistics, so a user who stands by their configured power must be able to silence the nudge
@@ -104,6 +106,11 @@ CONF_FLEX_COMPENSATION = "flex_compensation_entity"
 # entity ids are CLIENT-LOCAL configuration and never PATCHed to the server - only the
 # statistics read from them are uploaded, as battery_state rows through put_data.
 CONF_SOC = "soc_entities"
+# Set when the user declines the soc_missing repair (its "ignore" option): collecting SoC
+# is optional, so a no must silence the nudge for good. The coordinator suppresses the
+# repair while this is truthy; picking sensors through the repair clears it. Client-only,
+# never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
+CONF_SOC_ISSUE_IGNORED = "soc_issue_ignored"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

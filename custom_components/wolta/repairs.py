@@ -17,6 +17,9 @@ The adopt UX differs per parameter:
   bound (the controller may never have demanded full power), so the user sets the battery's real
   maximum, likely the measured figure but higher if the hardware can do more.
 
+SocMissingRepairFlow reuses the menu for a different question: pick state-of-charge sensors,
+or decline. It adopts nothing and PATCHes nothing - the choice is client-local.
+
 BatteryNeedsInputRepairFlow (spec 2026-09-14 §7.2) is the exception to the menu rule: it fires
 when the backend could not measure a declared battery at all, so there is no configured value to
 keep and nothing to ignore — without the nameplate pair the plant has no grade.
@@ -32,7 +35,9 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
+from .config_flow import _soc_error
 from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
@@ -43,6 +48,8 @@ from .const import (
     CONF_NAMEPLATE_KWH,
     CONF_POWER_ISSUE_IGNORED,
     CONF_RESERVE_PCT,
+    CONF_SOC,
+    CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
 
@@ -213,6 +220,58 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
         )
 
 
+class SocMissingRepairFlow(_AdoptRepairFlow):
+    """Pick the battery's state-of-charge sensors - or decline, for good.
+
+    The choice is written to entry.data and the entry reloaded: the coordinator reads the
+    sensors at start and its own bookkeeping (_track_soc_selection) schedules the SoC
+    backfill. Only CONF_SOC changes, so the flow sensors' fingerprint - the one that
+    triggers a full re-backfill of the energy data - is untouched. Nothing goes to the
+    server from here; the entity ids are client-local."""
+
+    _issue_prefix = "soc_missing"
+    _ignore_key = CONF_SOC_ISSUE_IGNORED
+    _adopt_step = "pick_sensors"
+
+    def _candidates(self) -> list[str]:
+        """Sensors that can pass _soc_error: a value in % with long-term statistics."""
+        return sorted(
+            state.entity_id for state in self.hass.states.async_all("sensor")
+            if state.attributes.get("unit_of_measurement") == "%"
+            and state.attributes.get("state_class") == "measurement"
+        )
+
+    async def async_step_pick_sensors(self, user_input=None) -> data_entry_flow.FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            picked = list(user_input.get(CONF_SOC) or [])
+            # An empty choice is not a choice: declining is the menu's other option, and
+            # it is the one that stops the repair from coming back.
+            error = _soc_error(self.hass, picked) if picked else "soc_required"
+            if error:
+                errors[CONF_SOC] = error
+            else:
+                new_data = {**self._entry.data, CONF_SOC: picked}
+                new_data.pop(self._ignore_key, None)
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                ir.async_delete_issue(
+                    self.hass, DOMAIN, f"{self._issue_prefix}_{self._entry.entry_id}")
+                self.hass.config_entries.async_schedule_reload(self._entry.entry_id)
+                return self.async_create_entry(title="", data={})
+        # Narrowed to what can pass validation. With no candidate at all an include list
+        # would render a dead picker, so then every sensor is offered and the validation
+        # error explains what is missing.
+        candidates = self._candidates()
+        config = EntitySelectorConfig(domain="sensor", multiple=True)
+        if candidates:
+            config["include_entities"] = candidates
+        return self.async_show_form(
+            step_id="pick_sensors",
+            data_schema=vol.Schema({vol.Required(CONF_SOC): EntitySelector(config)}),
+            errors=errors,
+        )
+
+
 class BatteryNeedsInputRepairFlow(RepairsFlow):
     """Backend kunde inte mäta batteriets storlek (spec 2026-09-14 §7.2): be om märkskyltens
     värden. Ingen ignore-meny – utan värden finns inget betyg. PATCH:ar båda; backend härleder
@@ -270,6 +329,8 @@ async def async_create_fix_flow(
     data = data or {}
     entry = hass.config_entries.async_get_entry(data.get("entry_id", ""))
     days = int(data.get("days", 0))
+    if issue_id.startswith("soc_missing"):
+        return SocMissingRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):
         return BatteryNeedsInputRepairFlow(entry, days=days)
     if issue_id.startswith("measured_power"):

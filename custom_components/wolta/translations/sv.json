@@ -106,6 +106,41 @@
         }
       }
     },
+    "soc_missing": {
+      "title": "Lägg till batteriets laddningsnivå i Wolta",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Lägg till sensorn för batteriets laddningsnivå",
+            "description": "Wolta kan samla in batteriets laddningsnivå (nivån i %) tillsammans med energidatan. Den är underlag för att längre fram mäta batteriets verkliga kapacitet ur data. Än så länge samlas den bara in, och den påverkar inte ditt betyg eller ekonomin.\n\nVäljer du en sensor laddas dess historik (upp till 365 dygn) upp med nästa ordinarie uppladdning; energidatan skickas inte om. Det här är frivilligt. Vill du inte, välj det andra alternativet så kommer meddelandet inte tillbaka.",
+            "menu_options": {
+              "pick_sensors": "Välj sensor för laddningsnivå",
+              "ignore": "Samla inte in laddningsnivå"
+            }
+          },
+          "pick_sensors": {
+            "title": "Välj sensorn för laddningsnivå",
+            "description": "Välj den sensor som visar batteriets laddningsnivå i %. Har du flera batterienheter med var sin sensor väljer du en per enhet.",
+            "data": {
+              "soc_entities": "Batteriets laddningsnivå (%, en per batteri)"
+            },
+            "data_description": {
+              "soc_entities": "Bara sensorer i % med state_class measurement visas, eftersom det är de som har statistik att läsa. Du kan ändra eller ta bort valet senare under Konfigurera om."
+            }
+          }
+        },
+        "error": {
+          "soc_required": "Välj minst en sensor, eller gå tillbaka och välj att inte samla in laddningsnivå.",
+          "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
+          "soc_not_measurement": "Välj sensorer i % med state_class measurement – andra saknar statistik att läsa.",
+          "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
+          "soc_too_many": "Välj högst 16 sensorer för laddningsnivå."
+        },
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
+        }
+      }
+    },
     "energy_balance_solar_low": {
       "title": "Wolta: solsensorn visar troligen för lite",
       "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nDet händer mest när solen producerar, så solsensorn ({solar}) visar troligen för lite. Sitter batteriet på växelriktarens DC-sida ska solsensorn visa solproduktionen före batteriet (växelriktarens DC-ingång), inte växelriktarens AC-utgång. Har du flera växelriktare eller strängar ska alla räknas med.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
