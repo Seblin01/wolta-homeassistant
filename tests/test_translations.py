@@ -94,3 +94,24 @@ def test_eff_beskrivningen_sager_att_faltet_ar_forifyllt(lang: str, needle: str)
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
     desc = data["options"]["step"]["settings"]["sections"]["battery"]["data_description"]["eff"]
     assert needle in desc.lower()
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_soc_missing_repair_translates_every_error_its_flow_returns(lang: str) -> None:
+    """The repair's picker returns config_flow._soc_error's keys plus its own
+    soc_required; a fix flow reads errors from ITS OWN block, not config.error."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    errors = data["issues"]["soc_missing"]["fix_flow"]["error"]
+    shared = ("soc_unavailable", "soc_not_measurement", "soc_id_too_long", "soc_too_many")
+    for key in ("soc_required", *shared):
+        assert errors.get(key), key
+    for key in shared:
+        assert errors[key] == data["config"]["error"][key], key
+
+
+@pytest.mark.parametrize("lang, needle", [
+    ("en", "does not change your grade"), ("sv", "påverkar inte ditt betyg")])
+def test_soc_missing_repair_says_it_does_not_change_the_grade(lang: str, needle: str) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    text = data["issues"]["soc_missing"]["fix_flow"]["step"]["init"]["description"]
+    assert needle in text, text

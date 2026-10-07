@@ -23,6 +23,8 @@ from homeassistant.util import dt as dt_util
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .const import (
     KEY_BATTERY_STATUS,
+    BATTERY_STATUS_MEASURED,
+    BATTERY_STATUS_NAMEPLATE,
     BATTERY_STATUS_NEEDS_INPUT,
     CONF_BATT_IN,
     CONF_BATT_OUT,
@@ -46,6 +48,7 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SOC,
+    CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -146,6 +149,10 @@ _FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 # without this repair, a filled-in field in Configure plus no data at all is
 # indistinguishable from the integration working.
 _ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
+# A graded battery plant that has no state-of-charge sensor picked. The field is optional
+# and was only added in v0.40.0, so every earlier install has it empty without ever having
+# been asked. Fixable: the repair opens the picker (or records a no).
+_ISSUE_SOC_MISSING = "soc_missing"
 
 # Consecutive bad read cycles before the repair is raised. Same threshold and
 # rationale as the flex twin above: at the 6 h slow poll this is roughly a day,
@@ -569,6 +576,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
             results = await self.client.results(self.token)
             self._evaluate_measured_params(results)
+            self._evaluate_soc_missing_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
                 datetime.fromisoformat(last_uploaded_str)
@@ -1272,6 +1280,31 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
+
+    def _evaluate_soc_missing_issue(self, results: dict) -> None:
+        """Nudge to pick a state-of-charge sensor (README: State of charge monitoring).
+
+        Fires only where the question has an answer and is not noise: the server knows the
+        plant has a battery (stamp measured/nameplate - not none, not still being measured,
+        not a stamp we never received), the grade is settled (a new install was offered the
+        field in setup a moment ago), no sensor is picked and the user has not said no.
+        Never in view-only mode: that entry uploads nothing, and the plant's binding
+        delivers its own SoC."""
+        betyg = results.get("betyg")
+        if not isinstance(betyg, dict) or not betyg:
+            # No grade block says nothing about the plant (a recompute in flight, an
+            # old backend): leave whatever is open as it is rather than flapping.
+            return
+        fire = (
+            not betyg.get("preliminary")
+            and not self._view_only
+            and not self._soc_entities
+            and not self.config_entry.data.get(CONF_SOC_ISSUE_IGNORED)
+            and self._battery_status in (BATTERY_STATUS_MEASURED, BATTERY_STATUS_NAMEPLATE)
+        )
+        self._set_measured_issue(
+            _ISSUE_SOC_MISSING, fire=fire, translation_key=_ISSUE_SOC_MISSING,
+            placeholders={}, data={})
 
     def _evaluate_energy_balance_issue(self, betyg: dict) -> None:
         """Non-fixable repair when the backend has excluded the grade because the household

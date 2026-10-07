@@ -106,6 +106,41 @@
         }
       }
     },
+    "soc_missing": {
+      "title": "Optional: add your battery's state-of-charge sensor to Wolta",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Add your battery's state-of-charge sensor",
+            "description": "Wolta can collect your battery's state of charge (the level in %) together with the energy data. It is groundwork for measuring the battery's real capacity from data later on. For now it is only collected, and it does not change your grade or the economics.\n\nIf you pick a sensor, its history (up to 365 days) is uploaded with the next regular upload; your energy data is not re-sent. This is optional. If you'd rather not, choose the second option and this notice won't come back.",
+            "menu_options": {
+              "pick_sensors": "Pick a state-of-charge sensor",
+              "ignore": "Don't collect state of charge"
+            }
+          },
+          "pick_sensors": {
+            "title": "Pick the state-of-charge sensor",
+            "description": "Pick the sensor that shows your battery's charge level in %. If you have several battery units with a sensor each, pick one per unit.",
+            "data": {
+              "soc_entities": "Battery state of charge (%, one per battery)"
+            },
+            "data_description": {
+              "soc_entities": "Only sensors in % with state_class measurement are listed, since those are the ones with statistics to read. You can change or remove the choice later under Reconfigure."
+            }
+          }
+        },
+        "error": {
+          "soc_required": "Pick at least one sensor, or go back and choose not to collect state of charge.",
+          "soc_unavailable": "The selected state-of-charge sensor isn't available right now. Check that it exists and has a value.",
+          "soc_not_measurement": "Pick sensors in % with state_class measurement - others have no statistics to read.",
+          "soc_id_too_long": "The sensor's entity ID is longer than 128 characters. Rename the entity and try again.",
+          "soc_too_many": "Pick at most 16 state-of-charge sensors."
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+        }
+      }
+    },
     "energy_balance_solar_low": {
       "title": "Wolta: your solar sensor probably reads too low",
       "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nIt happens mostly while the sun produces, so your solar sensor ({solar}) probably reads too low. If the battery sits on the DC side of your inverter, the solar sensor must show solar production before the battery (the inverter's DC input), not the inverter's AC output. If you have several inverters or strings, all of them must be included.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."

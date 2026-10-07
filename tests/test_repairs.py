@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import voluptuous as vol
 from homeassistant.core import HomeAssistant
 
 from custom_components.wolta.const import (
@@ -422,3 +423,180 @@ async def test_fix_flow_dispatch_battery_needs_input(hass: HomeAssistant):
     flow.hass = hass
     form = await flow.async_step_init()
     assert form["description_placeholders"]["days"] == "7"
+
+
+# ---------------------------------------------------------------------------
+# soc_missing (v0.41.0): pick state-of-charge sensors, or decline
+# ---------------------------------------------------------------------------
+
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
+
+from custom_components.wolta.const import CONF_SOC, CONF_SOC_ISSUE_IGNORED  # noqa: E402
+from custom_components.wolta.repairs import SocMissingRepairFlow  # noqa: E402
+
+
+def _soc_flow(hass, **data):
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {**entry.data, **data}
+    hass.config_entries.async_update_entry = MagicMock()
+    hass.config_entries.async_schedule_reload = MagicMock()
+    flow = SocMissingRepairFlow(entry)
+    flow.hass = hass
+    return flow, entry, coordinator
+
+
+def _soc_sensor(hass, entity_id="sensor.batt_soc", *, unit="%", state_class="measurement"):
+    attrs = {"unit_of_measurement": unit}
+    if state_class is not None:
+        attrs["state_class"] = state_class
+    hass.states.async_set(entity_id, "55", attrs)
+
+
+def _create_soc_issue(hass):
+    ir.async_create_issue(hass, "wolta", "soc_missing_e1", is_fixable=True,
+                          severity=ir.IssueSeverity.WARNING, translation_key="soc_missing")
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_menu_offers_pick_and_ignore(hass: HomeAssistant):
+    flow, _, _ = _soc_flow(hass)
+    menu = await flow.async_step_init()
+    assert menu["type"] == "menu"
+    assert set(menu["menu_options"]) == {"pick_sensors", "ignore"}
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_saves_choice_and_reloads(hass: HomeAssistant):
+    """Picking sensors stores them in entry.data and reloads the entry - the coordinator
+    reads the choice at start and schedules the SoC backfill itself. Nothing is PATCHed:
+    the entity ids are client-local."""
+    _soc_sensor(hass)
+    flow, entry, coordinator = _soc_flow(hass)
+    form = await flow.async_step_pick_sensors()
+    assert form["type"] == "form" and form["step_id"] == "pick_sensors"
+
+    result = await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_SOC] == ["sensor.batt_soc"]
+    hass.config_entries.async_schedule_reload.assert_called_once_with("e1")
+    coordinator.client.patch_profile.assert_not_called()
+    coordinator.async_trigger_recompute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_keeps_the_flow_sensors_untouched(hass: HomeAssistant):
+    """Only the SoC key changes - the flow sensors (and with them the entity fingerprint
+    that would trigger a full re-backfill) are carried over as they were."""
+    _soc_sensor(hass)
+    flow, entry, _ = _soc_flow(hass, batt_in=["sensor.a"], grid_in=["sensor.b"])
+    before = dict(entry.data)
+    await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert {k: v for k, v in new_data.items() if k != CONF_SOC} == before
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_clears_issue_and_ignore_flag_on_pick(hass: HomeAssistant):
+    _soc_sensor(hass)
+    flow, _, _ = _soc_flow(hass, **{CONF_SOC_ISSUE_IGNORED: True})
+    _create_soc_issue(hass)
+    await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert CONF_SOC_ISSUE_IGNORED not in new_data
+    assert ir.async_get(hass).async_get_issue("wolta", "soc_missing_e1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("picked, sensor_kw, error", [
+    ([], {}, "soc_required"),
+    (["sensor.batt_soc"], {"unit": "kWh"}, "soc_not_measurement"),
+    (["sensor.batt_soc"], {"state_class": "total"}, "soc_not_measurement"),
+    (["sensor.gone"], {}, "soc_unavailable"),
+])
+async def test_soc_repair_rejects_bad_choice(hass: HomeAssistant, picked, sensor_kw, error):
+    """Same rules as the setup and reconfigure pickers (config_flow._soc_error), plus:
+    an empty choice is not a choice - declining is the menu's other option."""
+    _soc_sensor(hass, **sensor_kw)
+    flow, _, _ = _soc_flow(hass)
+    result = await flow.async_step_pick_sensors({CONF_SOC: picked})
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_SOC: error}
+    hass.config_entries.async_update_entry.assert_not_called()
+    hass.config_entries.async_schedule_reload.assert_not_called()
+
+
+def _picker(form):
+    return next(v for k, v in form["data_schema"].schema.items() if k == CONF_SOC)
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_field_is_optional_so_an_empty_submit_reaches_the_guidance(hass: HomeAssistant):
+    """vol.Required would make the frontend refuse an empty submit, and the soc_required
+    text (which points at the decline option) could never show."""
+    flow, _, _ = _soc_flow(hass)
+    form = await flow.async_step_pick_sensors()
+    key = next(k for k in form["data_schema"].schema if k == CONF_SOC)
+    assert isinstance(key, vol.Optional)
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_lists_only_percent_measurement_sensors(hass: HomeAssistant):
+    """The picker is narrowed to sensors that can pass validation: a level in % with
+    statistics is listed, an energy counter or a % sensor without state_class is not."""
+    _soc_sensor(hass, "sensor.batt_soc")
+    _soc_sensor(hass, "sensor.energy", unit="kWh", state_class="total_increasing")
+    _soc_sensor(hass, "sensor.percent_no_class", state_class=None)
+    # % + measurement but known not to be a charge level: left out of the list (they
+    # would still pass validation if picked by hand under Reconfigure).
+    hass.states.async_set("sensor.bathroom_humidity", "61", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "humidity"})
+    hass.states.async_set("sensor.inverter_power_factor", "98", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "power_factor"})
+    # device_class battery is kept, and so is a % sensor without any device_class
+    # (inverter integrations expose SoC either way).
+    hass.states.async_set("sensor.phone_battery", "80", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "battery"})
+    flow, _, _ = _soc_flow(hass)
+    form = await flow.async_step_pick_sensors()
+    selector = _picker(form)
+    assert selector.config["include_entities"] == ["sensor.batt_soc", "sensor.phone_battery"]
+    assert selector.config["multiple"] is True
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_unfiltered_when_nothing_qualifies(hass: HomeAssistant):
+    """An empty include list would render a dead picker; fall back to all sensors and
+    let validation explain."""
+    flow, _, _ = _soc_flow(hass)
+    form = await flow.async_step_pick_sensors()
+    assert not _picker(form).config.get("include_entities")
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_ignore_persists_flag_and_clears_issue(hass: HomeAssistant):
+    flow, _, _ = _soc_flow(hass)
+    _create_soc_issue(hass)
+    result = await flow.async_step_ignore()
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_SOC_ISSUE_IGNORED] is True
+    assert CONF_SOC not in new_data
+    assert ir.async_get(hass).async_get_issue("wolta", "soc_missing_e1") is None
+    hass.config_entries.async_schedule_reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_aborts_when_entry_missing(hass: HomeAssistant):
+    flow = SocMissingRepairFlow(None)
+    flow.hass = hass
+    result = await flow.async_step_init()
+    assert result["type"] == "abort" and result["reason"] == "entry_not_found"
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_dispatch_soc_missing(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(hass, "soc_missing_e1", {"entry_id": "e1"})
+    assert isinstance(flow, SocMissingRepairFlow)
