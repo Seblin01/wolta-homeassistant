@@ -1291,9 +1291,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         Never in view-only mode: that entry uploads nothing, and the plant's binding
         delivers its own SoC."""
         betyg = results.get("betyg")
-        graded = isinstance(betyg, dict) and bool(betyg) and not betyg.get("preliminary")
+        if not isinstance(betyg, dict) or not betyg:
+            # No grade block says nothing about the plant (a recompute in flight, an
+            # old backend): leave whatever is open as it is rather than flapping.
+            return
         fire = (
-            graded
+            not betyg.get("preliminary")
             and not self._view_only
             and not self._soc_entities
             and not self.config_entry.data.get(CONF_SOC_ISSUE_IGNORED)

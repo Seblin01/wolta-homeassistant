@@ -107,7 +107,7 @@
       }
     },
     "soc_missing": {
-      "title": "Lägg till batteriets laddningsnivå i Wolta",
+      "title": "Frivilligt: lägg till batteriets laddningsnivå i Wolta",
       "fix_flow": {
         "step": {
           "init": {

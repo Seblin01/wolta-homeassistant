@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import voluptuous as vol
 from homeassistant.core import HomeAssistant
 
 from custom_components.wolta.const import (
@@ -530,16 +531,36 @@ def _picker(form):
 
 
 @pytest.mark.asyncio
+async def test_soc_repair_field_is_optional_so_an_empty_submit_reaches_the_guidance(hass: HomeAssistant):
+    """vol.Required would make the frontend refuse an empty submit, and the soc_required
+    text (which points at the decline option) could never show."""
+    flow, _, _ = _soc_flow(hass)
+    form = await flow.async_step_pick_sensors()
+    key = next(k for k in form["data_schema"].schema if k == CONF_SOC)
+    assert isinstance(key, vol.Optional)
+
+
+@pytest.mark.asyncio
 async def test_soc_repair_lists_only_percent_measurement_sensors(hass: HomeAssistant):
     """The picker is narrowed to sensors that can pass validation: a level in % with
     statistics is listed, an energy counter or a % sensor without state_class is not."""
     _soc_sensor(hass, "sensor.batt_soc")
     _soc_sensor(hass, "sensor.energy", unit="kWh", state_class="total_increasing")
     _soc_sensor(hass, "sensor.percent_no_class", state_class=None)
+    # % + measurement but known not to be a charge level: left out of the list (they
+    # would still pass validation if picked by hand under Reconfigure).
+    hass.states.async_set("sensor.bathroom_humidity", "61", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "humidity"})
+    hass.states.async_set("sensor.inverter_power_factor", "98", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "power_factor"})
+    # device_class battery is kept, and so is a % sensor without any device_class
+    # (inverter integrations expose SoC either way).
+    hass.states.async_set("sensor.phone_battery", "80", {
+        "unit_of_measurement": "%", "state_class": "measurement", "device_class": "battery"})
     flow, _, _ = _soc_flow(hass)
     form = await flow.async_step_pick_sensors()
     selector = _picker(form)
-    assert selector.config["include_entities"] == ["sensor.batt_soc"]
+    assert selector.config["include_entities"] == ["sensor.batt_soc", "sensor.phone_battery"]
     assert selector.config["multiple"] is True
 
 

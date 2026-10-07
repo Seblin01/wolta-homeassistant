@@ -107,7 +107,7 @@
       }
     },
     "soc_missing": {
-      "title": "Add your battery's state-of-charge sensor to Wolta",
+      "title": "Optional: add your battery's state-of-charge sensor to Wolta",
       "fix_flow": {
         "step": {
           "init": {

@@ -3962,6 +3962,21 @@ async def test_soc_missing_waits_for_a_mature_grade(hass, mock_entry, results):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("results", [{}, {"betyg": None}, {"betyg": {}}])
+async def test_soc_missing_keeps_the_issue_when_a_cycle_lacks_a_grade(hass, mock_entry, results):
+    """A results payload without a grade block says nothing about the plant - it must not
+    delete an open repair, or the repair would flap on every such cycle."""
+    c = await _soc_coordinator(hass, mock_entry)
+    c._evaluate_soc_missing_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+    c._evaluate_soc_missing_issue(results)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+    # A preliminary grade, by contrast, is an answer: the plant is not settled -> clear.
+    c._evaluate_soc_missing_issue({"betyg": {"preliminary": True, "score_pct": 50}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
 async def test_soc_missing_never_in_view_only(hass, mock_entry):
     c = await _soc_coordinator(hass, mock_entry)
     c._view_only = True
@@ -3976,3 +3991,18 @@ async def test_soc_missing_is_evaluated_in_the_upload_cycle(hass, mock_entry):
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_status": "measured"})
     await _sync_refresh(hass, mock_entry, client)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_soc_missing_is_not_persistent_and_only_the_main_cycle_raises_it(hass, mock_entry):
+    """The issue is re-derived every main cycle from live state, never persisted: after a
+    restart it is absent until the first main cycle re-raises it. The side poll
+    (_take_battery_state) updates the battery stamp but must not raise it - the stamp
+    alone says nothing about the grade."""
+    c = await _soc_coordinator(hass, mock_entry, status=None)
+    c._take_battery_state({**BASE_PROFILE, "battery_status": "measured"})
+    assert c._battery_status == "measured"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+    c._evaluate_soc_missing_issue(_MATURE)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
+    assert issue is not None and issue.is_persistent is False

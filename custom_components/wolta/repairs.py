@@ -37,7 +37,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
-from .config_flow import _soc_error
 from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
@@ -52,6 +51,7 @@ from .const import (
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
+from .soc_picker import soc_candidates, soc_error
 
 
 class _AdoptRepairFlow(RepairsFlow):
@@ -233,21 +233,13 @@ class SocMissingRepairFlow(_AdoptRepairFlow):
     _ignore_key = CONF_SOC_ISSUE_IGNORED
     _adopt_step = "pick_sensors"
 
-    def _candidates(self) -> list[str]:
-        """Sensors that can pass _soc_error: a value in % with long-term statistics."""
-        return sorted(
-            state.entity_id for state in self.hass.states.async_all("sensor")
-            if state.attributes.get("unit_of_measurement") == "%"
-            and state.attributes.get("state_class") == "measurement"
-        )
-
     async def async_step_pick_sensors(self, user_input=None) -> data_entry_flow.FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             picked = list(user_input.get(CONF_SOC) or [])
             # An empty choice is not a choice: declining is the menu's other option, and
             # it is the one that stops the repair from coming back.
-            error = _soc_error(self.hass, picked) if picked else "soc_required"
+            error = soc_error(self.hass, picked) if picked else "soc_required"
             if error:
                 errors[CONF_SOC] = error
             else:
@@ -261,13 +253,15 @@ class SocMissingRepairFlow(_AdoptRepairFlow):
         # Narrowed to what can pass validation. With no candidate at all an include list
         # would render a dead picker, so then every sensor is offered and the validation
         # error explains what is missing.
-        candidates = self._candidates()
+        candidates = soc_candidates(self.hass)
         config = EntitySelectorConfig(domain="sensor", multiple=True)
         if candidates:
             config["include_entities"] = candidates
         return self.async_show_form(
             step_id="pick_sensors",
-            data_schema=vol.Schema({vol.Required(CONF_SOC): EntitySelector(config)}),
+            # Optional, not Required: the frontend refuses to submit an empty Required
+            # field, which would hide the soc_required guidance (decline is a menu choice).
+            data_schema=vol.Schema({vol.Optional(CONF_SOC): EntitySelector(config)}),
             errors=errors,
         )
 
