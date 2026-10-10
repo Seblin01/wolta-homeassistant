@@ -90,3 +90,29 @@ async def test_diagnostics_redacts_link_token(hass: HomeAssistant):
 
     assert "wpl_leak_me_not" not in str(diag)
     assert diag["entry_data"][CONF_LINK_TOKEN] == "**REDACTED**"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_show_coverage_memo_without_server_hash_prefix(hass: HomeAssistant):
+    """Täckningsminnet syns i diagnostiken (felsökning), men dess tokenhash får inte vara
+    ett prefix av serverns token_hash (= sha256(token)) – diagnostik klistras in i publika
+    issues."""
+    import hashlib
+
+    from custom_components.wolta import coverage
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    token = "super-secret"
+    memo = coverage.memo(coverage.coverage_token(token), None)
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: token, CONF_ZONE: "SE3"}
+    coordinator = MagicMock()
+    coordinator._state = {"coverage": memo}
+    coordinator.last_update_success = True
+    coordinator.data = MagicMock(results={"status": "done"})
+    entry.runtime_data = coordinator
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["coordinator_state"]["coverage"] == memo
+    assert not hashlib.sha256(token.encode()).hexdigest().startswith(memo["token"])
