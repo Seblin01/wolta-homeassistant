@@ -124,3 +124,64 @@ async def test_put_rows_422_fallback_returns_the_flow_only_response(hass, entry)
     delivered, response = await c._put_rows(_rows(NOW, 1), soc)
     assert delivered is False
     assert response == {"data_since": None}
+
+
+def _stats_capture():
+    """async_fetch_change-ersättare som loggar (period, start, end)."""
+    calls = []
+
+    async def fetch(hass, ids, start, end, period):
+        calls.append((period, start, end))
+        return {}
+    return calls, fetch
+
+
+@pytest.mark.asyncio
+async def test_gap_rows_old_gap_reads_hourly_only(hass, entry):
+    calls, fetch = _stats_capture()
+    gap = coverage.Gap(WINDOW_START, NOW - timedelta(days=60))
+    c = await _coordinator(hass, entry, _client(), _state())
+    with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
+        await c._gap_rows(gap, NOW)
+    assert calls == [("hour", gap.start, gap.end)]
+
+
+@pytest.mark.asyncio
+async def test_gap_rows_spanning_short_term_reads_both_resolutions(hass, entry):
+    calls, fetch = _stats_capture()
+    gap = coverage.Gap(WINDOW_START, NOW - timedelta(hours=2))
+    short_start = NOW - timedelta(days=9)
+    c = await _coordinator(hass, entry, _client(), _state())
+    with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
+        await c._gap_rows(gap, NOW)
+    assert calls == [("hour", gap.start, short_start), ("5minute", short_start, gap.end)]
+
+
+@pytest.mark.asyncio
+async def test_gap_rows_recent_gap_reads_5min_only(hass, entry):
+    calls, fetch = _stats_capture()
+    gap = coverage.Gap(NOW - timedelta(days=2), NOW - timedelta(hours=2))
+    c = await _coordinator(hass, entry, _client(), _state())
+    with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
+        await c._gap_rows(gap, NOW)
+    assert calls == [("5minute", gap.start, gap.end)]
+
+
+@pytest.mark.asyncio
+async def test_gap_rows_filters_to_before_end_and_never_judges_emptiness(hass, entry):
+    """Luckan slutar mitt i en timme: timstatistik ÷ 4 ger kvartar efter slutet – de får
+    inte skickas (servern har dem redan). En tom lucka är normalt vid uppgradering och får
+    varken räknas som sensorfel eller nollställa en äkta felsvit."""
+    end = NOW - timedelta(days=60) + timedelta(minutes=30)
+    merged = _rows(end - timedelta(minutes=30), 4)          # :00 :15 :30 :45
+    c = await _coordinator(hass, entry, _client(), _state(energy_empty_cycles=2))
+    c._note_stream_emptiness = AsyncMock()
+    with (
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=_stats_capture()[1]),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=merged),
+    ):
+        rows = await c._gap_rows(coverage.Gap(WINDOW_START, end), NOW)
+    assert rows == merged[:2]
+    c._note_stream_emptiness.assert_not_called()
+    assert c._state["energy_empty_cycles"] == 2

@@ -58,6 +58,7 @@ from .const import (
     WOLTA_API_BASE,
 )
 from . import stats
+from . import coverage
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
@@ -1123,6 +1124,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         streams = self._build_streams((short_data, aggregate_5min_to_15min))
         await self._note_stream_emptiness(streams, window=now - start)
         return merge_streams(**streams, external=external)
+
+    async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:
+        """Flow rows for a coverage gap [gap.start, gap.end) – the history the server lacks
+        before its earliest stored interval (spec 2026-10-10 täckningsavstämning §5.2).
+
+        Same resolution rule as _backfill_rows: hourly LTS ÷ 4 for the part older than
+        _SHORT_TERM_DAYS, 5-minute statistics aggregated to quarters after it. Rows are
+        filtered to intervals that END by gap.end: a gap ending mid-hour would otherwise
+        send the hour's later quarters, which the server already holds.
+
+        Deliberately NO _note_stream_emptiness: an empty gap is the normal outcome on an
+        upgrade (the server already has everything HA holds) and must neither count as a
+        broken sensor nor clear a genuine streak."""
+        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        external = await self._external_quarters(gap.start, gap.end)
+        sources = []
+        lts_end = min(gap.end, short_term_start)
+        if lts_end > gap.start:
+            lts_data = await async_fetch_change(
+                self.hass, self._statistic_ids(), gap.start, lts_end, period="hour")
+            sources.append((lts_data, split_hour_to_quarters))
+        five_start = max(gap.start, short_term_start)
+        if gap.end > five_start:
+            short_data = await async_fetch_change(
+                self.hass, self._statistic_ids(), five_start, gap.end, period="5minute")
+            sources.append((short_data, aggregate_5min_to_15min))
+        streams = self._build_streams(*sources)
+        return coverage.within(merge_streams(**streams, external=external), gap.end)
 
     # ------------------------------------------------------------------
     # Recompute logic
