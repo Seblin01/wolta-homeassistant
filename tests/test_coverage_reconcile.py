@@ -307,14 +307,30 @@ async def test_fast_poll_does_nothing(hass, entry):
 
 
 @pytest.mark.asyncio
-async def test_413_on_fill_raises_repair_and_remembers(hass, entry):
+async def test_413_on_fill_warns_without_repair_and_remembers(hass, entry, caplog):
+    """Efter en 413 i fyllningen går ny data fortfarande att ladda upp (bara äldre historik
+    fick inte plats) - profile_full-reparationen skulle ge fel råd och försvinna nästa cykel."""
     bookmark = NOW - timedelta(hours=2)
     client = _client(put=[_since(bookmark), WoltaApiError("full", status=413)])
-    with patch("custom_components.wolta.coordinator.ir.async_create_issue") as issue:
+    with patch("custom_components.wolta.coordinator.ir.async_create_issue") as issue,             caplog.at_level("WARNING", logger="custom_components.wolta.coordinator"):
         c = await _cycle(hass, entry, client, _state(bookmark), regular=_rows(bookmark, 4),
                          gap=_rows(NOW - timedelta(days=30), 4))
-    assert any(call.args[2] == "profile_full" for call in issue.call_args_list)
+    assert not any(call.args[2] == "profile_full" for call in issue.call_args_list)
+    assert "storage limit" in caplog.text
     assert c._state["coverage"] == coverage.memo(FP, bookmark)
+
+
+@pytest.mark.asyncio
+async def test_permanent_4xx_on_fill_remembers_and_cycle_succeeds(hass, entry):
+    """Ett 422 på fyllningsraderna blir aldrig bättre av en omförsökning: minnet sätts till
+    serverns data_since före fyllningen, så nästa cykel inte läser om ett helt år."""
+    bookmark = NOW - timedelta(hours=2)
+    regular = _rows(bookmark, 4)
+    client = _client(put=[_since(bookmark), WoltaApiError("bad", status=422)])
+    c = await _cycle(hass, entry, client, _state(bookmark), regular=regular,
+                     gap=_rows(NOW - timedelta(days=30), 4))
+    assert c._state["coverage"] == coverage.memo(FP, bookmark)
+    assert c._state["last_uploaded_ts"] == regular[-1]["ts"]
 
 
 @pytest.mark.asyncio
@@ -436,3 +452,50 @@ async def test_no_regular_put_and_old_backend_profile_does_nothing(hass, entry):
     c._gap_rows.assert_not_awaited()
     client.put_data.assert_not_awaited()
     assert "coverage" not in c._state
+
+
+@pytest.mark.asyncio
+async def test_soc_is_distributed_over_the_slices_newest_first(hass, entry):
+    """SoC följer sin skiva: varje fyllnings-PUT bär exakt de SoC-rader som börjar i dess
+    intervall. Rader före första flödesraden hör till den ÄLDSTA skivan."""
+    entry.data = {**ENTRY_DATA, CONF_SOC: ["sensor.soc"]}
+    bookmark = NOW - timedelta(hours=2)
+    gap_rows = _rows(NOW - timedelta(days=67), 8)
+    t = [datetime.fromisoformat(r["ts"]) for r in gap_rows]
+
+    def soc_row(ts):
+        return {"unit": "sensor.soc", "ts": ts.isoformat(), "period_s": 900,
+                "soc_mean": 50.0, "soc_min": 49.0, "soc_max": 51.0}
+
+    before_first = soc_row(t[0] - timedelta(minutes=15))
+    in_old_a = soc_row(t[1])
+    in_old_b = soc_row(t[3])
+    in_new_a = soc_row(t[4])
+    in_new_b = soc_row(t[7])
+    client = _client(put=[_since(bookmark), _since(t[4]), _since(t[0])])
+    c = await _coordinator(hass, entry, client, _state(bookmark, applied_soc=["sensor.soc"]))
+    for name in ("_backfill_rows", "_heal_rows", "_incremental_rows"):
+        setattr(c, name, AsyncMock(return_value=_rows(bookmark, 4)))
+    c._gap_rows = AsyncMock(return_value=list(gap_rows))
+    c._soc_state = AsyncMock(side_effect=[
+        ([], True), ([before_first, in_old_a, in_old_b, in_new_a, in_new_b], True)])
+    with patch("custom_components.wolta.coordinator.MAX_ROWS_PER_PUT", 4),             patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        await c._async_update_data()
+    newest, oldest = client.put_data.await_args_list[1], client.put_data.await_args_list[2]
+    assert newest.args == (TOKEN, gap_rows[4:])
+    assert newest.kwargs["battery_state"] == [in_new_a, in_new_b]
+    assert oldest.args == (TOKEN, gap_rows[:4])
+    assert oldest.kwargs["battery_state"] == [before_first, in_old_a, in_old_b]
+
+
+@pytest.mark.asyncio
+async def test_empty_full_backfill_does_not_reread_the_window(hass, entry):
+    """Ingen bokmärke och en fullständig backfill utan rader har redan läst hela fönstret:
+    avstämningen läser det inte en gång till, den bara minns serverns data_since."""
+    client = _client(profile={**PROFILE, "data_since": None})
+    c = await _cycle(hass, entry, client, _state(), regular=[],
+                     gap=_rows(NOW - timedelta(days=30), 4))
+    c._backfill_rows.assert_awaited_once()
+    c._gap_rows.assert_not_awaited()
+    client.put_data.assert_not_awaited()
+    assert c._state["coverage"] == coverage.memo(FP, None)

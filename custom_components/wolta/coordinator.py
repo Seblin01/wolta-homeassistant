@@ -580,7 +580,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     await self._reconcile_coverage(
                         now,
                         put_payload if put_payload is not None else profile_payload,
-                        full_backfill=full_backfill and put_payload is not None,
+                        # The full backfill read the whole window when it delivered or found
+                        # nothing to send; only a failed (413) delivery leaves it unread.
+                        full_backfill=full_backfill and (put_payload is not None or not rows),
                     )
                 except WoltaAuthError:
                     raise  # purged profile → the reauth path below
@@ -591,6 +593,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         "Wolta coverage reconciliation failed (%s); retrying next cycle",
                         type(err).__name__,
                     )
+                    _LOGGER.debug("Coverage reconciliation failure detail", exc_info=True)
 
             # Before _maybe_recompute: with a fresh compensation figure already on
             # the profile when the recompute is triggered, it does not have to wait
@@ -941,7 +944,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         await self._store.async_save(self._state)
         ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
 
-    async def _put_rows(self, rows: list[dict], soc: list[dict]) -> tuple[bool, dict]:
+    async def _put_rows(
+        self, rows: list[dict], soc: list[dict]
+    ) -> tuple[bool, dict | None]:
         """PUT the flow rows, with SoC riding along when there is any. Returns
         (soc_delivered, response): whether the SoC (if any) was delivered, and the response
         of the PUT that went through (the coverage reconciliation reads `data_since` from
@@ -1241,48 +1246,52 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         hi = gap.end
         completed = False
         try:
-            for idx in range(len(slices) - 1, -1, -1):
-                chunk = slices[idx]
-                # The oldest slice also takes SoC that starts before its first flow row.
-                lo = None if idx == 0 else datetime.fromisoformat(chunk[0]["ts"])
-                chunk_soc = [
-                    r for r in soc
-                    if (lo is None or datetime.fromisoformat(r["ts"]) >= lo)
-                    and datetime.fromisoformat(r["ts"]) < hi
-                ]
-                _soc_delivered, response = await self._put_rows(chunk, chunk_soc)
-                stored += 1
-                if lo is not None:
-                    hi = lo
-            completed = True
-        except WoltaAuthError:
-            raise  # purged profile → the same reauth path as the regular upload
-        except WoltaApiError as err:
-            if err.status == 413:
-                ir.async_create_issue(
-                    self.hass,
-                    DOMAIN,
-                    _ISSUE_PROFILE_FULL,
-                    is_fixable=False,
-                    severity=ir.IssueSeverity.WARNING,
-                    translation_key=_ISSUE_PROFILE_FULL,
-                )
-                # Remember anyway: retrying a full profile every cycle changes nothing.
-                await self._remember_coverage(token_fp, since)
-            else:
+            try:
+                for idx in range(len(slices) - 1, -1, -1):
+                    chunk = slices[idx]
+                    # The oldest slice also takes SoC that starts before its first flow row.
+                    lo = None if idx == 0 else datetime.fromisoformat(chunk[0]["ts"])
+                    chunk_soc = [
+                        r for r in soc
+                        if (lo is None or datetime.fromisoformat(r["ts"]) >= lo)
+                        and datetime.fromisoformat(r["ts"]) < hi
+                    ]
+                    _soc_delivered, response = await self._put_rows(chunk, chunk_soc)
+                    stored += 1
+                    if lo is not None:
+                        hi = lo
+                completed = True
+            except WoltaAuthError:
+                raise  # purged profile → the same reauth path as the regular upload
+            except WoltaApiError as err:
+                if err.status is not None and (
+                        err.status == 413 or (400 <= err.status < 500 and err.status != 429)):
+                    # Permanent for this request (storage limit, or the server rejects the
+                    # rows): retrying every cycle changes nothing. New data still uploads
+                    # normally, so no repair issue - just remember and stop.
+                    _LOGGER.warning(
+                        "Wolta coverage fill rejected by the server (HTTP %s)%s; "
+                        "older history could not be added",
+                        err.status,
+                        " - the storage limit was reached" if err.status == 413 else "",
+                    )
+                    await self._remember_coverage(token_fp, since)
+                else:
+                    _LOGGER.warning(
+                        "Wolta coverage fill failed (%s%s); retrying next cycle",
+                        type(err).__name__,
+                        f" {err.status}" if err.status is not None else "",
+                    )
+            except (aiohttp.ClientError, TimeoutError) as err:
                 _LOGGER.warning(
-                    "Wolta coverage fill failed (%s%s); retrying next cycle",
-                    type(err).__name__,
-                    f" {err.status}" if err.status is not None else "",
-                )
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.warning(
-                "Wolta coverage fill failed (%s); retrying next cycle", type(err).__name__)
-        if stored:
-            # New history changes the grade (also when only part of it got through):
-            # recompute now, not at the 7-day cadence.
-            self._state["pending_invert_recompute"] = True
-            await self._store.async_save(self._state)
+                    "Wolta coverage fill failed (%s); retrying next cycle",
+                    type(err).__name__)
+        finally:
+            if stored:
+                # New history changes the grade (also when only part of it got through, and
+                # whatever way we leave): recompute now, not at the 7-day cadence.
+                self._state["pending_invert_recompute"] = True
+                await self._store.async_save(self._state)
         if not completed:
             return
         # The LAST response is the oldest slice's: the server's state after the whole fill.
