@@ -1248,7 +1248,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         slices = coverage.fill_slices(rows, coverage.within(soc, gap.end), MAX_ROWS_PER_PUT)
         response, error = await self._put_fill(slices)
         if error is not None:
-            status = getattr(error, "status", None)
+            # Only the server's own answer can be a permanent refusal; an aiohttp error that
+            # happens to carry a status is a transport problem and is retried.
+            status = error.status if isinstance(error, WoltaApiError) else None
             if coverage.is_permanent_refusal(status):
                 # Retrying every cycle changes nothing. New data still uploads normally, so
                 # no repair issue - just remember and stop.

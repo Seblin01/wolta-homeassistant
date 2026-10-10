@@ -105,9 +105,10 @@ def memo(token_fp: str, since: datetime | None) -> dict[str, str | None]:
 
 
 # Statusar som betyder att servern vägrar just den här requesten, så att ett nytt försök
-# nästa cykel inte ändrar något. 413 är profilens lagringstak: fill_slices håller varje
-# PUT under proxyns body-gräns, så en 413 kan inte vara den. Allt annat (401, 408, 429,
-# 5xx, saknad status, nätfel) görs om nästa cykel.
+# nästa cykel inte ändrar något. 413 tolkas som profilens lagringstak: fill_slices håller
+# varje PUT inom samma radtak som en vanlig uppladdningsbit, så proxyns body-gräns nås i
+# praktiken inte (taket räknar rader, inte byte – SoC-rader är något större). Allt annat
+# (401, 408, 429, 5xx, saknad status, nätfel) görs om nästa cykel.
 PERMANENT_REFUSAL: Final = frozenset({400, 403, 409, 413, 422})
 
 
