@@ -525,7 +525,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 soc, soc_ok = await self._soc_state(
                     soc_start, now, hourly_until=soc_hourly_until)
                 try:
-                    soc_delivered = await self._put_rows(rows, soc)
+                    soc_delivered, put_response = await self._put_rows(rows, soc)
                 except WoltaApiError as err:
                     if err.status == 413:
                         # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
@@ -908,9 +908,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         await self._store.async_save(self._state)
         ir.async_delete_issue(self.hass, DOMAIN, self._flex_issue_id)
 
-    async def _put_rows(self, rows: list[dict], soc: list[dict]) -> bool:
-        """PUT the flow rows, with SoC riding along when there is any. Returns whether
-        the SoC (if any) was delivered; raises WoltaApiError like put_data otherwise.
+    async def _put_rows(self, rows: list[dict], soc: list[dict]) -> tuple[bool, dict]:
+        """PUT the flow rows, with SoC riding along when there is any. Returns
+        (soc_delivered, response): whether the SoC (if any) was delivered, and the response
+        of the PUT that went through (the coverage reconciliation reads `data_since` from
+        it). Raises WoltaApiError like put_data otherwise.
 
         Without SoC the call stays exactly (token, rows): the fleet default is
         byte-identical to the pre-feature upload.
@@ -918,12 +920,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         Safety net (spec §6.5, §16): a 422 on a call that carried SoC re-sends the same
         flow rows without it. SoC must never stop the flows, not even if the server's
         rules are tightened after this client shipped. A flow-only 422 is not ours to
-        second-guess and is raised as before."""
+        second-guess and is raised as before. After that fallback the returned response
+        is the flow-only PUT's - the one that actually stored something."""
         if not soc:
-            await self.client.put_data(self.token, rows)
-            return True
+            return True, await self.client.put_data(self.token, rows)
         try:
-            await self.client.put_data(
+            response = await self.client.put_data(
                 self.token, rows,
                 battery_state=soc, battery_sources=self._soc_sources(),
             )
@@ -934,9 +936,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 "Wolta rejected the state-of-charge data (422); "
                 "re-sending the energy data without it"
             )
-            await self.client.put_data(self.token, rows)
-            return False
-        return True
+            return False, await self.client.put_data(self.token, rows)
+        return True, response
 
     async def _track_soc_selection(self) -> None:
         """Record the SoC choice and decide whether its history must be backfilled.
