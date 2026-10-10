@@ -204,7 +204,7 @@ async def _cycle(hass, entry, client, state, *, regular=(), gap=(), fast_poll=Fa
 
 @pytest.mark.asyncio
 async def test_recreated_profile_gets_history_before_server_since(hass, entry):
-    """Roger 2026-10-10: profilen återskapad, servern har bara dagens data, HA har sedan
+    """Återskapad profil: servern har bara dagens data, HA har sedan
     augusti. En egen PUT med luckans rader; bokmärket orört; minnet ur svaret; omräkning."""
     bookmark = NOW - timedelta(hours=2)
     regular = _rows(bookmark, 4)
@@ -369,3 +369,70 @@ async def test_new_install_full_backfill_sets_memo_without_extra_read(hass, entr
     c._backfill_rows.assert_awaited_once()
     c._gap_rows.assert_not_awaited()
     assert c._state["coverage"] == coverage.memo(FP, first)
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_goes_newest_first_and_next_cycle_completes(hass, entry):
+    """Ett fel mitt i fyllningen får inte lämna ett inre hål: skivorna går nyast först, så
+    serverns data_since flyttar sig bakåt i takt med att lagrade rader växer och nästa
+    cykels lucka är exakt resten."""
+    bookmark = NOW - timedelta(hours=2)
+    gap_rows = _rows(NOW - timedelta(days=67), 8)
+    mid = datetime.fromisoformat(gap_rows[4]["ts"])
+    first = datetime.fromisoformat(gap_rows[0]["ts"])
+    client = _client(put=[_since(bookmark), _since(mid), WoltaRateLimitError(retry_after=60)])
+    with patch("custom_components.wolta.coordinator.MAX_ROWS_PER_PUT", 4):
+        c = await _cycle(hass, entry, client, _state(bookmark), regular=_rows(bookmark, 4),
+                         gap=gap_rows)
+    assert client.put_data.await_args_list[1].args == (TOKEN, gap_rows[4:])
+    assert client.put_data.await_args_list[2].args == (TOKEN, gap_rows[:4])
+    assert "coverage" not in c._state
+    client.recompute.assert_awaited_once()
+
+    # Nästa cykel: den vanliga PUT:ens svar säger att servern nu börjar vid `mid`.
+    client2 = _client(put=[_since(mid), _since(first)])
+    with patch("custom_components.wolta.coordinator.MAX_ROWS_PER_PUT", 4):
+        c2 = await _cycle(hass, entry, client2, dict(c._state), regular=_rows(bookmark, 4),
+                          gap=gap_rows[:4])
+    c2._gap_rows.assert_awaited_once_with(coverage.Gap(WINDOW_START, mid), NOW)
+    assert client2.put_data.await_args_list[1].args == (TOKEN, gap_rows[:4])
+    assert c2._state["coverage"] == coverage.memo(FP, first)
+
+
+@pytest.mark.asyncio
+async def test_error_in_gap_read_does_not_fail_the_cycle(hass, entry):
+    bookmark = NOW - timedelta(hours=2)
+    regular = _rows(bookmark, 4)
+    client = _client(put=[_since(bookmark)])
+    c = await _coordinator(hass, entry, client, _state(bookmark))
+    for name in ("_backfill_rows", "_heal_rows", "_incremental_rows"):
+        setattr(c, name, AsyncMock(return_value=list(regular)))
+    c._gap_rows = AsyncMock(side_effect=RuntimeError("stats down"))
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        await c._async_update_data()
+    assert c._state["last_uploaded_ts"] == regular[-1]["ts"]
+    assert "coverage" not in c._state
+
+
+@pytest.mark.asyncio
+async def test_memo_for_another_token_triggers_fill(hass, entry):
+    """Reauth: minnet hör till ett annat token och servern börjar efter fönstrets start."""
+    bookmark = NOW - timedelta(hours=2)
+    gap = _rows(NOW - timedelta(days=30), 4)
+    client = _client(put=[_since(bookmark), _since(NOW - timedelta(days=30))])
+    state = _state(bookmark, coverage=coverage.memo("annat-token", NOW - timedelta(days=364)))
+    c = await _cycle(hass, entry, client, state, regular=_rows(bookmark, 4), gap=gap)
+    c._gap_rows.assert_awaited_once_with(coverage.Gap(WINDOW_START, bookmark), NOW)
+    assert client.put_data.await_args_list[1].args == (TOKEN, gap)
+    assert c._state["coverage"] == coverage.memo(FP, NOW - timedelta(days=30))
+
+
+@pytest.mark.asyncio
+async def test_no_regular_put_and_old_backend_profile_does_nothing(hass, entry):
+    bookmark = NOW - timedelta(hours=2)
+    client = _client(profile=dict(PROFILE))
+    c = await _cycle(hass, entry, client, _state(bookmark), regular=[],
+                     gap=_rows(NOW - timedelta(days=30), 4))
+    c._gap_rows.assert_not_awaited()
+    client.put_data.assert_not_awaited()
+    assert "coverage" not in c._state

@@ -20,7 +20,13 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
+from .api import (
+    MAX_ROWS_PER_PUT,
+    WoltaApiClient,
+    WoltaApiError,
+    WoltaAuthError,
+    WoltaRateLimitError,
+)
 from .const import (
     KEY_BATTERY_STATUS,
     BATTERY_STATUS_MEASURED,
@@ -570,11 +576,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # rule; before _maybe_recompute, so a fill's forced recompute runs this cycle.
             # Not during fast-poll - the profile GET is skipped then for the same reason.
             if self.update_interval != _FAST_POLL:
-                await self._reconcile_coverage(
-                    now,
-                    put_payload if put_payload is not None else profile_payload,
-                    full_backfill=full_backfill and put_payload is not None,
-                )
+                try:
+                    await self._reconcile_coverage(
+                        now,
+                        put_payload if put_payload is not None else profile_payload,
+                        full_backfill=full_backfill and put_payload is not None,
+                    )
+                except WoltaAuthError:
+                    raise  # purged profile → the reauth path below
+                except Exception as err:  # pylint: disable=broad-except
+                    # The regular upload already went through; a failing fill (statistics
+                    # read, SoC read, ...) must not fail the cycle. Retried next cycle.
+                    _LOGGER.warning(
+                        "Wolta coverage reconciliation failed (%s); retrying next cycle",
+                        type(err).__name__,
+                    )
 
             # Before _maybe_recompute: with a fresh compensation figure already on
             # the profile when the recompute is triggered, it does not have to wait
@@ -1184,12 +1200,18 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         The server is the source of truth for what is stored. Fill only what lies BEFORE
         its earliest stored interval (`data_since`) – never anything it already holds – in
-        a PUT of its own that never touches last_uploaded_ts: mixed into the regular
+        PUTs of their own that never touch last_uploaded_ts: mixed into the regular
         upload the bookmark could move backwards and the next heal would overwrite quarters.
 
         `payload` is the regular PUT's response when one went through this cycle (the
         server's state after our own writes and its spike rule), else the profile GET.
-        A full backfill this cycle already read the whole window → just remember."""
+        A full backfill this cycle already read the whole window → just remember.
+
+        The fill is sent NEWEST FIRST, one PUT per slice of at most MAX_ROWS_PER_PUT rows
+        (the client would otherwise chunk oldest first). A failure part-way through then
+        leaves the stored history contiguous up to the server's new `data_since`, so the
+        next cycle's gap [window start, data_since) is exactly what is left. Oldest first
+        would leave an interior hole that no later gap calculation can see."""
         since = coverage.server_since(payload)
         if since is coverage.MISSING:
             return  # older backend, or no usable payload this cycle
@@ -1211,8 +1233,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             gap.start, gap.end,
             hourly_until=min(max(gap.start, short_term_start), gap.end))
         soc = coverage.within(soc, gap.end)
+
+        slices = [rows[i:i + MAX_ROWS_PER_PUT]
+                  for i in range(0, len(rows), MAX_ROWS_PER_PUT)]
+        response: object = None
+        stored = 0
+        hi = gap.end
+        completed = False
         try:
-            _soc_delivered, response = await self._put_rows(rows, soc)
+            for idx in range(len(slices) - 1, -1, -1):
+                chunk = slices[idx]
+                # The oldest slice also takes SoC that starts before its first flow row.
+                lo = None if idx == 0 else datetime.fromisoformat(chunk[0]["ts"])
+                chunk_soc = [
+                    r for r in soc
+                    if (lo is None or datetime.fromisoformat(r["ts"]) >= lo)
+                    and datetime.fromisoformat(r["ts"]) < hi
+                ]
+                _soc_delivered, response = await self._put_rows(chunk, chunk_soc)
+                stored += 1
+                if lo is not None:
+                    hi = lo
+            completed = True
         except WoltaAuthError:
             raise  # purged profile → the same reauth path as the regular upload
         except WoltaApiError as err:
@@ -1227,19 +1269,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 )
                 # Remember anyway: retrying a full profile every cycle changes nothing.
                 await self._remember_coverage(token_fp, since)
-                return
-            _LOGGER.warning(
-                "Wolta coverage fill failed (%s); retrying next cycle", err.status)
-            return
+            else:
+                _LOGGER.warning(
+                    "Wolta coverage fill failed (%s%s); retrying next cycle",
+                    type(err).__name__,
+                    f" {err.status}" if err.status is not None else "",
+                )
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.warning(
                 "Wolta coverage fill failed (%s); retrying next cycle", type(err).__name__)
+        if stored:
+            # New history changes the grade (also when only part of it got through):
+            # recompute now, not at the 7-day cadence.
+            self._state["pending_invert_recompute"] = True
+            await self._store.async_save(self._state)
+        if not completed:
             return
+        # The LAST response is the oldest slice's: the server's state after the whole fill.
         after = coverage.server_since(response)
         await self._remember_coverage(token_fp, since if after is coverage.MISSING else after)
-        # New history changes the grade: recompute now, not at the 7-day cadence.
-        self._state["pending_invert_recompute"] = True
-        await self._store.async_save(self._state)
         _LOGGER.info(
             "Wolta: sent %d quarter(s) of history the server was missing before %s",
             len(rows), gap.end.isoformat())
