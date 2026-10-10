@@ -413,6 +413,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # entry.data. Network errors are non-fatal – the cache just stays stale.
             # Skipped during fast-poll (60 s while a server job runs) – nothing
             # profile-related changes on that timescale and it saves a GET per tick.
+            profile_payload: dict | None = None
             if self.update_interval != _FAST_POLL:
                 try:
                     profile = await self.client.get_profile(self.token)
@@ -421,6 +422,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 except Exception:  # pylint: disable=broad-except
                     _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
                 else:
+                    profile_payload = profile
                     self._apply_profile_sync(profile)
                     # Samma skydd som sidopollen: stämpeln är ett VISNINGSFÄLT, och en
                     # missbildad rad (icke-dict battery_detect, osiffrig detect_min_days)
@@ -488,6 +490,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._track_soc_selection()
 
             bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
+            full_backfill = bookmark is None
 
             backfill_start = now - timedelta(days=_BACKFILL_DAYS)
             short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
@@ -518,6 +521,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             soc_start = max(soc_start, backfill_start)
             soc_hourly_until = max(soc_start, short_term_start)
 
+            put_payload: dict | None = None
             if rows:
                 # Read here, not per branch: SoC only rides along with flow rows (the API
                 # requires at least one row), so a cycle without rows reads nothing.
@@ -545,6 +549,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         raise
                 else:
                     ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                    put_payload = put_response
                     self._state["last_uploaded_ts"] = rows[-1]["ts"]
                     # The SoC backfill is done only when the read raised nothing AND the
                     # PUT carrying it went through; otherwise the next cycle retries it.
@@ -559,6 +564,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     # Clear failure counter on success
                     self._state.pop("consecutive_failure_days", None)
                     ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+
+            # Coverage reconciliation (spec 2026-10-10 täckningsavstämning): after the
+            # regular upload, so the server state includes our own writes and its spike
+            # rule; before _maybe_recompute, so a fill's forced recompute runs this cycle.
+            # Not during fast-poll - the profile GET is skipped then for the same reason.
+            if self.update_interval != _FAST_POLL:
+                await self._reconcile_coverage(
+                    now,
+                    put_payload if put_payload is not None else profile_payload,
+                    full_backfill=full_backfill and put_payload is not None,
+                )
 
             # Before _maybe_recompute: with a fresh compensation figure already on
             # the profile when the recompute is triggered, it does not have to wait
@@ -1152,6 +1168,81 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             sources.append((short_data, aggregate_5min_to_15min))
         streams = self._build_streams(*sources)
         return coverage.within(merge_streams(**streams, external=external), gap.end)
+
+    async def _remember_coverage(self, token_fp: str, since: datetime | None) -> None:
+        """Persist the coverage memo – only on change (one Store write per actual change,
+        not per tick)."""
+        new = coverage.memo(token_fp, since)
+        if self._state.get("coverage") != new:
+            self._state["coverage"] = new
+            await self._store.async_save(self._state)
+
+    async def _reconcile_coverage(
+        self, now: datetime, payload: object, *, full_backfill: bool
+    ) -> None:
+        """Coverage reconciliation (spec 2026-10-10 täckningsavstämning §5.2).
+
+        The server is the source of truth for what is stored. Fill only what lies BEFORE
+        its earliest stored interval (`data_since`) – never anything it already holds – in
+        a PUT of its own that never touches last_uploaded_ts: mixed into the regular
+        upload the bookmark could move backwards and the next heal would overwrite quarters.
+
+        `payload` is the regular PUT's response when one went through this cycle (the
+        server's state after our own writes and its spike rule), else the profile GET.
+        A full backfill this cycle already read the whole window → just remember."""
+        since = coverage.server_since(payload)
+        if since is coverage.MISSING:
+            return  # older backend, or no usable payload this cycle
+        token_fp = coverage.coverage_token(self.token)
+        if full_backfill or not coverage.needs_fill(
+                self._state.get("coverage"), token_fp, since):
+            await self._remember_coverage(token_fp, since)
+            return
+        gap = coverage.gap_for(since, now, _BACKFILL_DAYS)
+        if gap is None:
+            await self._remember_coverage(token_fp, since)
+            return
+        rows = await self._gap_rows(gap, now)
+        if not rows:
+            await self._remember_coverage(token_fp, since)
+            return
+        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        soc, _soc_ok = await self._soc_state(
+            gap.start, gap.end,
+            hourly_until=min(max(gap.start, short_term_start), gap.end))
+        soc = coverage.within(soc, gap.end)
+        try:
+            _soc_delivered, response = await self._put_rows(rows, soc)
+        except WoltaAuthError:
+            raise  # purged profile → the same reauth path as the regular upload
+        except WoltaApiError as err:
+            if err.status == 413:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    _ISSUE_PROFILE_FULL,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key=_ISSUE_PROFILE_FULL,
+                )
+                # Remember anyway: retrying a full profile every cycle changes nothing.
+                await self._remember_coverage(token_fp, since)
+                return
+            _LOGGER.warning(
+                "Wolta coverage fill failed (%s); retrying next cycle", err.status)
+            return
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning(
+                "Wolta coverage fill failed (%s); retrying next cycle", type(err).__name__)
+            return
+        after = coverage.server_since(response)
+        await self._remember_coverage(token_fp, since if after is coverage.MISSING else after)
+        # New history changes the grade: recompute now, not at the 7-day cadence.
+        self._state["pending_invert_recompute"] = True
+        await self._store.async_save(self._state)
+        _LOGGER.info(
+            "Wolta: sent %d quarter(s) of history the server was missing before %s",
+            len(rows), gap.end.isoformat())
 
     # ------------------------------------------------------------------
     # Recompute logic
