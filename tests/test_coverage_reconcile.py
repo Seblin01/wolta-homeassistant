@@ -16,6 +16,7 @@ from custom_components.wolta.api import WoltaApiError, WoltaAuthError, WoltaRate
 from custom_components.wolta.const import (
     CONF_BATT_IN,
     CONF_BATT_OUT,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_SOC,
@@ -457,7 +458,8 @@ async def test_no_regular_put_and_old_backend_profile_does_nothing(hass, entry):
 @pytest.mark.asyncio
 async def test_soc_is_distributed_over_the_slices_newest_first(hass, entry):
     """SoC följer sin skiva: varje fyllnings-PUT bär exakt de SoC-rader som börjar i dess
-    intervall. Rader före första flödesraden hör till den ÄLDSTA skivan."""
+    intervall, och flöden + SoC ryms inom MAX_ROWS_PER_PUT (proxyns body-gräns). Rader
+    före första flödesraden hör till den ÄLDSTA skivan."""
     entry.data = {**ENTRY_DATA, CONF_SOC: ["sensor.soc"]}
     bookmark = NOW - timedelta(hours=2)
     gap_rows = _rows(NOW - timedelta(days=67), 8)
@@ -472,20 +474,79 @@ async def test_soc_is_distributed_over_the_slices_newest_first(hass, entry):
     in_old_b = soc_row(t[3])
     in_new_a = soc_row(t[4])
     in_new_b = soc_row(t[7])
-    client = _client(put=[_since(bookmark), _since(t[4]), _since(t[0])])
+    client = _client(put=[_since(bookmark), _since(t[5]), _since(t[3]), _since(t[1]),
+                          _since(t[0])])
     c = await _coordinator(hass, entry, client, _state(bookmark, applied_soc=["sensor.soc"]))
     for name in ("_backfill_rows", "_heal_rows", "_incremental_rows"):
         setattr(c, name, AsyncMock(return_value=_rows(bookmark, 4)))
     c._gap_rows = AsyncMock(return_value=list(gap_rows))
+    # Unsorted on purpose: battery_state_rows orders per unit, not globally.
     c._soc_state = AsyncMock(side_effect=[
-        ([], True), ([before_first, in_old_a, in_old_b, in_new_a, in_new_b], True)])
-    with patch("custom_components.wolta.coordinator.MAX_ROWS_PER_PUT", 4),             patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        ([], True), ([in_new_b, before_first, in_old_a, in_new_a, in_old_b], True)])
+    with (
+        patch("custom_components.wolta.coordinator.MAX_ROWS_PER_PUT", 4),
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+    ):
         await c._async_update_data()
-    newest, oldest = client.put_data.await_args_list[1], client.put_data.await_args_list[2]
-    assert newest.args == (TOKEN, gap_rows[4:])
-    assert newest.kwargs["battery_state"] == [in_new_a, in_new_b]
-    assert oldest.args == (TOKEN, gap_rows[:4])
-    assert oldest.kwargs["battery_state"] == [before_first, in_old_a, in_old_b]
+    fills = client.put_data.await_args_list[1:]
+    assert [(call.args[1], call.kwargs["battery_state"]) for call in fills] == [
+        (gap_rows[5:8], [in_new_b]),
+        (gap_rows[3:5], [in_old_b, in_new_a]),
+        (gap_rows[1:3], [in_old_a]),
+        (gap_rows[0:1], [before_first]),
+    ]
+    for call in fills:
+        assert len(call.args[1]) + len(call.kwargs["battery_state"]) <= 4
+    assert c._state["coverage"] == coverage.memo(FP, t[0])
+
+
+@pytest.mark.asyncio
+async def test_failed_soc_read_postpones_the_whole_fill(hass, entry):
+    """En misslyckad SoC-läsning får inte låta minnet passera luckan – då skickas luckans
+    SoC aldrig. Hela fyllningen väntar till nästa cykel."""
+    entry.data = {**ENTRY_DATA, CONF_SOC: ["sensor.soc"]}
+    bookmark = NOW - timedelta(hours=2)
+    client = _client(put=[_since(bookmark)])
+    c = await _coordinator(hass, entry, client, _state(bookmark, applied_soc=["sensor.soc"]))
+    for name in ("_backfill_rows", "_heal_rows", "_incremental_rows"):
+        setattr(c, name, AsyncMock(return_value=_rows(bookmark, 4)))
+    c._gap_rows = AsyncMock(return_value=_rows(NOW - timedelta(days=30), 4))
+    c._soc_state = AsyncMock(side_effect=[([], True), ([], False)])
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        await c._async_update_data()
+    assert client.put_data.await_count == 1            # only the regular upload
+    assert "coverage" not in c._state
+    assert "pending_invert_recompute" not in c._state
+
+
+@pytest.mark.asyncio
+async def test_transient_4xx_on_fill_keeps_memo(hass, entry):
+    """408 från en proxy är tillfälligt: ingen permanent vägran, nytt försök nästa cykel."""
+    bookmark = NOW - timedelta(hours=2)
+    client = _client(put=[_since(bookmark), WoltaApiError("timeout", status=408)])
+    c = await _cycle(hass, entry, client, _state(bookmark), regular=_rows(bookmark, 4),
+                     gap=_rows(NOW - timedelta(days=30), 4))
+    assert "coverage" not in c._state
+    assert c._state["last_uploaded_ts"] == _rows(bookmark, 4)[-1]["ts"]
+
+
+@pytest.mark.asyncio
+async def test_gap_rows_carries_external_control_flags(hass, entry):
+    """Luckans rader får flaggorna för extern styrning för exakt luckans fönster."""
+    entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.flex"}
+    gap = coverage.Gap(WINDOW_START, NOW - timedelta(days=60))
+    flagged = {gap.end - timedelta(hours=1)}
+    c = await _coordinator(hass, entry, _client(), _state())
+    c._external_quarters = AsyncMock(return_value=flagged)
+    with (
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=_stats_capture()[1]),
+        patch("custom_components.wolta.coordinator.merge_streams",
+              return_value=[]) as merge,
+    ):
+        await c._gap_rows(gap, NOW)
+    c._external_quarters.assert_awaited_once_with(gap.start, gap.end)
+    assert merge.call_args.kwargs["external"] == flagged
 
 
 @pytest.mark.asyncio

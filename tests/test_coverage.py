@@ -88,3 +88,67 @@ def test_within_keeps_only_intervals_that_end_before_end():
     soc = [{"ts": "2026-10-10T15:00:00+00:00", "period_s": 3600},   # timrad förbi end – bort
            {"ts": "2026-10-10T15:00:00+00:00", "period_s": 900}]    # kvart före end – med
     assert coverage.within(soc, end) == soc[1:]
+
+
+def _flow(ts: datetime) -> dict:
+    return {"ts": ts.isoformat()}
+
+
+def _soc(ts: datetime, period_s: int = 900) -> dict:
+    return {"unit": "sensor.soc", "ts": ts.isoformat(), "period_s": period_s}
+
+
+def test_permanent_refusal_is_an_explicit_list():
+    for status in (400, 403, 409, 413, 422):
+        assert coverage.is_permanent_refusal(status) is True
+    for status in (None, 401, 404, 408, 425, 429, 500, 502, 503):
+        assert coverage.is_permanent_refusal(status) is False
+
+
+def test_fill_slices_without_soc_are_newest_first_and_full_from_the_newest():
+    t0 = NOW - timedelta(days=30)
+    rows = [_flow(t0 + timedelta(minutes=15 * i)) for i in range(10)]
+    slices = coverage.fill_slices(rows, [], 4)
+    assert [flows for flows, _ in slices] == [rows[6:10], rows[2:6], rows[0:2]]
+    assert all(soc == [] for _, soc in slices)
+
+
+def test_fill_slices_count_soc_against_the_limit_and_assign_by_start():
+    t0 = NOW - timedelta(days=30)
+    t = [t0 + timedelta(minutes=15 * i) for i in range(8)]
+    rows = [_flow(x) for x in t]
+    before_first = _soc(t[0] - timedelta(minutes=15))
+    in_old_a, in_old_b = _soc(t[1]), _soc(t[3])
+    in_new_a, in_new_b = _soc(t[4]), _soc(t[7])
+    soc = [in_new_b, before_first, in_old_a, in_new_a, in_old_b]   # not globally sorted
+    slices = coverage.fill_slices(rows, soc, 4)
+    assert slices == [
+        (rows[5:8], [in_new_b]),
+        (rows[3:5], [in_old_b, in_new_a]),
+        (rows[1:3], [in_old_a]),
+        (rows[0:1], [before_first]),
+    ]
+    assert all(len(f) + len(s) <= 4 for f, s in slices)
+    assert sorted(r["ts"] for _, s in slices for r in s) == sorted(r["ts"] for r in soc)
+
+
+def test_fill_slices_hourly_soc_goes_with_the_flow_row_it_starts_at():
+    t0 = (NOW - timedelta(days=30)).replace(minute=0, second=0, microsecond=0)
+    rows = [_flow(t0 + timedelta(minutes=15 * i)) for i in range(8)]
+    hour0, hour1 = _soc(t0, 3600), _soc(t0 + timedelta(hours=1), 3600)
+    slices = coverage.fill_slices(rows, [hour0, hour1], 100)
+    assert slices == [(rows, [hour0, hour1])]
+
+
+def test_fill_slices_oversized_single_row_still_ships():
+    """En enda flödesrad med fler SoC-rader än gränsen blir en egen (för stor) skiva –
+    put_data delar då upp SoC i egna bitar."""
+    t0 = NOW - timedelta(days=30)
+    rows = [_flow(t0), _flow(t0 + timedelta(minutes=15))]
+    many = [_soc(t0 + timedelta(minutes=15) + timedelta(seconds=i)) for i in range(5)]
+    slices = coverage.fill_slices(rows, many, 4)
+    assert slices == [([rows[1]], many), ([rows[0]], [])]
+
+
+def test_fill_slices_empty_rows():
+    assert coverage.fill_slices([], [], 4) == []

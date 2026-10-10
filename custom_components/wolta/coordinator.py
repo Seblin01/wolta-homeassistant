@@ -1212,11 +1212,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         server's state after our own writes and its spike rule), else the profile GET.
         A full backfill this cycle already read the whole window → just remember.
 
-        The fill is sent NEWEST FIRST, one PUT per slice of at most MAX_ROWS_PER_PUT rows
-        (the client would otherwise chunk oldest first). A failure part-way through then
-        leaves the stored history contiguous up to the server's new `data_since`, so the
-        next cycle's gap [window start, data_since) is exactly what is left. Oldest first
-        would leave an interior hole that no later gap calculation can see."""
+        The fill is sent NEWEST FIRST, one PUT per slice (coverage.fill_slices: flows + SoC
+        within MAX_ROWS_PER_PUT, so the proxy's body limit cannot answer 413). A failure
+        part-way through then leaves the stored history contiguous up to the server's new
+        `data_since`, so the next cycle's gap [window start, data_since) is exactly what is
+        left. Oldest first would leave an interior hole that no later gap calculation can
+        see."""
         since = coverage.server_since(payload)
         if since is coverage.MISSING:
             return  # older backend, or no usable payload this cycle
@@ -1234,65 +1235,36 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._remember_coverage(token_fp, since)
             return
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
-        soc, _soc_ok = await self._soc_state(
+        soc, soc_ok = await self._soc_state(
             gap.start, gap.end,
             hourly_until=min(max(gap.start, short_term_start), gap.end))
-        soc = coverage.within(soc, gap.end)
-
-        slices = [rows[i:i + MAX_ROWS_PER_PUT]
-                  for i in range(0, len(rows), MAX_ROWS_PER_PUT)]
-        response: object = None
-        stored = 0
-        hi = gap.end
-        completed = False
-        try:
-            try:
-                for idx in range(len(slices) - 1, -1, -1):
-                    chunk = slices[idx]
-                    # The oldest slice also takes SoC that starts before its first flow row.
-                    lo = None if idx == 0 else datetime.fromisoformat(chunk[0]["ts"])
-                    chunk_soc = [
-                        r for r in soc
-                        if (lo is None or datetime.fromisoformat(r["ts"]) >= lo)
-                        and datetime.fromisoformat(r["ts"]) < hi
-                    ]
-                    _soc_delivered, response = await self._put_rows(chunk, chunk_soc)
-                    stored += 1
-                    if lo is not None:
-                        hi = lo
-                completed = True
-            except WoltaAuthError:
-                raise  # purged profile → the same reauth path as the regular upload
-            except WoltaApiError as err:
-                if err.status is not None and (
-                        err.status == 413 or (400 <= err.status < 500 and err.status != 429)):
-                    # Permanent for this request (storage limit, or the server rejects the
-                    # rows): retrying every cycle changes nothing. New data still uploads
-                    # normally, so no repair issue - just remember and stop.
-                    _LOGGER.warning(
-                        "Wolta coverage fill rejected by the server (HTTP %s)%s; "
-                        "older history could not be added",
-                        err.status,
-                        " - the storage limit was reached" if err.status == 413 else "",
-                    )
-                    await self._remember_coverage(token_fp, since)
-                else:
-                    _LOGGER.warning(
-                        "Wolta coverage fill failed (%s%s); retrying next cycle",
-                        type(err).__name__,
-                        f" {err.status}" if err.status is not None else "",
-                    )
-            except (aiohttp.ClientError, TimeoutError) as err:
+        if not soc_ok:
+            # Sending the flows now would let the memo move past the gap, and the gap's
+            # SoC would then never be sent. Retry flows and SoC together next cycle.
+            _LOGGER.warning(
+                "Wolta coverage fill postponed: the state-of-charge read failed; "
+                "retrying next cycle")
+            return
+        slices = coverage.fill_slices(rows, coverage.within(soc, gap.end), MAX_ROWS_PER_PUT)
+        response, error = await self._put_fill(slices)
+        if error is not None:
+            status = getattr(error, "status", None)
+            if coverage.is_permanent_refusal(status):
+                # Retrying every cycle changes nothing. New data still uploads normally, so
+                # no repair issue - just remember and stop.
                 _LOGGER.warning(
-                    "Wolta coverage fill failed (%s); retrying next cycle",
-                    type(err).__name__)
-        finally:
-            if stored:
-                # New history changes the grade (also when only part of it got through, and
-                # whatever way we leave): recompute now, not at the 7-day cadence.
-                self._state["pending_invert_recompute"] = True
-                await self._store.async_save(self._state)
-        if not completed:
+                    "Wolta coverage fill rejected by the server (HTTP %s)%s; "
+                    "older history could not be added",
+                    status,
+                    " - the storage limit was reached" if status == 413 else "",
+                )
+                await self._remember_coverage(token_fp, since)
+            else:
+                _LOGGER.warning(
+                    "Wolta coverage fill failed (%s%s); retrying next cycle",
+                    type(error).__name__,
+                    f" {status}" if status is not None else "",
+                )
             return
         # The LAST response is the oldest slice's: the server's state after the whole fill.
         after = coverage.server_since(response)
@@ -1300,6 +1272,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         _LOGGER.info(
             "Wolta: sent %d quarter(s) of history the server was missing before %s",
             len(rows), gap.end.isoformat())
+
+    async def _put_fill(
+        self, slices: list[tuple[list[dict], list[dict]]]
+    ) -> tuple[object, Exception | None]:
+        """Send the fill slices in the given order (newest first). Returns (the last
+        response, the error that stopped the fill or None). WoltaAuthError propagates.
+
+        The first stored slice persists pending_invert_recompute at once: new history
+        changes the grade however the fill ends - a later failure, or a cancellation
+        (HA shutting down mid-fill) that never returns here."""
+        response: object = None
+        for index, (flows, soc) in enumerate(slices):
+            try:
+                _soc_delivered, response = await self._put_rows(flows, soc)
+            except WoltaAuthError:
+                raise  # purged profile → the same reauth path as the regular upload
+            except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
+                return response, err
+            if index == 0:
+                self._state["pending_invert_recompute"] = True
+                await self._store.async_save(self._state)
+        return response, None
 
     # ------------------------------------------------------------------
     # Recompute logic

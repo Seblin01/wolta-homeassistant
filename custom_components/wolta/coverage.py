@@ -104,6 +104,60 @@ def memo(token_fp: str, since: datetime | None) -> dict[str, str | None]:
     return {"token": token_fp, "since": since.isoformat() if since is not None else None}
 
 
+# Statusar som betyder att servern vägrar just den här requesten, så att ett nytt försök
+# nästa cykel inte ändrar något. 413 är profilens lagringstak: fill_slices håller varje
+# PUT under proxyns body-gräns, så en 413 kan inte vara den. Allt annat (401, 408, 429,
+# 5xx, saknad status, nätfel) görs om nästa cykel.
+PERMANENT_REFUSAL: Final = frozenset({400, 403, 409, 413, 422})
+
+
+def is_permanent_refusal(status: int | None) -> bool:
+    """Ska fyllningen ge upp för den här profilen i stället för att försöka igen?"""
+    return status in PERMANENT_REFUSAL
+
+
+def fill_slices(
+    rows: list[dict], soc: list[dict], max_rows: int
+) -> list[tuple[list[dict], list[dict]]]:
+    """Fyllningens PUT:ar, NYAST FÖRST, som (flödesrader, SoC-rader) i stigande ordning.
+
+    Varje skiva bär de SoC-rader som STARTAR i dess tidsintervall, och flöden + SoC ryms
+    tillsammans inom `max_rows`. put_data skickar SoC-biten i samma request som
+    flödesbiten, och MAX_ROWS_PER_PUT är dimensionerad efter proxyns body-gräns för EN
+    bit. Utan den här räkningen kunde en skiva bli dubbelt så stor och få en 413 från
+    proxyn, som annars inte går att skilja från profilens lagringstak. Den äldsta skivan
+    tar också SoC som startar före första flödesraden. En enda flödesrad med fler
+    SoC-rader än `max_rows` blir en egen för stor skiva, och put_data delar då upp SoC.
+
+    `rows` är stigande (merge_streams). `soc` sorteras här, eftersom battery_state_rows
+    ordnar per enhet och inte globalt. Varje tidsstämpel tolkas en gång."""
+    soc_by_start = sorted(
+        ((datetime.fromisoformat(r["ts"]), r) for r in soc), key=lambda pair: pair[0])
+    slices: list[tuple[list[dict], list[dict]]] = []
+    flows_acc: list[dict] = []      # current slice, newest → oldest (reversed on close)
+    soc_acc: list[dict] = []
+    unassigned = len(soc_by_start)  # soc_by_start[unassigned:] already has a slice
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        start = datetime.fromisoformat(row["ts"])
+        first = unassigned
+        if index == 0:
+            first = 0               # the oldest row also takes everything before it
+        else:
+            while first > 0 and soc_by_start[first - 1][0] >= start:
+                first -= 1
+        own_soc = [r for _, r in soc_by_start[first:unassigned]]
+        if flows_acc and len(flows_acc) + len(soc_acc) + 1 + len(own_soc) > max_rows:
+            slices.append((flows_acc[::-1], soc_acc[::-1]))
+            flows_acc, soc_acc = [], []
+        flows_acc.append(row)
+        soc_acc.extend(reversed(own_soc))
+        unassigned = first
+    if flows_acc:
+        slices.append((flows_acc[::-1], soc_acc[::-1]))
+    return slices
+
+
 def within(rows: list[dict], end: datetime) -> list[dict]:
     """Rader vars HELA intervall slutar senast `end`. Flödesrader är kvartar; SoC-rader bär
     `period_s` (timrader börjar på hel timme och kan annars sträcka sig in över serverns
