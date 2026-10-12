@@ -36,13 +36,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_DIRECTION_FLIPPED_AT,
+    CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
+    CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
     CONF_POWER_ISSUE_IGNORED,
@@ -315,6 +319,61 @@ class BatteryNeedsInputRepairFlow(RepairsFlow):
             description_placeholders={"days": str(self._days)})
 
 
+class BatteryDirectionRepairFlow(RepairsFlow):
+    """Vänd batteriets riktning när servern ser omkastade laddfält ur SoC. Slår om
+    CONF_INVERT_BATTERY - samma klientlokala transformation som options-flödet - och
+    koordinatorns applied_invert-självläkning nollställer bokmärket och skickar HELA historiken
+    om. Erbjuds bara för formerna all/partial (koordinatorn sätter is_fixable)."""
+
+    def __init__(self, entry: ConfigEntry | None,
+                 placeholders: dict[str, Any] | None = None) -> None:
+        self._entry = entry
+        # En egen RepairsFlow ärver inte issuens translation_placeholders: koordinatorn lägger
+        # dem också i issue-datan, och de skickas in i varje steg här.
+        self._placeholders = {k: str(v) for k, v in (placeholders or {}).items()}
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Samma kapplöpning som i _AdoptRepairFlow: entryn kan vara borttagen.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return self.async_show_menu(
+            step_id="init", menu_options=["flip", "ignore"],
+            description_placeholders=self._placeholders)
+
+    async def async_step_flip(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if user_input is None:
+            return self.async_show_form(
+                step_id="flip", data_schema=vol.Schema({}),
+                description_placeholders=self._placeholders)
+        # Flaggans AKTUELLA värde läses här, inte när issuen restes: den kan redan vara på
+        # (då slås den av) eller ändrad under Konfigurera.
+        current = bool(self._entry.data.get(CONF_INVERT_BATTERY, False))
+        new_data = {
+            **self._entry.data,
+            CONF_INVERT_BATTERY: not current,
+            CONF_DIRECTION_FLIPPED_AT: dt_util.utcnow().isoformat(),
+        }
+        new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        # Issuen tas bort direkt, och koordinatorn håller den nere tills serverns riktningsdata
+        # (battery_direction.as_of) är nyare än CONF_DIRECTION_FLIPPED_AT: servern räknar om
+        # riktningsdygnen nattligen, så ett betyg hämtat efter vändningen säger fortfarande
+        # "reversed" och hade annars rest reparationen igen (och ett andra klick vänt tillbaka).
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        await self._entry.runtime_data.async_request_refresh()
+        return self.async_create_entry(title="", data={})
+
+    async def async_step_ignore(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        new_data = {**self._entry.data, CONF_DIRECTION_ISSUE_IGNORED: True}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        return self.async_create_entry(title="", data={})
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict[str, Any] | None
 ) -> RepairsFlow:
@@ -323,6 +382,9 @@ async def async_create_fix_flow(
     data = data or {}
     entry = hass.config_entries.async_get_entry(data.get("entry_id", ""))
     days = int(data.get("days", 0))
+    if issue_id.startswith("battery_direction"):
+        return BatteryDirectionRepairFlow(
+            entry, {k: v for k, v in data.items() if k not in ("entry_id", "form")})
     if issue_id.startswith("soc_missing"):
         return SocMissingRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):

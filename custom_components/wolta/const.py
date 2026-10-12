@@ -111,6 +111,16 @@ CONF_SOC = "soc_entities"
 # repair while this is truthy; picking sensors through the repair clears it. Client-only,
 # never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
 CONF_SOC_ISSUE_IGNORED = "soc_issue_ignored"
+# Användaren har avböjt att vända riktningen (repairen battery_direction, bara de fixbara
+# formerna). Rensas när användaren vänder via repairen. Klientlokal nyckel, aldrig till
+# servern, och därför utanför _PROFILE_SYNC_KEYS.
+CONF_DIRECTION_ISSUE_IGNORED = "direction_issue_ignored"
+# When the owner last flipped the direction from the repair (ISO UTC). The fixable repair stays
+# down until the server's direction data (battery_direction.as_of) is newer than this: the server
+# recounts the direction days nightly, so a grade fetched right after the flip still says
+# "reversed" and would otherwise re-raise the repair, inviting a second flip back. Client-only,
+# never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
+CONF_DIRECTION_FLIPPED_AT = "direction_flipped_at"
 
 # Defaults
 DEFAULT_ZONE = "SE3"

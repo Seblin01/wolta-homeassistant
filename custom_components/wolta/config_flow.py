@@ -12,6 +12,7 @@ import voluptuous as vol
 from homeassistant.components.energy.data import async_get_manager
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.data_entry_flow import section
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
@@ -45,6 +46,8 @@ from .const import (
     BATTERY_STATUS_PENDING,
     CONF_BATT_IN,
     CONF_CREATED_BY_HA,
+    CONF_DIRECTION_FLIPPED_AT,
+    CONF_DIRECTION_ISSUE_IGNORED,
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
@@ -176,6 +179,15 @@ _ZONE_SUGGESTED_LABEL: dict[str, str] = {
     "sv": "föreslaget ur din position",
     "en": "suggested from your location",
 }
+
+
+def _as_list(val: str | list | None) -> list[str]:
+    """Normalise a stored sensor setting to a list (v0.1.0 entries hold a plain string)."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val:
+        return [val]
+    return []
 
 
 def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSelector:
@@ -798,6 +810,24 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # collecting SoC.
                     CONF_SOC: list(user_input.get(CONF_SOC) or []),
                 }
+                # Bytta batterisensorer skickar också om historiken (applied_entities), så en
+                # öppen riktningsreparation bygger på det gamla betyget: stämpla som vid en
+                # vändning så att den inte reses igen förrän servern räknat om.
+                # Order-independent and normalised like the coordinator (a v0.1.0 entry
+                # stores a plain string), so only a real change of sensors stamps.
+                if (sorted(_as_list(user_input[CONF_BATT_IN]))
+                        != sorted(_as_list(entry.data.get(CONF_BATT_IN)))
+                        or sorted(_as_list(user_input[CONF_BATT_OUT]))
+                        != sorted(_as_list(entry.data.get(CONF_BATT_OUT)))):
+                    data_updates[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
+                    ir.async_delete_issue(
+                        self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
+                    if CONF_DIRECTION_ISSUE_IGNORED in entry.data:
+                        # None-värden skrivs inte bort av data_updates; ta bort flaggan direkt.
+                        self.hass.config_entries.async_update_entry(
+                            entry,
+                            data={k: v for k, v in entry.data.items()
+                                  if k != CONF_DIRECTION_ISSUE_IGNORED})
                 # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
                 # full re-backfill skriver över historiken från de nya sensorerna.
                 return self.async_update_reload_and_abort(entry, data_updates=data_updates)
@@ -1364,6 +1394,12 @@ class WoltaOptionsFlow(OptionsFlow):
                             new_data[key] = val
                     if invert_changed:
                         new_data[CONF_INVERT_BATTERY] = invert_new
+                        # Samma stämpel som när riktningsreparationen vänder: det gamla
+                        # betyget säger fortfarande "reversed" tills servern räknat om.
+                        new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
+                        new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
+                        ir.async_delete_issue(
+                            self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
                     new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 

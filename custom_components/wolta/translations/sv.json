@@ -156,6 +156,58 @@
     "energy_balance_unclear": {
       "title": "Wolta: energin i din data går inte ihop",
       "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nKontrollera att sol ({solar}), nätimport ({grid_in}), export och batteriets laddning ({batt_in}) och urladdning är mappade till rätt sensorer.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."
+    },
+    "battery_direction_all": {
+      "title": "Wolta: laddning och urladdning ser omkastade ut",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Wolta: laddning och urladdning ser omkastade ut",
+            "description": "När din data säger att batteriet laddar, sjunker batteriets laddningsnivå, och tvärtom. Det gäller alla {reversed_days} dygn Wolta kunnat kontrollera ({first_checked} – {last_reversed}). Sensorerna för laddning ({batt_in}) och urladdning ({batt_out}) är troligen förväxlade. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer.",
+            "menu_options": {
+              "flip": "Vänd riktningen och skicka om historiken",
+              "ignore": "Ignorera"
+            }
+          },
+          "flip": {
+            "title": "Vänd riktningen på batteriets laddning och urladdning?",
+            "description": "Woltas inställning 'Batteriladdning/urladdning omvänd' slås om – är den av slås den på, och tvärtom – och hela historiken skickas om åt rätt håll. Varningen försvinner när Wolta räknat om, senast nästa dygn."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+        }
+      }
+    },
+    "battery_direction_partial": {
+      "title": "Wolta: laddning och urladdning ser omkastade ut",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Wolta: laddning och urladdning ser omkastade ut",
+            "description": "När din data säger att batteriet laddar, sjunker batteriets laddningsnivå, och tvärtom. Det gäller alla {reversed_days} dygn sedan {first_checked}. Före det har Wolta ingen laddningsnivå och kan inte avgöra riktningen. Har sensorerna ({batt_in}, {batt_out}) varit desamma hela tiden kan du vända riktningen här. Har du bytt sensor eller inställning, rätta i stället det som ändrades under Konfigurera. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer.",
+            "menu_options": {
+              "flip": "Vänd riktningen och skicka om historiken",
+              "ignore": "Ignorera"
+            }
+          },
+          "flip": {
+            "title": "Vänd riktningen på batteriets laddning och urladdning?",
+            "description": "Woltas inställning 'Batteriladdning/urladdning omvänd' slås om – är den av slås den på, och tvärtom – och hela historiken skickas om åt rätt håll. Varningen försvinner när Wolta räknat om, senast nästa dygn."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+        }
+      }
+    },
+    "battery_direction_since": {
+      "title": "Wolta: laddning och urladdning blev omkastade",
+      "description": "Sedan {since} säger din data att batteriet laddar när dess laddningsnivå sjunker, och tvärtom. Före det stämde riktningen. Något ändrades den dagen: en sensor, en inställning eller en uppdatering. Rätta det som ändrades. Vänd inte riktningen i Woltas inställningar, för den vänder hela historiken och gör tiden före {since} fel. När riktningen stämmer igen, låt betygsfönstret på wolta.se börja efter rättelsen. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer."
+    },
+    "battery_direction_ended": {
+      "title": "Wolta: laddning och urladdning var omkastade en period",
+      "description": "Mellan {first_reversed} och {last_reversed} var laddning och urladdning omkastade i din data. Efter det stämmer riktningen. De dygnen ligger kvar i ditt betygsfönster. Låt fönstret på wolta.se börja efter {last_reversed}, så räknas betyget bara på rätt data. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer."
     }
   },
   "config": {

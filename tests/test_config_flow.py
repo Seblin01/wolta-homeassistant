@@ -4166,3 +4166,136 @@ def test_zone_group_never_crosses_currency() -> None:
     # A single-zone country yields one entry, which is why async_step_init hides the menu
     # item in that case rather than offering a form with only the current value.
     assert len(_zone_group("SE3")) > 1
+
+
+# ---------------------------------------------------------------------------
+# Riktningsreparationen: andra vägar att vända stämplar också vändningen
+# ---------------------------------------------------------------------------
+
+
+def _raise_direction_issue(hass: HomeAssistant, entry) -> str:
+    from homeassistant.helpers import issue_registry as ir
+    issue_id = f"battery_direction_{entry.entry_id}"
+    ir.async_create_issue(hass, DOMAIN, issue_id, is_fixable=True,
+                          severity=ir.IssueSeverity.WARNING,
+                          translation_key="battery_direction_all",
+                          translation_placeholders={})
+    return issue_id
+
+
+@pytest.mark.asyncio
+async def test_options_invert_change_stamps_flip_and_clears_direction_repair(
+        hass: HomeAssistant) -> None:
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)
+    entry = _make_mock_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_DIRECTION_ISSUE_IGNORED: True})
+    issue_id = _raise_direction_issue(hass, entry)
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock()
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry))
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
+                                CONF_INVERT_BATTERY: True}),
+        )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_DIRECTION_FLIPPED_AT]
+    assert CONF_DIRECTION_ISSUE_IGNORED not in updated.data
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_battery_sensor_swap_stamps_flip_and_clears_repair(
+        hass: HomeAssistant) -> None:
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)
+    entry = _make_mock_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_DIRECTION_ISSUE_IGNORED: True})
+    issue_id = _raise_direction_issue(hass, entry)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input=_reconfigure_input(**{
+                CONF_BATT_IN: ["sensor.battery_discharge"],
+                CONF_BATT_OUT: ["sensor.battery_charge"],
+            }),
+        )
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_DIRECTION_FLIPPED_AT]
+    assert CONF_DIRECTION_ISSUE_IGNORED not in updated.data
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_without_battery_change_does_not_stamp_flip(
+        hass: HomeAssistant) -> None:
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass)
+    issue_id = _raise_direction_issue(hass, entry)
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input=_reconfigure_input(**{CONF_SOLAR: ["sensor.other_solar"]}),
+        )
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reordered_battery_sensors_do_not_stamp_flip(
+        hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass, {
+        CONF_BATT_IN: ["sensor.battery_charge", "sensor.battery_charge_2"]})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input=_reconfigure_input(**{
+                CONF_BATT_IN: ["sensor.battery_charge_2", "sensor.battery_charge"]}),
+        )
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip(
+        hass: HomeAssistant) -> None:
+    """En v0.1.0-post lagrar sensorn som ren sträng; samma sensor som lista är ingen ändring."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass, {CONF_BATT_IN: "sensor.battery_charge"})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input())
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
