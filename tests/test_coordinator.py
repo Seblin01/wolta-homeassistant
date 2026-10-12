@@ -3068,6 +3068,61 @@ async def test_inverted_battery_judges_the_same_sensors(hass: HomeAssistant, moc
     assert len(sent) >= 6 * 4 - 1                                     # nothing lost to the flip
 
 
+@pytest.mark.asyncio
+async def test_backfill_switches_resolution_on_a_whole_hour(hass: HomeAssistant, mock_entry):
+    """An unaligned switch from hourly to 5-minute statistics would leave the quarter
+    straddling it judged complete by the hour but valued by the 5-minute periods after
+    the switch - a partial quarter. On a whole hour every quarter's value and
+    completeness come from one source."""
+    from custom_components.wolta.coordinator import _BACKFILL_DAYS
+
+    now = NOW + timedelta(minutes=7)
+    boundary = NOW - timedelta(days=9)                                # floor_hour(now - 9 d)
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    calls = []
+
+    async def fetch(h, ids, start, end, period):
+        calls.append((period, start, end))
+        return _full_stats(start, end, period,
+                           {"sensor.grid_in": 2.0 if period == "hour" else 0.1})
+
+    with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
+        rows = await coordinator._backfill_rows(now)
+
+    backfill_hour = NOW - timedelta(days=_BACKFILL_DAYS)              # floor_hour(now - 365 d)
+    assert calls == [("hour", backfill_hour - timedelta(hours=1), boundary),
+                     ("5minute", boundary - timedelta(minutes=5), now)]
+    by_ts = {r["ts"]: r for r in rows}
+    assert by_ts[boundary.isoformat()]["grid_import_kwh"] == pytest.approx(3 * 0.1)
+    before = (boundary - timedelta(minutes=15)).isoformat()
+    assert by_ts[before]["grid_import_kwh"] == pytest.approx(2.0 / 4)
+
+
+@pytest.mark.asyncio
+async def test_heal_with_an_unaligned_start_reads_the_hour_before_it(
+    hass: HomeAssistant, mock_entry
+):
+    """The recorder returns rows from the read start on, without flooring: a heal
+    starting at :37 must read from the whole hour before, or the window's first quarter
+    has no period before it and is never complete."""
+    hour = NOW - timedelta(days=15)
+    start = hour + timedelta(minutes=37)
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    calls = []
+
+    async def fetch(h, ids, s, e, period):
+        calls.append((period, s))
+        return _full_stats(s, e, period)
+
+    with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
+        rows = await coordinator._heal_rows(start, NOW)
+
+    assert calls == [("hour", hour - timedelta(hours=1))]
+    sent = {r["ts"] for r in rows}
+    assert (hour + timedelta(minutes=45)).isoformat() in sent        # first quarter in window
+    assert (hour + timedelta(minutes=30)).isoformat() not in sent    # before the window
+
+
 # ---------------------------------------------------------------------------
 # Väntande batterikapacitet (spec 2026-09-14 §7.2): stämpeln ur profil-GET:en
 # ---------------------------------------------------------------------------

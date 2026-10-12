@@ -91,6 +91,28 @@ _PERIOD_S: dict[Callable, int] = {aggregate_5min_to_15min: 300, split_hour_to_qu
 _PERIOD: dict[int, timedelta] = {300: timedelta(minutes=5), 3600: timedelta(hours=1)}
 
 
+def _floor(t: datetime, period_s: int) -> datetime:
+    """``t`` floored to a whole statistics period (UTC)."""
+    ts = int(t.timestamp())
+    return datetime.fromtimestamp(ts - ts % period_s, tz=timezone.utc)
+
+
+def _read_start(start: datetime, period_s: int) -> datetime:
+    """Where a read for a window starting at ``start`` begins: the period holding
+    ``start`` floored, minus one period. The recorder returns rows with
+    ``start_ts >= start_time`` and does not floor (HA 2026.8.3 recorder/statistics.py),
+    so ``start - period`` alone misses the period before the window whenever ``start``
+    is not on a period boundary, and the window's first period could not be judged."""
+    return _floor(start, period_s) - _PERIOD[period_s]
+
+
+def _short_term_start(now: datetime) -> datetime:
+    """Where the flows switch from hourly to 5-minute statistics, on a whole hour.
+    Unaligned, the quarter straddling it would be judged complete from the hour while
+    its value came from the 5-minute periods after the switch - a partial quarter."""
+    return _floor(now - timedelta(days=_SHORT_TERM_DAYS), 3600)
+
+
 @dataclass(frozen=True)
 class _Source:
     """One statistics read: rows per statistic id, the aggregation that turns them into
@@ -758,7 +780,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         for name in self._entity_map:
             merged: dict = {}
             for src in sources:
-                merged.update(self._sum_stream(src.raw, name, src.agg_fn))
+                # Only the source's own window: the early-read period before it makes a
+                # partial quarter that must not override the previous source's value.
+                merged.update({
+                    q: v for q, v in self._sum_stream(src.raw, name, src.agg_fn).items()
+                    if src.start <= q < src.end})
             streams[name] = merged
 
         sensors = self._statistic_ids()
@@ -788,7 +814,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         incomplete = len(candidates - complete)
         self._last_completeness = {
             "incomplete_quarters": incomplete,
-            "entities": [e for e, n in sorted(blame.items(), key=lambda kv: -kv[1])
+            "entities": [e for e, n in sorted(blame.items(),
+                                              key=lambda kv: (-kv[1], kv[0]))
                          if n > 0][:3],
         }
         return _Built(streams, complete, silent, incomplete, blame)
@@ -1186,7 +1213,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
         start = now - timedelta(days=_BACKFILL_DAYS)
-        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        short_term_start = _short_term_start(now)
 
         external = await self._external_quarters(start, now)
 
@@ -1195,7 +1222,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start - _PERIOD[3600],
+            _read_start(start, 3600),
             short_term_start,
             period="hour",
         )
@@ -1204,7 +1231,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            short_term_start - _PERIOD[300],
+            _read_start(short_term_start, 300),
             now,
             period="5minute",
         )
@@ -1224,7 +1251,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start - _PERIOD[3600],
+            _read_start(start, 3600),
             now,
             period="hour",
         )
@@ -1239,7 +1266,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start - _PERIOD[300],
+            _read_start(start, 300),
             now,
             period="5minute",
         )
@@ -1261,19 +1288,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         Deliberately NO _note_stream_emptiness: an empty gap is the normal outcome on an
         upgrade (the server already has everything HA holds) and must neither count as a
         broken sensor nor clear a genuine streak."""
-        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        short_term_start = _short_term_start(now)
         external = await self._external_quarters(gap.start, gap.end)
         sources: list[_Source] = []
         lts_end = min(gap.end, short_term_start)
         if lts_end > gap.start:
             lts_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), gap.start - _PERIOD[3600], lts_end,
+                self.hass, self._statistic_ids(), _read_start(gap.start, 3600), lts_end,
                 period="hour")
             sources.append(_Source(lts_data, split_hour_to_quarters, gap.start, lts_end))
         five_start = max(gap.start, short_term_start)
         if gap.end > five_start:
             short_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), five_start - _PERIOD[300], gap.end,
+                self.hass, self._statistic_ids(), _read_start(five_start, 300), gap.end,
                 period="5minute")
             sources.append(
                 _Source(short_data, aggregate_5min_to_15min, five_start, gap.end))
