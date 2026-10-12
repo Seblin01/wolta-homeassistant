@@ -127,7 +127,7 @@ class _Source:
 class _Built:
     streams: dict[str, dict]          # merge_streams' keyword arguments
     complete: set[datetime]           # quarters every selected sensor measured cleanly
-    silent: set[str]                  # selected sensors with no measured period at all
+    silent: set[str]                  # selected sensors with no measured period in the window
     incomplete: int                   # quarters with a value somewhere but not complete
     blame: dict[str, int]             # sensor -> quarters it made incomplete
 
@@ -217,6 +217,12 @@ _FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 # without this repair, a filled-in field in Configure plus no data at all is
 # indistinguishable from the integration working.
 _ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
+# One selected sensor produced no statistics at all in the window while the others did.
+# Complete quarters need every selected sensor, so that one sensor stops the whole
+# upload - and when its stream has another sensor that delivers, the stream is not
+# empty and energy_stream_no_statistics never sees it. Same threshold and minimum
+# window as energy_empty below.
+_ISSUE_STATISTICS_MISSING = "statistics_missing"
 # A graded battery plant that has no state-of-charge sensor picked. The field is optional
 # and was only added in v0.40.0, so every earlier install has it empty without ever having
 # been asked. Fixable: the repair opens the picker (or records a no).
@@ -341,8 +347,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # false all-clear on the exact condition this repair exists to report.
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
-        # Completeness of the latest read (quarters dropped as incomplete and the sensors
-        # that caused it most), for the diagnostics.
+        self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
+        # Completeness of the latest regular read (quarters dropped as incomplete and the
+        # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
+        # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
+        # older history and must not overwrite the figures of the current upload.
         self._last_completeness: dict = {"incomplete_quarters": 0, "entities": []}
         # Serverns batteristämpel, senast lästa (spec 2026-09-14 §4). Ägs av profil-GET:en
         # i båda pollarna - se _take_battery_state.
@@ -797,10 +806,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         for src in sources:
             period = _PERIOD_S[src.agg_fn]
             in_window = lambda q, s=src: s.start <= q < s.end  # noqa: E731
+            # Silent means no measured period overlapping the window: the early-read
+            # period before it only serves to judge the window's first period.
+            lo, hi = src.start.timestamp() - period, src.end.timestamp()
             clean = {}
             for e in sensors:
                 rows = src.raw.get(e) or []
-                if measured_starts(rows, period):
+                if any(lo < p < hi for p in measured_starts(rows, period)):
                     measured_any[e] = True
                 clean[e] = {q for q in clean_quarters(rows, period) if in_window(q)}
             src_candidates = {q for d in streams.values() for q in d if in_window(q)}
@@ -814,17 +826,55 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 blame[e] += len(src_candidates - clean[e])
         silent = {e for e, seen in measured_any.items() if not seen}
         incomplete = len(candidates - complete)
-        self._last_completeness = {
-            "incomplete_quarters": incomplete,
-            "entities": [e for e, n in sorted(blame.items(),
-                                              key=lambda kv: (-kv[1], kv[0]))
-                         if n > 0][:3],
-        }
         return _Built(streams, complete, silent, incomplete, blame)
 
+    def _remember_completeness(self, built: _Built) -> None:
+        """Keep the regular read's completeness for the diagnostics: the number of
+        quarters dropped as incomplete and the (at most three) sensors that made the
+        most of them incomplete."""
+        ranked = sorted(built.blame.items(), key=lambda kv: (-kv[1], kv[0]))
+        self._last_completeness = {
+            "incomplete_quarters": built.incomplete,
+            "entities": [e for e, n in ranked if n > 0][:3],
+        }
+
     async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
-        """Filled in by the statistics_missing repair (next change)."""
-        return
+        """Track selected sensors that produced no statistics at all in the window while
+        another selected sensor did, and raise statistics_missing after
+        _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE cycles in a row. Complete quarters need every
+        selected sensor, so one silent sensor stops the upload - the owner must learn why.
+
+        A sensor whose whole stream is empty is energy_empty's case (it explains the
+        state_class pitfall) and is left out here. Windows below
+        _ENERGY_EMPTY_MIN_WINDOW are neither counted nor cleared."""
+        if window < _ENERGY_EMPTY_MIN_WINDOW:
+            return
+        empty_streams = {
+            e for name, data in built.streams.items() if not data
+            for e in self._entity_map[self._effective_stream(name)]
+        }
+        others_measured = len(built.silent) < len(self._statistic_ids())
+        silent = (built.silent - empty_streams) if others_measured else set()
+        prev: dict = self._state.get("silent_sensor_cycles") or {}
+        if not silent:
+            if "silent_sensor_cycles" in self._state:
+                self._state.pop("silent_sensor_cycles")
+                await self._store.async_save(self._state)
+                ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
+            return
+        cycles = {e: int(prev.get(e, 0)) + 1 for e in silent}
+        self._state["silent_sensor_cycles"] = cycles
+        await self._store.async_save(self._state)
+        due = sorted(e for e, n in cycles.items() if n >= _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE)
+        if not due:
+            # A raised warning may name a sensor that reads again while another has only
+            # just gone silent - it must not stand until the new streak is due.
+            ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
+            return
+        ir.async_create_issue(
+            self.hass, DOMAIN, self._stats_issue_id, is_fixable=False,
+            severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_STATISTICS_MISSING,
+            translation_placeholders={"entities": ", ".join(due)})
 
     async def _note_stream_emptiness(
         self, streams: dict[str, dict], window: timedelta
@@ -1244,6 +1294,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
         )
         await self._note_stream_emptiness(built.streams, window=now - start)
+        self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
         return merge_streams(**built.streams, external=external, complete=built.complete)
 
@@ -1259,6 +1310,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         built = self._build_streams(_Source(lts_data, split_hour_to_quarters, start, now))
         await self._note_stream_emptiness(built.streams, window=now - start)
+        self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
         return merge_streams(**built.streams, external=external, complete=built.complete)
 
@@ -1275,6 +1327,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         built = self._build_streams(
             _Source(short_data, aggregate_5min_to_15min, start, now))
         await self._note_stream_emptiness(built.streams, window=now - start)
+        self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
         return merge_streams(**built.streams, external=external, complete=built.complete)
 
@@ -1287,9 +1340,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         filtered to intervals that END by gap.end: a gap ending mid-hour would otherwise
         send the hour's later quarters, which the server already holds.
 
-        Deliberately NO _note_stream_emptiness: an empty gap is the normal outcome on an
-        upgrade (the server already has everything HA holds) and must neither count as a
-        broken sensor nor clear a genuine streak."""
+        Deliberately NO _note_stream_emptiness or _note_silent_sensors: an empty gap is
+        the normal outcome on an upgrade (the server already has everything HA holds) and
+        must neither count as a broken sensor nor clear a genuine streak. Nor
+        _remember_completeness: the diagnostics describe the regular read."""
         short_term_start = _short_term_start(now)
         external = await self._external_quarters(gap.start, gap.end)
         sources: list[_Source] = []

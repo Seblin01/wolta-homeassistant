@@ -2802,7 +2802,7 @@ def _energy_stats(start, end, *, empty: tuple[str, ...] = ()) -> dict:
     return {
         sid: ([] if sid in empty else list(rows))
         for sid in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
-                    "sensor.grid_out", "sensor.solar")
+                    "sensor.grid_out", "sensor.solar", "sensor.solar2")
     }
 
 
@@ -2945,6 +2945,175 @@ async def test_unconfigured_stream_is_not_flagged(hass: HomeAssistant, mock_entr
     )
     assert ir.async_get(hass).async_get_issue(
         DOMAIN, coordinator._energy_issue_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Repair: one selected sensor of a stream goes silent (statistics_missing)
+# ---------------------------------------------------------------------------
+#
+# Complete quarters need every selected sensor, so a single silent sensor stops the
+# whole upload while its stream still has values from the other sensor - energy_empty
+# cannot see it. statistics_missing tells the owner which sensor it is.
+
+_TWO_SOLAR_FP = _fingerprint(solar=["sensor.solar", "sensor.solar2"])
+
+
+def _two_solar_entry(hass, mock_entry):
+    """Same entry with two solar sensors: sensor.solar and sensor.solar2."""
+    mock_entry.data = {**mock_entry.data, CONF_SOLAR: ["sensor.solar", "sensor.solar2"]}
+
+
+@pytest.mark.asyncio
+async def test_silent_sensor_raises_statistics_missing_after_three_cycles(
+    hass: HomeAssistant, mock_entry
+):
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=2,
+        fingerprint=_TWO_SOLAR_FP)
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, f"statistics_missing_{mock_entry.entry_id}") is None
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=3,
+        fingerprint=_TWO_SOLAR_FP)
+    issue = reg.async_get_issue(DOMAIN, f"statistics_missing_{mock_entry.entry_id}")
+    assert issue is not None and issue.translation_key == "statistics_missing"
+    assert issue.is_fixable is False
+    assert issue.translation_placeholders["entities"] == "sensor.solar2"
+    # The stream still has a sensor that delivers -> energy_empty is NOT raised.
+    assert reg.async_get_issue(DOMAIN, coordinator._energy_issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_single_silent_sensor_of_a_stream_is_energy_empty_not_statistics_missing(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar",), cycles=3)
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, coordinator._energy_issue_id) is not None
+    assert reg.async_get_issue(DOMAIN, f"statistics_missing_{mock_entry.entry_id}") is None
+
+
+@pytest.mark.asyncio
+async def test_statistics_missing_clears_when_the_sensor_reads_again(
+    hass: HomeAssistant, mock_entry
+):
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=3,
+        fingerprint=_TWO_SOLAR_FP)
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, f"statistics_missing_{mock_entry.entry_id}") is not None
+    clock = {"now": NOW + timedelta(days=2)}
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=lambda h, ids, start, end, period: _energy_stats(start, end)),
+    ):
+        await coordinator._async_update_data()
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, f"statistics_missing_{mock_entry.entry_id}") is None
+    assert coordinator._state.get("silent_sensor_cycles") is None
+
+
+@pytest.mark.asyncio
+async def test_statistics_missing_never_names_a_sensor_that_reads_again(
+    hass: HomeAssistant, mock_entry
+):
+    """solar2 recovers in the same cycle as solar goes silent: the streak restarts for
+    solar, and the warning naming solar2 must not stay up until solar's streak is due."""
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=3,
+        fingerprint=_TWO_SOLAR_FP)
+    issue_id = f"statistics_missing_{mock_entry.entry_id}"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              return_value=NOW + timedelta(days=2)),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=lambda h, ids, start, end, period:
+              _energy_stats(start, end, empty=("sensor.solar",))),
+    ):
+        await coordinator._async_update_data()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+    assert coordinator._state["silent_sensor_cycles"] == {"sensor.solar": 1}
+
+
+@pytest.mark.asyncio
+async def test_short_window_does_not_count_silent_sensors(hass: HomeAssistant, mock_entry):
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=3,
+        bookmark_age=timedelta(minutes=2), advance=timedelta(0),
+        fingerprint=_TWO_SOLAR_FP)
+    assert coordinator._state.get("silent_sensor_cycles") is None
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_measured_only_before_the_window_is_silent(
+    hass: HomeAssistant, mock_entry
+):
+    """Every read starts one period early. A row in that period says nothing about the
+    window itself, so a sensor whose only row lies there is silent in the window."""
+    from custom_components.wolta.coordinator import _Source, aggregate_5min_to_15min
+
+    _two_solar_entry(hass, mock_entry)
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    start, end = NOW - timedelta(hours=6), NOW
+    early = start - timedelta(minutes=5)
+    raw = _energy_stats(early, end)
+    raw["sensor.solar2"] = [{"start": early.timestamp(), "change": 0.1}]
+    built = coordinator._build_streams(_Source(raw, aggregate_5min_to_15min, start, end))
+    assert built.silent == {"sensor.solar2"}
+
+
+@pytest.mark.asyncio
+async def test_coverage_fill_keeps_the_regular_reads_completeness(
+    hass: HomeAssistant, mock_entry
+):
+    """The diagnostics' completeness describes the regular read. A coverage fill in the
+    same cycle reads older history and must not overwrite those figures."""
+    bookmark = NOW - timedelta(hours=6)
+    client = _mock_client()
+    client.get_profile = AsyncMock(
+        return_value={**BASE_PROFILE, "data_since": bookmark.isoformat()})
+    client.put_data = AsyncMock(return_value={"data_since": bookmark.isoformat()})
+    hole = (NOW - timedelta(hours=2), NOW - timedelta(hours=2) + timedelta(minutes=10))
+    fill_reads: list = []
+
+    async def fetch(h, ids, start, end, period):
+        if end > bookmark:  # the regular incremental read
+            return _stats_with_hole(start, end, sensor="sensor.grid_in", hole=hole)
+        fill_reads.append((start, end, period))  # the coverage fill, before the bookmark
+        return _full_stats(start, end, period)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    assert fill_reads, "the cycle must run a coverage fill for this test to mean anything"
+    assert client.put_data.await_count >= 2
+    assert coordinator._last_completeness == {
+        "incomplete_quarters": 1, "entities": ["sensor.grid_in"]}
 
 
 # ---------------------------------------------------------------------------

@@ -115,3 +115,30 @@ def test_soc_missing_repair_says_it_does_not_change_the_grade(lang: str, needle:
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
     text = data["issues"]["soc_missing"]["fix_flow"]["step"]["init"]["description"]
     assert needle in text, text
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_statistics_missing_names_the_sensors(path: Path) -> None:
+    """The repair's only placeholder is {entities}; a text without it would hide which
+    sensor went silent - the one thing the owner needs to act on."""
+    issue = _load(path)["issues"]["statistics_missing"]
+    assert "{entities}" in issue["description"]
+    assert "{" not in issue["title"]
+
+
+@pytest.mark.parametrize("path, needle", [
+    (_STRINGS, "Wolta only sends quarters in which every selected sensor has a value"),
+    (_TRANSLATIONS / "en.json",
+     "Wolta only sends quarters in which every selected sensor has a value"),
+    (_TRANSLATIONS / "sv.json",
+     "Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde"),
+], ids=lambda v: v.name if isinstance(v, Path) else "")
+def test_energy_empty_no_longer_promises_a_grade_without_the_stream(
+    path: Path, needle: str
+) -> None:
+    """With complete quarters an empty stream stops the whole upload; the old text said
+    the grade was computed without that stream, which is no longer true."""
+    text = _load(path)["issues"]["energy_stream_no_statistics"]["description"]
+    assert needle in text
+    assert "without that stream" not in text
+    assert "utan den strömmen" not in text

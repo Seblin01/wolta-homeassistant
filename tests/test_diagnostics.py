@@ -49,6 +49,33 @@ async def test_diagnostics_survives_missing_coordinator(hass: HomeAssistant):
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["entry_data"][CONF_TOKEN] == "**REDACTED**"
     assert diag["results"] is None
+    assert diag["completeness"] is None
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_show_completeness_of_the_latest_read(hass: HomeAssistant):
+    """How many quarters the latest read dropped as incomplete, and the sensors that
+    caused it most - the first thing to look at when uploads stall."""
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: "super-secret", CONF_ZONE: "SE3"}
+    coordinator = MagicMock()
+    coordinator._state = {}
+    coordinator._last_completeness = {
+        "incomplete_quarters": 4, "entities": ["sensor.grid_in"]}
+    coordinator.last_update_success = True
+    coordinator.data = MagicMock(results={"status": "done"})
+    entry.runtime_data = coordinator
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    completeness = diag["completeness"]
+    assert isinstance(completeness["incomplete_quarters"], int)
+    assert isinstance(completeness["entities"], list)
+    assert completeness == {"incomplete_quarters": 4, "entities": ["sensor.grid_in"]}
+    # A copy: the dump must not alias the coordinator's live dict.
+    assert completeness is not coordinator._last_completeness
 
 
 @pytest.mark.asyncio
