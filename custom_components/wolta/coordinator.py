@@ -126,6 +126,15 @@ _ISSUE_BATTERY_NEEDS_INPUT = "battery_needs_input"
 # source_missing/unclear), so a changed cause re-renders the same issue.
 _ISSUE_ENERGY_BALANCE = "energy_balance"
 _ENERGY_BALANCE_CAUSES = ("solar_low", "import_low", "source_missing", "unclear")
+# Laddning och urladdning omkastade enligt batteriets laddningsnivå. Servern avgör
+# (battery_direction.state == "reversed", tre-dygnsgolvet ligger där) - vi räknar aldrig om något
+# här. Fixbar bara när en vändning av HELA historiken är rätt: formen "all" (laddningsnivån täcker
+# betygsfönstret, allt omkastat) och "partial" (allt som kunnat kontrolleras är omkastat; texten
+# säger att tiden före är okänd). "since"/"ended" har rätt data före eller efter - en vändning av
+# hela historiken hade gjort den delen fel, så de får bara text.
+_ISSUE_BATTERY_DIRECTION = "battery_direction"
+_BATTERY_DIRECTION_FORMS = ("all", "partial", "since", "ended")
+_BATTERY_DIRECTION_FIXABLE = ("all", "partial")
 # Fallback for the server's detect_min_days when the profile doesn't carry it (older
 # backend). Shared by WoltaData's default and the profile read so the sensor never
 # reports a different minimum than the evaluation assumed.
@@ -1445,11 +1454,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Before the preliminary return below: unlike the adopt nudges this is not a
         # measurement that needs a mature window - the backend's floor (a full battery charge
         # of impossible energy) already keeps short windows from firing it.
+        self._evaluate_battery_direction_issue(betyg)
         self._evaluate_energy_balance_issue(betyg)
         # Preliminärt betyg (backend api 0.43.0): < 30 dygns data. Mätningen av kapacitet/
         # effekt/verkningsgrad är då systematiskt UNDERSKATTAD (batteriet har inte hunnit
         # visa hela sitt fönster) → adopt-förslagen vore falska. Vänta tills betyget mognar.
         if betyg.get("preliminary"):
+            return
+        if self._direction_reversed(betyg):
+            # Adopt-förslagen är rekonstruerade ur samma felvända flöden.
+            for key in (_ISSUE_CAPACITY, _ISSUE_POWER, _ISSUE_EFFICIENCY):
+                ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.config_entry.entry_id}")
             return
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
@@ -1480,6 +1495,48 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _ISSUE_SOC_MISSING, fire=fire, translation_key=_ISSUE_SOC_MISSING,
             placeholders={}, data={})
 
+    @staticmethod
+    def _direction_reversed(betyg: dict) -> bool:
+        block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
+        return isinstance(block, dict) and block.get("state") == "reversed"
+
+    def _evaluate_battery_direction_issue(self, betyg: dict) -> None:
+        """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixbar för all/partial
+        (vänd riktningen, historiken skickas om), annars bara text. Saknas blocket (äldre
+        backend) eller är state något annat än "reversed" tas issuen bort.
+
+        Aldrig i visningsläget: där mappar Woltas koppling fälten, inte de här sensorerna."""
+        issue_id = f"{_ISSUE_BATTERY_DIRECTION}_{self.config_entry.entry_id}"
+        block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
+        form = block.get("form") if isinstance(block, dict) else None
+        if (not self._direction_reversed(betyg) or self._view_only
+                or form not in _BATTERY_DIRECTION_FORMS):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+
+        def _names(stream: str) -> str:
+            # Sensorerna som de är valda (inte _effective_stream): texten ska namnge det
+            # användaren ser under Konfigurera.
+            return ", ".join(self._entity_map[stream]) or "-"
+
+        ir.async_create_issue(
+            self.hass, DOMAIN, issue_id,
+            is_fixable=form in _BATTERY_DIRECTION_FIXABLE,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=f"{_ISSUE_BATTERY_DIRECTION}_{form}",
+            translation_placeholders={
+                "reversed_days": str(block.get("reversed_days") or 0),
+                "first_checked": block.get("first_checked") or "-",
+                "first_reversed": block.get("first_reversed") or "-",
+                "last_reversed": block.get("last_reversed") or "-",
+                "since": block.get("since") or "-",
+                "batt_in": _names("batt_in"),
+                "batt_out": _names("batt_out"),
+                "invert_state": "on" if self.config_entry.data.get(CONF_INVERT_BATTERY) else "off",
+            },
+            data={"entry_id": self.config_entry.entry_id, "form": form},
+        )
+
     def _evaluate_energy_balance_issue(self, betyg: dict) -> None:
         """Non-fixable repair when the backend has excluded the grade because the household
         energy balance does not add up. The fix is a different sensor under Reconfigure, so
@@ -1487,12 +1544,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         Never in view-only mode: there the data comes from a webhook/bridge, not these HA
         sensors, so advice about the sensor mapping would reach the wrong person. A missing
-        block or a missing `excluded` (older backend) clears rather than guesses."""
+        block or a missing `excluded` (older backend) clears rather than guesses. A reversed
+        battery direction replaces this repair: its cause text rests on the same flows."""
         eb = betyg.get("energy_balance") if isinstance(betyg, dict) else None
         eb = eb if isinstance(eb, dict) else {}
         cause = eb.get("cause") if eb.get("cause") in _ENERGY_BALANCE_CAUSES else "unclear"
         issue_id = f"{_ISSUE_ENERGY_BALANCE}_{self.config_entry.entry_id}"
-        if eb.get("excluded") is True and not self._view_only:
+        if (eb.get("excluded") is True and not self._view_only
+                and not self._direction_reversed(betyg)):
             def _names(stream: str) -> str:
                 return ", ".join(self._entity_map[self._effective_stream(stream)]) or "-"
             ir.async_create_issue(

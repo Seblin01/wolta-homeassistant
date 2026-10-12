@@ -3147,6 +3147,108 @@ async def test_energy_balance_issue_absent_block_or_old_backend(hass, mock_entry
 
 
 # ---------------------------------------------------------------------------
+# Omkastade laddfält: servern ser via batteriets laddningsnivå att laddning och urladdning är förväxlade
+# ---------------------------------------------------------------------------
+
+_DIR_ISSUE_ID = "battery_direction_test_entry_id"
+
+
+def _dir_results(form="all", *, state="reversed", preliminary=False, eb_excluded=False):
+    return {"betyg": {
+        "preliminary": preliminary,
+        "battery_direction": {"state": state, "form": form, "checked_days": 120,
+                              "reversed_days": 120, "first_checked": "2025-10-10",
+                              "first_reversed": "2025-10-10", "last_reversed": "2026-10-12",
+                              "since": "2026-09-29" if form == "since" else None},
+        "energy_balance": {"share": 0.4, "impossible_kwh": 500.0, "cause": "solar_low",
+                           "excluded": eb_excluded},
+        # Mogna uppmätta värden som skiljer sig från konfigurerade: adopt-förslagen skulle
+        # annars fyra (se supersede-testet).
+        "observed_capacity": {"kwh": 5.0, "n_days": 90, "plateau_days": 20},
+        "observed_power": {"kw": 2.0, "n_days": 90},
+        "observed_eff": {"eff": 0.7, "n_days": 90},
+    }}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form,fixable", [("all", True), ("partial", True),
+                                          ("since", False), ("ended", False)])
+async def test_direction_issue_per_form(hass, mock_entry, form, fixable):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results(form))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == f"battery_direction_{form}"
+    assert issue.is_fixable is fixable
+    assert issue.data["form"] == form
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_placeholders(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("since"))
+    p = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID).translation_placeholders
+    assert p["reversed_days"] == "120" and p["since"] == "2026-09-29"
+    assert p["first_checked"] == "2025-10-10" and p["last_reversed"] == "2026-10-12"
+    assert p["batt_in"] == "sensor.batt_in" and p["batt_out"] == "sensor.batt_out"
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_clears_and_ignores_other_states(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+    for st in ("ok", "verified", "unknown"):
+        c._evaluate_measured_params(_dir_results("all", state=st))
+        assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None, st
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_fires_when_preliminary_but_never_in_view_only(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all", preliminary=True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+    c._view_only = True
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_direction_supersedes_energy_balance_and_adopt_repairs(hass, mock_entry):
+    """Omkastad riktning: energibalansens orsakstext och adopt-förslagen bygger på felvända
+    flöden. De tas bort i samma utvärdering, även om de var öppna."""
+    keys = ("measured_capacity", "measured_power", "measured_efficiency")
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0, _CBKW: 5.0, _CEFF: 0.9})
+    reg = ir.async_get(hass)
+    # Utan omkastning fyrar adopt-förslagen och energibalansen (annars bevisar testet inget).
+    c._evaluate_measured_params(_dir_results("all", state="ok", eb_excluded=True))
+    assert reg.async_get_issue(DOMAIN, _EB_ISSUE_ID) is not None
+    for key in keys:
+        assert reg.async_get_issue(DOMAIN, f"{key}_test_entry_id") is not None, key
+    c._evaluate_measured_params(_dir_results("all", eb_excluded=True))
+    assert reg.async_get_issue(DOMAIN, _EB_ISSUE_ID) is None
+    for key in keys:
+        assert reg.async_get_issue(DOMAIN, f"{key}_test_entry_id") is None, key
+    assert reg.async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_is_per_entry_and_healthy_entry_leaves_other_alone(hass, mock_entry):
+    """Issue-id bär entry-id: en frisk entry raderar bara sitt eget id."""
+    c = await _cap_coordinator(hass, mock_entry)
+    ir.async_create_issue(hass, DOMAIN, "battery_direction_other_entry", is_fixable=False,
+                          severity=ir.IssueSeverity.WARNING,
+                          translation_key="battery_direction_since",
+                          translation_placeholders={})
+    c._evaluate_measured_params(_dir_results("all", state="ok"))
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, "battery_direction_other_entry") is not None
+    assert reg.async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
 # SoC upload (spec 2026-10-03): optional state-of-charge sensors are read from
 # the recorder's mean/min/max statistics and sent with the flow rows as
 # battery_state (+ battery_sources). Three things matter:
