@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -156,6 +157,19 @@ def _make_short_row(unix_ts: float, change: float) -> dict:
     return {"start": unix_ts, "change": change}
 
 
+@contextmanager
+def _patch_aggregator(name: str, **kwargs):
+    """Patch a coordinator aggregation function and register the mock's statistics
+    period: _build_streams looks the period up by function identity (_PERIOD_S), so a
+    replaced function must carry the period of the one it replaces."""
+    from custom_components.wolta import coordinator as coord
+
+    period = coord._PERIOD_S[getattr(coord, name)]
+    with patch(f"custom_components.wolta.coordinator.{name}", **kwargs) as mock:
+        with patch.dict(coord._PERIOD_S, {mock: period}):
+            yield mock
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -245,8 +259,8 @@ async def test_first_run_uses_backfill_path(hass: HomeAssistant, mock_entry):
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
-        patch("custom_components.wolta.coordinator.split_hour_to_quarters") as mock_lts,
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min") as mock_5min,
+        _patch_aggregator("split_hour_to_quarters") as mock_lts,
+        _patch_aggregator("aggregate_5min_to_15min") as mock_5min,
         patch("custom_components.wolta.coordinator.merge_streams") as mock_merge,
     ):
         # Setup mock_lts/mock_5min/mock_merge to produce something
@@ -304,8 +318,8 @@ async def test_incremental_run_since_bookmark(hass: HomeAssistant, mock_entry):
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
-        patch("custom_components.wolta.coordinator.split_hour_to_quarters") as mock_lts,
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min") as mock_5min,
+        _patch_aggregator("split_hour_to_quarters") as mock_lts,
+        _patch_aggregator("aggregate_5min_to_15min") as mock_5min,
         patch("custom_components.wolta.coordinator.merge_streams") as mock_merge,
     ):
         mock_lts.return_value = {}
@@ -343,7 +357,7 @@ async def test_recompute_triggered_after_7_new_days(hass: HomeAssistant, mock_en
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -378,7 +392,7 @@ async def test_recompute_rate_limit_swallowed(hass: HomeAssistant, mock_entry):
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -411,7 +425,7 @@ async def test_auth_error_raises_config_entry_auth_failed(hass: HomeAssistant, m
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams",
               return_value=_make_rows(NOW - timedelta(hours=2))),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -440,7 +454,7 @@ async def test_network_error_update_failed_bookmark_unchanged(hass: HomeAssistan
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams",
               return_value=_make_rows(NOW - timedelta(hours=2))),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -471,7 +485,7 @@ async def test_rate_limit_on_put_sets_retry_after(hass: HomeAssistant, mock_entr
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams",
               return_value=_make_rows(NOW - timedelta(hours=2))),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -503,7 +517,7 @@ async def test_timeout_error_update_failed_bookmark_unchanged(hass: HomeAssistan
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams",
               return_value=_make_rows(NOW - timedelta(hours=2))),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -531,7 +545,7 @@ async def test_pending_flag_set_when_status_running(hass: HomeAssistant, mock_en
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -560,7 +574,7 @@ async def test_pending_flag_tracks_job_status_when_status_done(hass: HomeAssista
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -584,7 +598,7 @@ async def test_pending_flag_false_when_job_settled(hass: HomeAssistant, mock_ent
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -611,7 +625,7 @@ async def test_wolta_data_structure(hass: HomeAssistant, mock_entry):
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -663,7 +677,7 @@ async def test_heal_path_used_when_bookmark_older_than_9_days(hass: HomeAssistan
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
-        patch("custom_components.wolta.coordinator.split_hour_to_quarters") as mock_lts,
+        _patch_aggregator("split_hour_to_quarters") as mock_lts,
         patch("custom_components.wolta.coordinator.merge_streams") as mock_merge,
     ):
         mock_lts.return_value = {}
@@ -749,15 +763,22 @@ async def test_two_solar_sensors_summed(hass: HomeAssistant, mock_entry):
     }
     mock_entry.data = two_solar_entry_data
 
-    # async_fetch_change returns two solar entity IDs with different values
-    short_stats = {
-        "sensor.batt_in": [{"start": 1700000000.0, "change": 0.1}],
-        "sensor.batt_out": [{"start": 1700000000.0, "change": 0.0}],
-        "sensor.grid_in": [{"start": 1700000000.0, "change": 0.0}],
-        "sensor.grid_out": [{"start": 1700000000.0, "change": 0.0}],
-        "sensor.solar_a": [{"start": 1700000000.0, "change": 1.0}],
-        "sensor.solar_b": [{"start": 1700000000.0, "change": 2.0}],
+    # async_fetch_change returns two solar entity IDs with different values. Every
+    # sensor is measured over the whole read (from the start the mock receives), so
+    # every quarter in the window is complete and uploaded.
+    per_period = {
+        "sensor.batt_in": 0.1,
+        "sensor.batt_out": 0.0,
+        "sensor.grid_in": 0.0,
+        "sensor.grid_out": 0.0,
+        "sensor.solar_a": 1.0,
+        "sensor.solar_b": 2.0,
     }
+
+    def short_stats(h, ids, start, end, period):
+        starts = range(int(start.timestamp()), int(end.timestamp()), 300)
+        return {sid: [{"start": float(t), "change": v} for t in starts]
+                for sid, v in per_period.items()}
 
     client = _mock_client()
 
@@ -775,7 +796,7 @@ async def test_two_solar_sensors_summed(hass: HomeAssistant, mock_entry):
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch(
             "custom_components.wolta.coordinator.async_fetch_change",
-            return_value=short_stats,
+            side_effect=short_stats,
         ),
     ):
         coordinator = await _make_coordinator(
@@ -784,14 +805,13 @@ async def test_two_solar_sensors_summed(hass: HomeAssistant, mock_entry):
         )
         await coordinator._async_update_data()
 
-    # Find the row for bucket at 1700000000 floored to 900s
-    from datetime import timezone as tz
-    bucket = datetime.fromtimestamp(1700000000 - (1700000000 % 900), tz=tz.utc)
+    bucket = NOW - timedelta(hours=1)
     matching = [r for r in captured_rows if r["ts"] == bucket.isoformat()]
     assert len(matching) == 1, "Expected one row for the bucket"
-    # solar_kwh must be the sum: 1.0 + 2.0 = 3.0
-    assert matching[0]["solar_kwh"] == pytest.approx(3.0), (
-        f"solar_kwh should be 3.0 (sum of both inverters), got {matching[0]['solar_kwh']}"
+    # solar_kwh must be the sum over both inverters and the quarter's three periods:
+    # 3 x (1.0 + 2.0) = 9.0
+    assert matching[0]["solar_kwh"] == pytest.approx(9.0), (
+        f"solar_kwh should be 9.0 (sum of both inverters), got {matching[0]['solar_kwh']}"
     )
 
 
@@ -858,7 +878,7 @@ async def test_update_interval_fast_while_pending_slow_when_done(hass: HomeAssis
             patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
             patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
             patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-            patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
+            _patch_aggregator("aggregate_5min_to_15min", return_value={}),
         ):
             coordinator = await _make_coordinator(hass, mock_entry, client, store_state=dict(store))
             await coordinator._async_update_data()
@@ -973,8 +993,8 @@ async def test_invert_change_forces_recompute_despite_recent_last_recompute(
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
-        patch("custom_components.wolta.coordinator.split_hour_to_quarters", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("split_hour_to_quarters", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -1004,8 +1024,8 @@ async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, moc
         patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
         patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
         patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        patch("custom_components.wolta.coordinator.aggregate_5min_to_15min", return_value={}),
-        patch("custom_components.wolta.coordinator.split_hour_to_quarters", return_value={}),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
+        _patch_aggregator("split_hour_to_quarters", return_value={}),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -1846,24 +1866,19 @@ _FLAGGED_QUARTERS = {_SESSION_HOUR, _SESSION_HOUR + timedelta(minutes=15)}
 _EMPTY_BATT_STATS = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                                      "sensor.grid_out", "sensor.solar")}
 
-# Compiled BATTERY statistics covering the flex session's own quarters. The flag alone
-# never makes a row: merge_streams emits exactly the quarters the battery streams carry
-# and the flag only marks them. change=0.0 is the realistic shape of forced idle - the
-# battery is held still but the sensor is still recorded, so the recorder compiles a
-# row and the quarter is a key - which is why forced idle needs no special case.
-# Two rows so the 5-minute path (incremental) covers both flagged quarters; the hourly
-# path (backfill/heal) spreads either row across all four quarters of the hour anyway.
-_SESSION_BATT_STATS = {
-    **_EMPTY_BATT_STATS,
-    "sensor.batt_in": [
-        {"start": _SESSION_HOUR.timestamp(), "change": 0.0},
-        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.0},
-    ],
-    "sensor.grid_in": [
-        {"start": _SESSION_HOUR.timestamp(), "change": 0.3},
-        {"start": (_SESSION_HOUR + timedelta(minutes=15)).timestamp(), "change": 0.4},
-    ],
-}
+def _full_stats(start, end, period, values: dict[str, float] | None = None) -> dict:
+    """Recorder-shaped rows for every stream sensor over the whole read [start, end):
+    every selected sensor is measured in every period, so every quarter in the window
+    is complete. ``values`` overrides the per-period change per sensor (default 0.1).
+    Rows follow the ``start`` the mock receives, so the period before the window - which
+    every read now includes - is there too."""
+    step = 3600 if period == "hour" else 300
+    first = -(-int(start.timestamp()) // step) * step
+    changes = {sid: 0.1 for sid in _EMPTY_BATT_STATS}
+    changes.update(values or {})
+    return {sid: [{"start": float(t), "change": v}
+                  for t in range(first, int(end.timestamp()), step)]
+            for sid, v in changes.items()}
 
 
 async def _run_fetch_mode(coordinator, mode: str):
@@ -1961,10 +1976,20 @@ async def test_fetch_modes_flag_external_control_quarters(
     coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
 
     fetch_states = AsyncMock(return_value=_SESSION_POINTS)
+
+    # Every selected sensor measured over the whole read: a quarter is only uploaded
+    # when all of them are. The flag alone never makes a row - it only marks quarters
+    # the battery streams carry. change=0.0 is the realistic shape of forced idle: the
+    # battery is held still but the sensor is still recorded, so the recorder compiles
+    # a row and the quarter is a key - which is why forced idle needs no special case.
+    async def mock_fetch(h, ids, start, end, period):
+        return _full_stats(start, end, period,
+                           {"sensor.batt_in": 0.0, "sensor.batt_out": 0.0})
+
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
         patch("custom_components.wolta.coordinator.async_fetch_change",
-              return_value=dict(_SESSION_BATT_STATS)),
+              side_effect=mock_fetch),
         patch("custom_components.wolta.stats.async_fetch_states", fetch_states),
     ):
         rows = await _run_fetch_mode(coordinator, mode)
@@ -1993,7 +2018,9 @@ async def test_heal_emits_only_quarters_with_compiled_statistics(
     The integration has been down for two weeks; the flex sensor's last recorded
     state is a stale 'on', which async_fetch_states hands back with its ORIGINAL
     last_changed, so the flag is held across the entire 14-day window. Hourly LTS
-    exists for exactly one hour (10:00, i.e. quarters 10:00-10:45).
+    exists for exactly two hours, 09:00 and 10:00, for every selected sensor. 09:00 is
+    the period before 10:00 (a quarter is complete only when the period before it was
+    measured too), so only 10:00's quarters (10:00-10:45) are complete.
 
     Only those four quarters may be emitted. Everything else - the two weeks below
     them AND the 11:00-11:45 quarters above them - would upload real
@@ -2017,9 +2044,14 @@ async def test_heal_emits_only_quarters_with_compiled_statistics(
         (compiled_hour + timedelta(minutes=m)).isoformat() for m in (0, 15, 30, 45)
     ]
     lts = {
-        **_EMPTY_BATT_STATS,
-        "sensor.batt_in": [{"start": compiled_hour.timestamp(), "change": 1.2}],
+        sid: [{"start": (compiled_hour - timedelta(hours=1)).timestamp(), "change": 0.0},
+              {"start": compiled_hour.timestamp(), "change": 0.0}]
+        for sid in _EMPTY_BATT_STATS
     }
+    lts["sensor.batt_in"] = [
+        {"start": (compiled_hour - timedelta(hours=1)).timestamp(), "change": 0.8},
+        {"start": compiled_hour.timestamp(), "change": 1.2},
+    ]
     # One stale 'on' row, held forward across the whole window by flagged_quarters.
     points = [(start, "on")]
 
@@ -2058,12 +2090,10 @@ async def test_fetch_modes_skip_recorder_when_no_entity_selected(
     coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
     assert coordinator._external_entity is None
 
-    battery_ts = {"hour": NOW - timedelta(days=10), "5minute": NOW - timedelta(minutes=30)}
-
+    # Every selected sensor measured over the whole read: a quarter is only uploaded
+    # when all of them are.
     async def mock_fetch(h, ids, start, end, period):
-        row = {"start": battery_ts[period].timestamp(), "change": 0.4}
-        return {"sensor.batt_in": [row], "sensor.batt_out": [], "sensor.grid_in": [],
-                "sensor.grid_out": [], "sensor.solar": []}
+        return _full_stats(start, end, period, {"sensor.batt_in": 0.4})
 
     fetch_states = AsyncMock(side_effect=AssertionError("must not query recorder states"))
     with (
@@ -2915,6 +2945,127 @@ async def test_unconfigured_stream_is_not_flagged(hass: HomeAssistant, mock_entr
     )
     assert ir.async_get(hass).async_get_issue(
         DOMAIN, coordinator._energy_issue_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Complete quarters: every selected sensor measured, no catch-up after a gap
+# ---------------------------------------------------------------------------
+
+
+def _stats_with_hole(start, end, *, sensor: str, hole: tuple[datetime, datetime]) -> dict:
+    """Like _energy_stats, but ``sensor`` has no rows in [hole[0], hole[1])."""
+    data = _energy_stats(start, end)
+    data[sensor] = [r for r in data[sensor]
+                    if not (hole[0].timestamp() <= r["start"] < hole[1].timestamp())]
+    return data
+
+
+@pytest.mark.asyncio
+async def test_quarter_with_a_missing_grid_period_and_the_catch_up_are_not_sent(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    hole = (NOW - timedelta(hours=2), NOW - timedelta(hours=2) + timedelta(minutes=10))
+
+    async def fetch(h, ids, start, end, period):
+        return _stats_with_hole(start, end, sensor="sensor.grid_in", hole=hole)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = {r["ts"] for call in client.put_data.call_args_list for r in call.args[1]}
+    q = NOW - timedelta(hours=2)
+    assert q.isoformat() not in sent                                   # hole inside
+    assert (q + timedelta(minutes=15)).isoformat() in sent             # catch-up is 10:10, inside q
+    assert (q - timedelta(minutes=15)).isoformat() in sent
+
+
+@pytest.mark.asyncio
+async def test_catch_up_in_the_next_quarter_is_not_sent(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    q = NOW - timedelta(hours=2)
+    hole = (q, q + timedelta(minutes=15))                              # whole quarter q
+
+    async def fetch(h, ids, start, end, period):
+        return _stats_with_hole(start, end, sensor="sensor.solar", hole=hole)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = {r["ts"] for call in client.put_data.call_args_list for r in call.args[1]}
+    assert q.isoformat() not in sent
+    assert (q + timedelta(minutes=15)).isoformat() not in sent         # carries the catch-up
+    assert (q + timedelta(minutes=30)).isoformat() in sent
+
+
+@pytest.mark.asyncio
+async def test_fetch_starts_one_period_early_and_the_first_quarter_is_judged(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    starts = []
+
+    async def fetch(h, ids, start, end, period):
+        starts.append((period, start))
+        return _energy_stats(start, end)
+
+    bookmark = NOW - timedelta(hours=6)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    assert ("5minute", bookmark - timedelta(minutes=5)) in starts
+    sent = sorted(r["ts"] for call in client.put_data.call_args_list for r in call.args[1])
+    assert sent[0] == bookmark.isoformat()                             # not the early period
+
+
+@pytest.mark.asyncio
+async def test_inverted_battery_judges_the_same_sensors(hass: HomeAssistant, mock_entry):
+    """Flipping the direction swaps which sensor feeds which stream, never which
+    sensors must be measured."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    from custom_components.wolta.const import CONF_INVERT_BATTERY
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+
+    async def fetch(h, ids, start, end, period):
+        return _energy_stats(start, end)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": True, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = [r for call in client.put_data.call_args_list for r in call.args[1]]
+    assert len(sent) >= 6 * 4 - 1                                     # nothing lost to the flip
 
 
 # ---------------------------------------------------------------------------

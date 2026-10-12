@@ -144,7 +144,8 @@ async def test_gap_rows_old_gap_reads_hourly_only(hass, entry):
     c = await _coordinator(hass, entry, _client(), _state())
     with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
         await c._gap_rows(gap, NOW)
-    assert calls == [("hour", gap.start, gap.end)]
+    # Every read starts one period early so the window's first period can be judged.
+    assert calls == [("hour", gap.start - timedelta(hours=1), gap.end)]
 
 
 @pytest.mark.asyncio
@@ -155,7 +156,8 @@ async def test_gap_rows_spanning_short_term_reads_both_resolutions(hass, entry):
     c = await _coordinator(hass, entry, _client(), _state())
     with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
         await c._gap_rows(gap, NOW)
-    assert calls == [("hour", gap.start, short_start), ("5minute", short_start, gap.end)]
+    assert calls == [("hour", gap.start - timedelta(hours=1), short_start),
+                     ("5minute", short_start - timedelta(minutes=5), gap.end)]
 
 
 @pytest.mark.asyncio
@@ -165,7 +167,7 @@ async def test_gap_rows_recent_gap_reads_5min_only(hass, entry):
     c = await _coordinator(hass, entry, _client(), _state())
     with patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch):
         await c._gap_rows(gap, NOW)
-    assert calls == [("5minute", gap.start, gap.end)]
+    assert calls == [("5minute", gap.start - timedelta(minutes=5), gap.end)]
 
 
 @pytest.mark.asyncio

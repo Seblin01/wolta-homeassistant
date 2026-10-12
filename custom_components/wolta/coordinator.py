@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -72,6 +73,8 @@ from .stats import (
     async_fetch_change,
     async_fetch_measurement,
     battery_state_rows,
+    clean_quarters,
+    measured_starts,
     merge_streams,
     soc_unit_ok,
     soc_from_hourly,
@@ -81,6 +84,31 @@ from .stats import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Statistics period per aggregation function, and how far before a window the read
+# starts so the window's first period can be judged against the one before it.
+_PERIOD_S: dict[Callable, int] = {aggregate_5min_to_15min: 300, split_hour_to_quarters: 3600}
+_PERIOD: dict[int, timedelta] = {300: timedelta(minutes=5), 3600: timedelta(hours=1)}
+
+
+@dataclass(frozen=True)
+class _Source:
+    """One statistics read: rows per statistic id, the aggregation that turns them into
+    quarters, and the window [start, end) whose quarters this source decides."""
+    raw: dict
+    agg_fn: Callable
+    start: datetime
+    end: datetime
+
+
+@dataclass(frozen=True)
+class _Built:
+    streams: dict[str, dict]          # merge_streams' keyword arguments
+    complete: set[datetime]           # quarters every selected sensor measured cleanly
+    silent: set[str]                  # selected sensors with no measured period at all
+    incomplete: int                   # quarters with a value somewhere but not complete
+    blame: dict[str, int]             # sensor -> quarters it made incomplete
+
 
 # How far back to backfill on first install
 # Polling rate: slow at rest, fast while a server-side computation is in progress (so the grade
@@ -291,6 +319,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # false all-clear on the exact condition this repair exists to report.
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
+        # Completeness of the latest read (quarters dropped as incomplete and the sensors
+        # that caused it most), for the diagnostics.
+        self._last_completeness: dict = {"incomplete_quarters": 0, "entities": []}
         # Serverns batteristämpel, senast lästa (spec 2026-09-14 §4). Ägs av profil-GET:en
         # i båda pollarna - se _take_battery_state.
         self._battery_status: str | None = None
@@ -708,23 +739,63 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         ]
         return sum_quarter_dicts(per_entity)
 
-    def _build_streams(self, *sources) -> dict[str, dict]:
-        """Build all five per-quarter stream dicts from (raw_data, agg_fn) sources.
+    def _build_streams(self, *sources: _Source) -> _Built:
+        """Build the five per-quarter streams and decide which quarters are complete.
 
-        Sources are applied in order with dict-merge precedence (later wins on
-        overlapping quarters) - backfill passes LTS first and 5-min second, exactly
-        the precedence the inlined version had. Returning the streams as a mapping
-        keyed by merge_streams' parameter names lets the callers hand them over
-        with ** while _note_stream_emptiness inspects the same dicts - one build,
-        two consumers, no chance of judging different data than what is uploaded.
-        """
+        Values: sources are applied in order with dict-merge precedence (later wins on
+        overlapping quarters) - backfill passes hourly first and 5-minute second.
+        The streams are keyed by merge_streams' parameter names so the callers hand
+        them over with ** while _note_stream_emptiness inspects the same dicts - one
+        build, no chance of judging different data than what is uploaded.
+
+        Completeness: a quarter is complete when EVERY selected sensor measured it
+        cleanly (stats.clean_quarters) in the source whose window holds the quarter.
+        A stream missing the quarter would otherwise be filled with 0.0, a sum over
+        several sensors would be partial, and the first period after a gap carries the
+        whole gap. Windows of the sources never overlap (callers split at
+        short_term_start), so each quarter is judged by exactly one source."""
         streams: dict[str, dict] = {}
         for name in self._entity_map:
             merged: dict = {}
-            for raw_data, agg_fn in sources:
-                merged.update(self._sum_stream(raw_data, name, agg_fn))
+            for src in sources:
+                merged.update(self._sum_stream(src.raw, name, src.agg_fn))
             streams[name] = merged
-        return streams
+
+        sensors = self._statistic_ids()
+        complete: set[datetime] = set()
+        blame = {e: 0 for e in sensors}
+        measured_any = {e: False for e in sensors}
+        candidates: set[datetime] = set()
+        for src in sources:
+            period = _PERIOD_S[src.agg_fn]
+            in_window = lambda q, s=src: s.start <= q < s.end  # noqa: E731
+            clean = {}
+            for e in sensors:
+                rows = src.raw.get(e) or []
+                if measured_starts(rows, period):
+                    measured_any[e] = True
+                clean[e] = {q for q in clean_quarters(rows, period) if in_window(q)}
+            src_candidates = {q for d in streams.values() for q in d if in_window(q)}
+            candidates |= src_candidates
+            if sensors:
+                src_complete = set.intersection(*clean.values())
+            else:
+                src_complete = set()
+            complete |= src_complete
+            for e in sensors:
+                blame[e] += len(src_candidates - clean[e])
+        silent = {e for e, seen in measured_any.items() if not seen}
+        incomplete = len(candidates - complete)
+        self._last_completeness = {
+            "incomplete_quarters": incomplete,
+            "entities": [e for e, n in sorted(blame.items(), key=lambda kv: -kv[1])
+                         if n > 0][:3],
+        }
+        return _Built(streams, complete, silent, incomplete, blame)
+
+    async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
+        """Filled in by the statistics_missing repair (next change)."""
+        return
 
     async def _note_stream_emptiness(
         self, streams: dict[str, dict], window: timedelta
@@ -1119,31 +1190,33 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         external = await self._external_quarters(start, now)
 
-        # Fetch hourly LTS for the long window (start → short_term_start)
+        # Fetch hourly LTS for the long window (start → short_term_start), one period
+        # early so the window's first hour can be judged against the one before it
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            start - _PERIOD[3600],
             short_term_start,
             period="hour",
         )
 
-        # Fetch 5-min short-term for the recent window
+        # Fetch 5-min short-term for the recent window, also one period early
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            short_term_start,
+            short_term_start - _PERIOD[300],
             now,
             period="5minute",
         )
 
         # Aggregate and sum per stream (short-term takes precedence on overlap via dict merge)
-        streams = self._build_streams(
-            (lts_data, split_hour_to_quarters),
-            (short_data, aggregate_5min_to_15min),
+        built = self._build_streams(
+            _Source(lts_data, split_hour_to_quarters, start, short_term_start),
+            _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
         )
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        await self._note_stream_emptiness(built.streams, window=now - start)
+        await self._note_silent_sensors(built, window=now - start)
+        return merge_streams(**built.streams, external=external, complete=built.complete)
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
@@ -1151,13 +1224,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            start - _PERIOD[3600],
             now,
             period="hour",
         )
-        streams = self._build_streams((lts_data, split_hour_to_quarters))
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        built = self._build_streams(_Source(lts_data, split_hour_to_quarters, start, now))
+        await self._note_stream_emptiness(built.streams, window=now - start)
+        await self._note_silent_sensors(built, window=now - start)
+        return merge_streams(**built.streams, external=external, complete=built.complete)
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
@@ -1165,13 +1239,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            start - _PERIOD[300],
             now,
             period="5minute",
         )
-        streams = self._build_streams((short_data, aggregate_5min_to_15min))
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        built = self._build_streams(
+            _Source(short_data, aggregate_5min_to_15min, start, now))
+        await self._note_stream_emptiness(built.streams, window=now - start)
+        await self._note_silent_sensors(built, window=now - start)
+        return merge_streams(**built.streams, external=external, complete=built.complete)
 
     async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:
         """Flow rows for a coverage gap [gap.start, gap.end) – the history the server lacks
@@ -1187,19 +1263,24 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         broken sensor nor clear a genuine streak."""
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
         external = await self._external_quarters(gap.start, gap.end)
-        sources = []
+        sources: list[_Source] = []
         lts_end = min(gap.end, short_term_start)
         if lts_end > gap.start:
             lts_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), gap.start, lts_end, period="hour")
-            sources.append((lts_data, split_hour_to_quarters))
+                self.hass, self._statistic_ids(), gap.start - _PERIOD[3600], lts_end,
+                period="hour")
+            sources.append(_Source(lts_data, split_hour_to_quarters, gap.start, lts_end))
         five_start = max(gap.start, short_term_start)
         if gap.end > five_start:
             short_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), five_start, gap.end, period="5minute")
-            sources.append((short_data, aggregate_5min_to_15min))
-        streams = self._build_streams(*sources)
-        return coverage.within(merge_streams(**streams, external=external), gap.end)
+                self.hass, self._statistic_ids(), five_start - _PERIOD[300], gap.end,
+                period="5minute")
+            sources.append(
+                _Source(short_data, aggregate_5min_to_15min, five_start, gap.end))
+        built = self._build_streams(*sources)
+        return coverage.within(
+            merge_streams(**built.streams, external=external, complete=built.complete),
+            gap.end)
 
     async def _remember_coverage(self, token_fp: str, since: datetime | None) -> None:
         """Persist the coverage memo – only on change (one Store write per actual change,
