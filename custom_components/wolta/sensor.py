@@ -155,10 +155,6 @@ def _measured_battery_value(results: dict) -> float | None:
     betyg = results.get("betyg") or {}
     direction = betyg.get("battery_direction")
     if isinstance(direction, dict) and direction.get("state") == "reversed":
-        # Reversed fields according to the server: the value is measured in the wrong
-        # direction. Without a measurement _battery_value falls back to the decision path's
-        # modelled value - the same figure the economics then count on (F11: the sensor and
-        # the economics anchor say the same thing).
         return None
     holistic = betyg.get("holistic") or {}
     annual = betyg.get("annual")
