@@ -1223,3 +1223,17 @@ def test_optimeringsbetyg_omits_flex_compensation_when_absent():
     # native_value/available must also not raise for this same payload
     assert s.native_value is not None
     assert s.available is True
+
+
+def test_battery_value_ignores_reversed_measurement():
+    """Omkastade laddfält (backend spec 2026-10-12): det uppmätta värdet är mätt åt fel håll.
+    Sensorn faller till beslutsvägens modellerade värde - samma tal som ekonomin då räknar med."""
+    from custom_components.wolta.sensor import _battery_value, _measured_battery_value
+    results = {"betyg": {"holistic": {"score_on": 0.4, "measured_period_sek": 1000.0},
+                         "annual": {"factor": 2.0},
+                         "battery_direction": {"state": "reversed", "form": "all"}},
+               "decision": {"avg_battery_sek": 1500.0}}
+    assert _measured_battery_value(results) is None
+    assert _battery_value(results) == 1500.0
+    results["betyg"]["battery_direction"]["state"] = "verified"
+    assert _measured_battery_value(results) == 2000.0

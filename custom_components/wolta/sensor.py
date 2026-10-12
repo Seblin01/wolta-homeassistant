@@ -146,8 +146,20 @@ def _measured_battery_value(results: dict) -> float | None:
     NOT send a factor-less dict: versions up to v0.27.0 did `annual["factor"]` as soon as
     the block was truthy, which raises KeyError inside native_value/available and leaves a
     dead sensor until the user updates. Keep this check anyway so a future payload change
-    degrades to "no value" instead of throwing."""
+    degrades to "no value" instead of throwing.
+
+    Reversed charge/discharge fields (backend spec 2026-10-12): when the server reports
+    battery_direction.state == "reversed" the measured value was measured the wrong way
+    round, so this returns None and _battery_value falls back to the modelled decision
+    value - the same figure the economics then use."""
     betyg = results.get("betyg") or {}
+    direction = betyg.get("battery_direction")
+    if isinstance(direction, dict) and direction.get("state") == "reversed":
+        # Reversed fields according to the server: the value is measured in the wrong
+        # direction. Without a measurement _battery_value falls back to the decision path's
+        # modelled value - the same figure the economics then count on (F11: the sensor and
+        # the economics anchor say the same thing).
+        return None
     holistic = betyg.get("holistic") or {}
     annual = betyg.get("annual")
     if not annual or annual.get("factor") is None or holistic.get("score_on") is None:
