@@ -37,6 +37,7 @@ from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_COST_SEK,
     CONF_EFF,
@@ -1503,6 +1504,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         return isinstance(block, dict) and block.get("state") == "reversed"
 
+    def _clear_direction_flags(self) -> None:
+        """The direction is healthy again: forget the flip stamp and the ignore flag. The
+        ignore covers one fault episode, not a standing preference."""
+        data = self.config_entry.data
+        if CONF_DIRECTION_FLIPPED_AT not in data and CONF_DIRECTION_ISSUE_IGNORED not in data:
+            return
+        new_data = {k: v for k, v in data.items()
+                    if k not in (CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+
+    def _direction_flip_pending(self, block: dict) -> bool:
+        """True while the owner's flip is newer than the server's direction data. A missing or
+        unreadable as_of counts as "not recounted yet"."""
+        flipped = self._parse_utc(self.config_entry.data.get(CONF_DIRECTION_FLIPPED_AT))
+        if flipped is None:
+            return False
+        as_of = self._parse_utc(block.get("as_of"))
+        return as_of is None or as_of <= flipped
+
+    @staticmethod
+    def _parse_utc(value):
+        if not isinstance(value, str):
+            return None
+        parsed = dt_util.parse_datetime(value)
+        if parsed is None:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_util.UTC)
+
     def _evaluate_battery_direction_issue(self, betyg: dict) -> None:
         """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixbar för all/partial
         (vänd riktningen, historiken skickas om), annars bara text. Saknas blocket (äldre
@@ -1516,9 +1545,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # since/ended har ingen meny och visas alltid.
         ignored = (form in _BATTERY_DIRECTION_FIXABLE
                    and bool(self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED)))
+        if isinstance(block, dict) and block.get("state") in ("ok", "verified"):
+            self._clear_direction_flags()
         if (not self._direction_reversed(betyg) or self._view_only or ignored
                 or form not in _BATTERY_DIRECTION_FORMS):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        if form in _BATTERY_DIRECTION_FIXABLE and self._direction_flip_pending(block):
+            # Owner flipped the direction and the server has not recounted since: this grade
+            # still describes the old direction. Leave the registry alone - a deleted issue
+            # stays deleted, and nothing is raised to invite a second flip back.
             return
 
         def _names(stream: str) -> str:

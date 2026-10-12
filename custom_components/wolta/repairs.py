@@ -36,11 +36,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
@@ -348,11 +350,17 @@ class BatteryDirectionRepairFlow(RepairsFlow):
         # Flaggans AKTUELLA värde läses här, inte när issuen restes: den kan redan vara på
         # (då slås den av) eller ändrad under Konfigurera.
         current = bool(self._entry.data.get(CONF_INVERT_BATTERY, False))
-        new_data = {**self._entry.data, CONF_INVERT_BATTERY: not current}
+        new_data = {
+            **self._entry.data,
+            CONF_INVERT_BATTERY: not current,
+            CONF_DIRECTION_FLIPPED_AT: dt_util.utcnow().isoformat(),
+        }
         new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-        # Issuen tas bort direkt: nästa utvärdering sker först när servern räknat om, och ett
-        # andra klick innan dess hade vänt tillbaka.
+        # Issuen tas bort direkt, och koordinatorn håller den nere tills serverns riktningsdata
+        # (battery_direction.as_of) är nyare än CONF_DIRECTION_FLIPPED_AT: servern räknar om
+        # riktningsdygnen nattligen, så ett betyg hämtat efter vändningen säger fortfarande
+        # "reversed" och hade annars rest reparationen igen (och ett andra klick vänt tillbaka).
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         await self._entry.runtime_data.async_request_refresh()
         return self.async_create_entry(title="", data={})

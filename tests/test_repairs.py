@@ -718,3 +718,19 @@ async def test_create_fix_flow_dispatches_direction(hass: HomeAssistant):
     form = await flow.async_step_flip()
     assert form["description_placeholders"]["reversed_days"] == "120"
     assert form["description_placeholders"]["batt_in"] == "sensor.a"
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_stamps_flipped_at(hass: HomeAssistant):
+    """Stämpeln håller reparationen nere tills serverns riktningsdata är nyare."""
+    from datetime import datetime, timedelta, timezone
+    from homeassistant.util import dt as dt_util
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry, _c = _direction_entry(False)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    stamp = dt_util.parse_datetime(new_data[CONF_DIRECTION_FLIPPED_AT])
+    assert stamp is not None and stamp.tzinfo is not None
+    assert abs(datetime.now(timezone.utc) - stamp) < timedelta(minutes=1)

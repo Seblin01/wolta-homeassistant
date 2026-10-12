@@ -3153,10 +3153,11 @@ async def test_energy_balance_issue_absent_block_or_old_backend(hass, mock_entry
 _DIR_ISSUE_ID = "battery_direction_test_entry_id"
 
 
-def _dir_results(form="all", *, state="reversed", preliminary=False, eb_excluded=False):
+def _dir_results(form="all", *, state="reversed", preliminary=False, eb_excluded=False,
+                 as_of=None):
     return {"betyg": {
         "preliminary": preliminary,
-        "battery_direction": {"state": state, "form": form, "checked_days": 120,
+        "battery_direction": {"state": state, "form": form, "checked_days": 120, "as_of": as_of,
                               "reversed_days": 120, "first_checked": "2025-10-10",
                               "first_reversed": "2025-10-10", "last_reversed": "2026-10-12",
                               "since": "2026-09-29" if form == "since" else None},
@@ -4153,3 +4154,70 @@ async def test_direction_ignore_does_not_hide_non_fixable_forms(hass, mock_entry
     c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})
     c._evaluate_measured_params(_dir_results(form))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+_FLIPPED = "2026-10-12T10:00:00+00:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_of", ["2026-10-12T04:00:00+00:00", _FLIPPED, None, "inte-ett-datum"])
+async def test_direction_issue_stays_down_until_server_recounts_after_flip(hass, mock_entry, as_of):
+    """Efter vändningen räknar servern om riktningsdygnen först nästa natt: ett betyg som är
+    äldre än vändningen (eller saknar/har oläsbar as_of) får inte resa reparationen igen."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._evaluate_measured_params(_dir_results("all", as_of=as_of))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_guard_leaves_registry_alone(hass, mock_entry):
+    """Vakten rör varken create eller delete: en issue som finns kvar (annan väg) förblir."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+    mock_entry.data = {**mock_entry.data, CONF_DIRECTION_FLIPPED_AT: _FLIPPED}
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-12T04:00:00+00:00"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_returns_when_recount_is_newer_than_flip(hass, mock_entry):
+    """Servern har räknat om efter vändningen och säger fortfarande omkastat: vändningen hjälpte
+    inte, reparationen reses igen."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_guard_does_not_affect_non_fixable_forms(hass, mock_entry):
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._evaluate_measured_params(_dir_results("since", as_of="2026-10-12T04:00:00+00:00"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["ok", "verified"])
+async def test_direction_healthy_clears_flip_stamp_and_ignore_flag(hass, mock_entry, state):
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)
+    c = await _cap_coordinator(hass, mock_entry, **{
+        CONF_DIRECTION_FLIPPED_AT: _FLIPPED, CONF_DIRECTION_ISSUE_IGNORED: True})
+    with patch.object(hass.config_entries, "async_update_entry") as upd:
+        c._evaluate_measured_params(_dir_results("all", state=state))
+    upd.assert_called_once()
+    new_data = upd.call_args.kwargs["data"]
+    assert CONF_DIRECTION_FLIPPED_AT not in new_data
+    assert CONF_DIRECTION_ISSUE_IGNORED not in new_data
+
+
+@pytest.mark.asyncio
+async def test_direction_healthy_without_flags_does_not_write_entry(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    with patch.object(hass.config_entries, "async_update_entry") as upd:
+        c._evaluate_measured_params(_dir_results("all", state="ok"))
+    upd.assert_not_called()
