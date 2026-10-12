@@ -1460,15 +1460,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # under tre kontrollerade dygn), på samma sätt som energibalansen vilar på sitt golv.
         self._evaluate_battery_direction_issue(betyg)
         self._evaluate_energy_balance_issue(betyg)
+        if self._direction_reversed(betyg):
+            # Adopt-förslagen är rekonstruerade ur samma felvända flöden. Före den
+            # preliminära returen nedan: ett preliminärt men omkastat betyg kan ha kvar
+            # adopt-issues från ett tidigare moget betyg, och de ska bort även då.
+            for key in (_ISSUE_CAPACITY, _ISSUE_POWER, _ISSUE_EFFICIENCY):
+                ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.config_entry.entry_id}")
+            return
         # Preliminärt betyg (backend api 0.43.0): < 30 dygns data. Mätningen av kapacitet/
         # effekt/verkningsgrad är då systematiskt UNDERSKATTAD (batteriet har inte hunnit
         # visa hela sitt fönster) → adopt-förslagen vore falska. Vänta tills betyget mognar.
         if betyg.get("preliminary"):
-            return
-        if self._direction_reversed(betyg):
-            # Adopt-förslagen är rekonstruerade ur samma felvända flöden.
-            for key in (_ISSUE_CAPACITY, _ISSUE_POWER, _ISSUE_EFFICIENCY):
-                ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.config_entry.entry_id}")
             return
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
@@ -1501,6 +1503,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     @staticmethod
     def _direction_reversed(betyg: dict) -> bool:
+        # Only the state matters, not the form: a form this client does not know yet still
+        # means the flows point the wrong way, which makes the energy balance and the adopt
+        # suggestions unreliable whatever the form.
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         return isinstance(block, dict) and block.get("state") == "reversed"
 

@@ -181,6 +181,15 @@ _ZONE_SUGGESTED_LABEL: dict[str, str] = {
 }
 
 
+def _as_list(val: str | list | None) -> list[str]:
+    """Normalise a stored sensor setting to a list (v0.1.0 entries hold a plain string)."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val:
+        return [val]
+    return []
+
+
 def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSelector:
     """Zonlistan. Med `suggested` ligger den zonen FÖRST med en etikett – men utan default
     (V14: SelectSelector väljer inget tyst; ordningen bevaras eftersom sort defaultar
@@ -804,9 +813,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # Bytta batterisensorer skickar också om historiken (applied_entities), så en
                 # öppen riktningsreparation bygger på det gamla betyget: stämpla som vid en
                 # vändning så att den inte reses igen förrän servern räknat om.
-                if (list(user_input[CONF_BATT_IN]) != list(entry.data.get(CONF_BATT_IN) or [])
-                        or list(user_input[CONF_BATT_OUT])
-                        != list(entry.data.get(CONF_BATT_OUT) or [])):
+                # Order-independent and normalised like the coordinator (a v0.1.0 entry
+                # stores a plain string), so only a real change of sensors stamps.
+                if (sorted(_as_list(user_input[CONF_BATT_IN]))
+                        != sorted(_as_list(entry.data.get(CONF_BATT_IN)))
+                        or sorted(_as_list(user_input[CONF_BATT_OUT]))
+                        != sorted(_as_list(entry.data.get(CONF_BATT_OUT)))):
                     data_updates[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
                     ir.async_delete_issue(
                         self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")

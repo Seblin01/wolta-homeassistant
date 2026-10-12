@@ -4264,3 +4264,38 @@ async def test_reconfigure_without_battery_change_does_not_stamp_flip(
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert CONF_DIRECTION_FLIPPED_AT not in updated.data
     assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reordered_battery_sensors_do_not_stamp_flip(
+        hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass, {
+        CONF_BATT_IN: ["sensor.battery_charge", "sensor.battery_charge_2"]})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input=_reconfigure_input(**{
+                CONF_BATT_IN: ["sensor.battery_charge_2", "sensor.battery_charge"]}),
+        )
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip(
+        hass: HomeAssistant) -> None:
+    """En v0.1.0-post lagrar sensorn som ren sträng; samma sensor som lista är ingen ändring."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass, {CONF_BATT_IN: "sensor.battery_charge"})
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input())
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data

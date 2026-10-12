@@ -3251,6 +3251,22 @@ async def test_direction_supersedes_energy_balance_and_adopt_repairs(hass, mock_
 
 
 @pytest.mark.asyncio
+async def test_direction_clears_leftover_adopt_issues_when_preliminary(hass, mock_entry):
+    """Ett preliminärt men omkastat betyg (rest av ett moget) ska också radera adopt-issues
+    som blev kvar: de är rekonstruerade ur samma felvända flöden."""
+    keys = ("measured_capacity", "measured_power", "measured_efficiency")
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 15.0, _CBKW: 5.0, _CEFF: 0.9})
+    reg = ir.async_get(hass)
+    c._evaluate_measured_params(_dir_results("all", state="ok"))
+    for key in keys:
+        assert reg.async_get_issue(DOMAIN, f"{key}_test_entry_id") is not None, key
+    c._evaluate_measured_params(_dir_results("all", preliminary=True))
+    for key in keys:
+        assert reg.async_get_issue(DOMAIN, f"{key}_test_entry_id") is None, key
+    assert reg.async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
 async def test_direction_issue_is_per_entry_and_healthy_entry_leaves_other_alone(hass, mock_entry):
     """Issue-id bär entry-id: en frisk entry raderar bara sitt eget id."""
     c = await _cap_coordinator(hass, mock_entry)
