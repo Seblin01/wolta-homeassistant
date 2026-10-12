@@ -846,15 +846,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         A sensor whose whole stream is empty is energy_empty's case (it explains the
         state_class pitfall) and is left out here. Windows below
-        _ENERGY_EMPTY_MIN_WINDOW are neither counted nor cleared."""
+        _ENERGY_EMPTY_MIN_WINDOW, and windows in which every selected sensor is silent,
+        are neither counted nor cleared."""
         if window < _ENERGY_EMPTY_MIN_WINDOW:
             return
         empty_streams = {
             e for name, data in built.streams.items() if not data
             for e in self._entity_map[self._effective_stream(name)]
         }
-        others_measured = len(built.silent) < len(self._statistic_ids())
-        silent = (built.silent - empty_streams) if others_measured else set()
+        if len(built.silent) >= len(self._statistic_ids()):
+            # Everything is silent (Home Assistant down, or the recorder idle): that says
+            # nothing about any single sensor, so neither count nor clear.
+            return
+        silent = built.silent - empty_streams
         prev: dict = self._state.get("silent_sensor_cycles") or {}
         if not silent:
             if "silent_sensor_cycles" in self._state:

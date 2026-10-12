@@ -3025,6 +3025,49 @@ async def test_statistics_missing_clears_when_the_sensor_reads_again(
 
 
 @pytest.mark.asyncio
+async def test_an_all_silent_window_neither_counts_nor_clears_statistics_missing(
+    hass: HomeAssistant, mock_entry
+):
+    """When every selected sensor is silent in a long window nothing can be said about
+    any single sensor: the raised issue and the streak stay as they were, and only a
+    window in which the sensor measures again clears it."""
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.solar2",), cycles=3,
+        fingerprint=_TWO_SOLAR_FP)
+    issue_id = f"statistics_missing_{mock_entry.entry_id}"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    streak = dict(coordinator._state["silent_sensor_cycles"])
+
+    all_sensors = ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
+                   "sensor.grid_out", "sensor.solar", "sensor.solar2")
+    clock = {"now": NOW + timedelta(days=2)}
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=lambda h, ids, start, end, period:
+              _energy_stats(start, end, empty=all_sensors)),
+    ):
+        await coordinator._async_update_data()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    assert coordinator._state["silent_sensor_cycles"] == streak
+
+    clock["now"] = NOW + timedelta(days=3)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=lambda h, ids, start, end, period: _energy_stats(start, end)),
+    ):
+        await coordinator._async_update_data()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+    assert coordinator._state.get("silent_sensor_cycles") is None
+
+
+@pytest.mark.asyncio
 async def test_statistics_missing_never_names_a_sensor_that_reads_again(
     hass: HomeAssistant, mock_entry
 ):
