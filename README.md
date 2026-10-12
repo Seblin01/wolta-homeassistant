@@ -15,6 +15,14 @@ After setup the integration automatically:
 2. Triggers periodic recomputes on the Wolta backend.
 3. Exposes the results as Home Assistant sensors.
 
+**Only complete quarters are uploaded.** A quarter is sent only when every selected
+sensor has its own value for it in Home Assistant's statistics, and never the first
+period after a gap: when a sensor has been unavailable, Home Assistant puts the whole
+gap's energy into the first period after it, which is not a measurement of that
+period. If a selected sensor stops producing statistics altogether, uploading pauses
+and a repair names the sensor. Periods when Home Assistant itself was not running are
+still sent (Home Assistant records them as zero), and Wolta's server sets them aside.
+
 ## Sensors
 
 Entity names are translated (English and Swedish bundled; other languages fall back to English), and HA generates entity IDs from the translated names at install time. Default IDs on an English-language instance:
