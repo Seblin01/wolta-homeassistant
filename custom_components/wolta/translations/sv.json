@@ -18,7 +18,7 @@
     },
     "statistics_missing": {
       "title": "Wolta har slutat ladda upp: en vald sensor saknar statistik",
-      "description": "{entities} har inte gett någon statistik under de senaste uppladdningarna, men dina andra valda sensorer har det. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så uppladdningen står still tills sensorn ger statistik igen.\n\nKontrollera att sensorn finns och är tillgänglig i Home Assistant. Har den ersatts av en annan sensor: välj den nya under Konfigurera om, eller ta bort den gamla där. Varningen rensar sig själv när sensorn läser data igen."
+      "description": "{entities} ger inte längre någon statistik som Wolta kan använda, men dina andra valda sensorer gör det. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så uppladdningen står still tills sensorn ger statistik igen. Kvartarna från tiden då uppladdningen stod still skickas inte i efterhand.\n\nKontrollera att sensorn finns och är tillgänglig i Home Assistant, och kontrollera dess `state_class`: en effektsensor (W, `state_class: measurement`) får statistik utan sum-kolumnen som Wolta läser energin ur, och det räknas som ingen statistik. Har sensorn ersatts av en annan: välj den nya under Konfigurera om, eller ta bort den gamla där. Efter en sådan ändring skickas alla kompletta kvartar i historiken om. Varningen rensar sig själv när sensorn läser data igen."
     },
     "measured_capacity": {
       "title": "Wolta mätte en annan batterikapacitet",

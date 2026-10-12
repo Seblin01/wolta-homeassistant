@@ -18,7 +18,7 @@
     },
     "statistics_missing": {
       "title": "Wolta has stopped uploading: a selected sensor has no statistics",
-      "description": "{entities} has produced no statistics during the latest uploads, while your other selected sensors have. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again.\n\nCheck that the sensor exists and is available in Home Assistant. If it has been replaced by another sensor, select the new one under Reconfigure, or remove the old one there. This warning clears itself once the sensor reports data again."
+      "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period are not sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. Either change triggers a full re-send of the complete history. This warning clears itself once the sensor reports data again."
     },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
