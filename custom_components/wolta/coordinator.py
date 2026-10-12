@@ -1454,6 +1454,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Before the preliminary return below: unlike the adopt nudges this is not a
         # measurement that needs a mature window - the backend's floor (a full battery charge
         # of impossible energy) already keeps short windows from firing it.
+        # Likaså riktningsreparationen: den vilar på serverns tre-dygnsgolv (inget "reversed"
+        # under tre kontrollerade dygn), på samma sätt som energibalansen vilar på sitt golv.
         self._evaluate_battery_direction_issue(betyg)
         self._evaluate_energy_balance_issue(betyg)
         # Preliminärt betyg (backend api 0.43.0): < 30 dygns data. Mätningen av kapacitet/
@@ -1519,22 +1521,24 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # användaren ser under Konfigurera.
             return ", ".join(self._entity_map[stream]) or "-"
 
+        placeholders = {
+            "reversed_days": str(block.get("reversed_days") or 0),
+            "first_checked": block.get("first_checked") or "-",
+            "first_reversed": block.get("first_reversed") or "-",
+            "last_reversed": block.get("last_reversed") or "-",
+            "since": block.get("since") or "-",
+            "batt_in": _names("batt_in"),
+            "batt_out": _names("batt_out"),
+        }
         ir.async_create_issue(
             self.hass, DOMAIN, issue_id,
             is_fixable=form in _BATTERY_DIRECTION_FIXABLE,
             severity=ir.IssueSeverity.WARNING,
             translation_key=f"{_ISSUE_BATTERY_DIRECTION}_{form}",
-            translation_placeholders={
-                "reversed_days": str(block.get("reversed_days") or 0),
-                "first_checked": block.get("first_checked") or "-",
-                "first_reversed": block.get("first_reversed") or "-",
-                "last_reversed": block.get("last_reversed") or "-",
-                "since": block.get("since") or "-",
-                "batt_in": _names("batt_in"),
-                "batt_out": _names("batt_out"),
-                "invert_state": "on" if self.config_entry.data.get(CONF_INVERT_BATTERY) else "off",
-            },
-            data={"entry_id": self.config_entry.entry_id, "form": form},
+            translation_placeholders=placeholders,
+            # En egen RepairsFlow ärver inte translation_placeholders: samma värden följer
+            # med på issuen så flödets texter kan fyllas i.
+            data={"entry_id": self.config_entry.entry_id, "form": form, **placeholders},
         )
 
     def _evaluate_energy_balance_issue(self, betyg: dict) -> None:

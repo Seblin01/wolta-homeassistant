@@ -3191,6 +3191,21 @@ async def test_direction_issue_placeholders(hass, mock_entry):
     assert p["reversed_days"] == "120" and p["since"] == "2026-09-29"
     assert p["first_checked"] == "2025-10-10" and p["last_reversed"] == "2026-10-12"
     assert p["batt_in"] == "sensor.batt_in" and p["batt_out"] == "sensor.batt_out"
+    assert "invert_state" not in p
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_data_carries_placeholders_for_the_fix_flow(hass, mock_entry):
+    """En egen RepairsFlow ärver inte issuens translation_placeholders: flödets texter
+    behöver samma värden på issue.data."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.data["entry_id"] == "test_entry_id" and issue.data["form"] == "all"
+    for k, v in issue.translation_placeholders.items():
+        assert issue.data[k] == v, k
+    assert issue.data["reversed_days"] == "120"
+    assert issue.data["batt_in"] == "sensor.batt_in"
 
 
 @pytest.mark.asyncio

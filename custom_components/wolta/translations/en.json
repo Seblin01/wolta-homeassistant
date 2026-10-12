@@ -171,7 +171,7 @@
           },
           "flip": {
             "title": "Flip battery charge and discharge?",
-            "description": "Wolta's 'Battery charge/discharge inverted' setting is currently {invert_state}. It will be toggled and the whole history re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
+            "description": "Wolta's 'Battery charge/discharge reversed' setting is toggled – if it is off it is switched on, and the other way round – and the whole history is re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
           }
         },
         "abort": {
@@ -185,7 +185,7 @@
         "step": {
           "init": {
             "title": "Wolta: charging and discharging look swapped",
-            "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for all {reversed_days} days since {first_checked}. Before that Wolta has no state of charge and cannot judge the direction. If the sensors ({batt_in}, {batt_out}) have been the same all along, you can flip the direction here. If you changed a sensor or a setting, correct what changed under Reconfigure instead.",
+            "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for all {reversed_days} days since {first_checked}. Before that Wolta has no state of charge and cannot judge the direction. If the sensors ({batt_in}, {batt_out}) have been the same all along, you can flip the direction here. If you changed a sensor or a setting, correct what changed under Reconfigure instead. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right.",
             "menu_options": {
               "flip": "Flip the direction and re-send the history",
               "ignore": "Ignore"
@@ -193,7 +193,7 @@
           },
           "flip": {
             "title": "Flip battery charge and discharge?",
-            "description": "Wolta's 'Battery charge/discharge inverted' setting is currently {invert_state}. It will be toggled and the whole history re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
+            "description": "Wolta's 'Battery charge/discharge reversed' setting is toggled – if it is off it is switched on, and the other way round – and the whole history is re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
           }
         },
         "abort": {
@@ -203,11 +203,11 @@
     },
     "battery_direction_since": {
       "title": "Wolta: charging and discharging became swapped",
-      "description": "Since {since}, your data says the battery charges when its state of charge falls, and the other way round. Before that the direction was right. Something changed that day: a sensor, a setting or an update. Correct what changed. Do not flip the direction in Wolta's settings, since that flips the whole history and makes the time before {since} wrong. Once the direction is right again, let the grading window on wolta.se start after the correction."
+      "description": "Since {since}, your data says the battery charges when its state of charge falls, and the other way round. Before that the direction was right. Something changed that day: a sensor, a setting or an update. Correct what changed. Do not flip the direction in Wolta's settings, since that flips the whole history and makes the time before {since} wrong. Once the direction is right again, let the grading window on wolta.se start after the correction. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
     },
     "battery_direction_ended": {
       "title": "Wolta: charging and discharging were swapped for a period",
-      "description": "Between {first_reversed} and {last_reversed}, charging and discharging were swapped in your data. After that the direction is right. Those days are still in your grading window. Let the window on wolta.se start after {last_reversed}, so the grade is only based on correct data."
+      "description": "Between {first_reversed} and {last_reversed}, charging and discharging were swapped in your data. After that the direction is right. Those days are still in your grading window. Let the window on wolta.se start after {last_reversed}, so the grade is only based on correct data. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
     }
   },
   "config": {
