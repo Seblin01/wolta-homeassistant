@@ -22,6 +22,8 @@ gap's energy into the first period after it, which is not a measurement of that
 period. If a selected sensor stops producing statistics altogether, uploading pauses
 and a repair names the sensor. Periods when Home Assistant itself was not running are
 still sent (Home Assistant records them as zero), and Wolta's server sets them aside.
+A full re-send after reconfiguration only replaces the quarters that are complete;
+quarters the server already holds that are now incomplete keep their earlier values.
 
 ## Sensors
 
