@@ -4457,3 +4457,70 @@ async def test_direction_guard_holds_while_corrected_history_is_pending(hass, mo
     c._state.pop("pending_invert_recompute")
     c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_last_quarter_not_yet_compiled_is_sent_next_cycle(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    clock = {"now": NOW}
+
+    async def fetch(h, ids, start, end, period):
+        # The recorder has compiled up to now - 10 min: the last quarter has 1 of 3 rows.
+        return _energy_stats(start, min(end, clock["now"] - timedelta(minutes=10)))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=1)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+        first = {r["ts"] for c in client.put_data.call_args_list for r in c.args[1]}
+        last_q = NOW - timedelta(minutes=15)
+        assert last_q.isoformat() not in first
+        clock["now"] = NOW + timedelta(minutes=30)
+        await coordinator._async_update_data()
+
+    all_sent = {r["ts"] for c in client.put_data.call_args_list for r in c.args[1]}
+    assert last_q.isoformat() in all_sent
+
+
+@pytest.mark.asyncio
+async def test_backfill_quarter_after_short_term_start_is_judged_by_5min_only(
+    hass: HomeAssistant, mock_entry
+):
+    from custom_components.wolta.coordinator import _short_term_start
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    boundary = _short_term_start(NOW)             # whole hour: hourly before, 5-minute after
+    q = boundary + timedelta(hours=2)
+
+    async def fetch(h, ids, start, end, period):
+        if period == "hour":
+            rows, t = [], start.replace(minute=0, second=0, microsecond=0).timestamp()
+            while t < end.timestamp():
+                rows.append({"start": t, "change": 0.4})
+                t += 3600
+            return {s: list(rows) for s in ("sensor.batt_in", "sensor.batt_out",
+                                            "sensor.grid_in", "sensor.grid_out",
+                                            "sensor.solar")}
+        return _stats_with_hole(start, end, sensor="sensor.grid_in",
+                                hole=(q, q + timedelta(minutes=5)))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        rows = await coordinator._backfill_rows(NOW)
+
+    sent = {r["ts"] for r in rows}
+    assert q.isoformat() not in sent
+    assert (boundary - timedelta(hours=3)).isoformat() in sent    # hourly part still sent
+    assert (boundary + timedelta(hours=3)).isoformat() in sent    # intact 5-minute part too

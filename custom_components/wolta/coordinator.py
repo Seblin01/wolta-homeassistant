@@ -563,6 +563,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             full_backfill = bookmark is None
 
             backfill_start = now - timedelta(days=_BACKFILL_DAYS)
+            # Deliberately NOT floored like _short_term_start(): SoC has no completeness
+            # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
             short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
             if bookmark is None:
                 rows = await self._backfill_rows(now)
@@ -764,8 +766,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     def _build_streams(self, *sources: _Source) -> _Built:
         """Build the five per-quarter streams and decide which quarters are complete.
 
-        Values: sources are applied in order with dict-merge precedence (later wins on
-        overlapping quarters) - backfill passes hourly first and 5-minute second.
+        Values: each source contributes only the quarters inside its own window (the
+        windows do not overlap) - backfill passes hourly first and 5-minute second.
         The streams are keyed by merge_streams' parameter names so the callers hand
         them over with ** while _note_stream_emptiness inspects the same dicts - one
         build, no chance of judging different data than what is uploaded.
@@ -1236,7 +1238,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             period="5minute",
         )
 
-        # Aggregate and sum per stream (short-term takes precedence on overlap via dict merge)
+        # Aggregate and sum per stream; each source contributes only its own window
         built = self._build_streams(
             _Source(lts_data, split_hour_to_quarters, start, short_term_start),
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
@@ -1353,6 +1355,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not rows:
             await self._remember_coverage(token_fp, since)
             return
+        # Deliberately NOT floored like _short_term_start(): SoC has no completeness logic,
+        # and its hourly/5-minute switch may differ from the flows' by up to 59 minutes.
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
         soc, soc_ok = await self._soc_state(
             gap.start, gap.end,
