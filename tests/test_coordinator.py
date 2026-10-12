@@ -3123,6 +3123,183 @@ async def test_a_sensor_measured_only_before_the_window_is_silent(
     assert built.silent == {"sensor.solar2"}
 
 
+# A sensor that dies AFTER it has worked. The bookmark is the last uploaded complete
+# quarter and every read starts there, so the read always holds that quarter - and the
+# dead sensor's rows in it. Silence is therefore judged by lag: a sensor is silent when
+# its newest measured period trails the newest of all selected sensors by at least
+# max(30 min, the read's period).
+
+
+def _dying_fetch(stops: dict[str, datetime]):
+    """A recorder in which every sensor (sensor.solar2 included) measures every period
+    of the read, except that the sensors in ``stops`` have no rows from that moment on.
+    Rows follow the requested period, so hourly reads get hourly rows."""
+    async def fetch(h, ids, start, end, period):
+        data = _full_stats(start, end, period, values={"sensor.solar2": 0.1})
+        for sid, stop in stops.items():
+            data[sid] = [r for r in data[sid] if r["start"] < stop.timestamp()]
+        return data
+    return fetch
+
+
+async def _run_dying_cycles(
+    hass, mock_entry, client, *, stops: dict[str, datetime], bookmark: datetime,
+    cycles: int, fingerprint: str | None = None,
+    advance: timedelta = timedelta(hours=6), reads: list[str] | None = None,
+):
+    """Run slow-poll cycles on ONE coordinator and record after each cycle whether
+    (statistics_missing, energy_stream_no_statistics) is raised. ``reads`` collects the
+    period of every statistics read."""
+    clock = {"now": NOW}
+    reg = ir.async_get(hass)
+    seen: list[tuple[bool, bool]] = []
+    fetch = _dying_fetch(stops)
+
+    async def recording_fetch(h, ids, start, end, period):
+        if reads is not None:
+            reads.append(period)
+        return await fetch(h, ids, start, end, period)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change",
+              side_effect=recording_fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False,
+                         "applied_entities": fingerprint or _fingerprint()})
+        for _ in range(cycles):
+            await coordinator._async_update_data()
+            seen.append((
+                reg.async_get_issue(DOMAIN, coordinator._stats_issue_id) is not None,
+                reg.async_get_issue(DOMAIN, coordinator._energy_issue_id) is not None,
+            ))
+            clock["now"] = clock["now"] + advance
+    return coordinator, seen
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_that_dies_after_working_raises_statistics_missing(
+    hass: HomeAssistant, mock_entry
+):
+    """solar2 stops 15 minutes after the bookmark. The bookmark quarter stays complete
+    and is re-read every cycle, so solar2 is measured in every read - and nothing
+    after it is ever sent. Its lag behind the other sensors makes it silent."""
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    coordinator, seen = await _run_dying_cycles(
+        hass, mock_entry, client,
+        stops={"sensor.solar2": bookmark + timedelta(minutes=15)},
+        bookmark=bookmark, cycles=4, fingerprint=_TWO_SOLAR_FP)
+    assert coordinator._state["last_uploaded_ts"] == bookmark.isoformat(), (
+        "the scenario needs the bookmark to stay on the quarter solar2 still measured")
+    assert seen == [(False, False), (False, False), (True, False), (True, False)]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._stats_issue_id)
+    assert issue.translation_placeholders["entities"] == "sensor.solar2"
+
+
+@pytest.mark.asyncio
+async def test_a_single_sensor_stream_that_dies_after_working_raises_energy_empty(
+    hass: HomeAssistant, mock_entry
+):
+    """The only solar sensor dies the same way: its stream still holds the bookmark
+    quarter, so the stream is not empty - but every sensor of it is silent."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    coordinator, seen = await _run_dying_cycles(
+        hass, mock_entry, client,
+        stops={"sensor.solar": bookmark + timedelta(minutes=15)},
+        bookmark=bookmark, cycles=4)
+    assert seen == [(False, False), (False, False), (False, True), (False, True)]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._energy_issue_id)
+    assert issue.translation_key == "energy_stream_no_statistics"
+    assert "sensor.solar" in issue.translation_placeholders["streams"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dying", "two_solar", "expected"),
+    [("sensor.solar2", True, (True, False)), ("sensor.solar", False, (False, True))],
+)
+async def test_a_sensor_that_dies_after_working_is_caught_on_the_heal_path(
+    hass: HomeAssistant, mock_entry, dying, two_solar, expected
+):
+    """A stall longer than the short-term window: the heal path reads hourly
+    statistics. The sensor has hourly rows up to bookmark + 2 h and none after."""
+    from custom_components.wolta.coordinator import _SHORT_TERM_DAYS
+
+    if two_solar:
+        _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(days=_SHORT_TERM_DAYS + 6)
+    reads: list[str] = []
+    coordinator, seen = await _run_dying_cycles(
+        hass, mock_entry, client, stops={dying: bookmark + timedelta(hours=3)},
+        bookmark=bookmark, cycles=4,
+        fingerprint=_TWO_SOLAR_FP if two_solar else None, reads=reads)
+    assert reads and set(reads) == {"hour"}, "the scenario must stay on the heal path"
+    assert seen[:2] == [(False, False), (False, False)]
+    assert seen[2:] == [expected, expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bookmark_age", [timedelta(hours=6), timedelta(days=15)])
+async def test_a_healthy_setup_never_counts_a_silent_sensor(
+    hass: HomeAssistant, mock_entry, bookmark_age
+):
+    """Every sensor measured up to the same latest period: nothing lags, nothing counts,
+    neither on the incremental path nor on the heal path."""
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, seen = await _run_dying_cycles(
+        hass, mock_entry, client, stops={}, bookmark=NOW - bookmark_age, cycles=4,
+        fingerprint=_TWO_SOLAR_FP)
+    assert seen == [(False, False)] * 4
+    assert coordinator._state.get("silent_sensor_cycles") is None
+    assert coordinator._state.get("energy_empty_cycles") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("period", "lag", "silent"),
+    [("5minute", timedelta(minutes=25), False),
+     ("5minute", timedelta(minutes=30), True),
+     ("hour", timedelta(0), False),
+     ("hour", timedelta(hours=1), True)],
+)
+async def test_silence_is_a_lag_of_at_least_max_30_min_and_the_period(
+    hass: HomeAssistant, mock_entry, period, lag, silent
+):
+    """The threshold is max(30 min, the read's period): 30 minutes for 5-minute reads,
+    one hour for hourly reads."""
+    from custom_components.wolta.coordinator import (
+        _Source,
+        aggregate_5min_to_15min,
+        split_hour_to_quarters,
+    )
+
+    _two_solar_entry(hass, mock_entry)
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    step = 300 if period == "5minute" else 3600
+    start, end = NOW - timedelta(hours=12), NOW
+    raw = _full_stats(start - timedelta(seconds=step), end, period,
+                      values={"sensor.solar2": 0.1})
+    newest_all = end.timestamp() - step
+    raw["sensor.solar2"] = [r for r in raw["sensor.solar2"]
+                            if r["start"] <= newest_all - lag.total_seconds()]
+    agg = aggregate_5min_to_15min if period == "5minute" else split_hour_to_quarters
+    built = coordinator._build_streams(_Source(raw, agg, start, end))
+    assert built.silent == ({"sensor.solar2"} if silent else set())
+
+
 @pytest.mark.asyncio
 async def test_coverage_fill_keeps_the_regular_reads_completeness(
     hass: HomeAssistant, mock_entry
