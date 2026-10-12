@@ -1510,3 +1510,68 @@ def test_battery_state_rows_drops_unit_the_shared_predicate_rejects(monkeypatch)
     rows = stats.battery_state_rows({"sensor.no": {t: (50.0, 40.0, 60.0)},
                                      "sensor.yes": {t: (50.0, 40.0, 60.0)}}, 3600)
     assert [r["unit"] for r in rows] == ["sensor.yes"]
+
+
+# --- complete quarters (only quarters every selected sensor measured) ---------------
+
+T = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+
+
+def _r5(*minutes, change=0.1):
+    """5-minute rows at T + m minutes."""
+    return [{"start": (T + timedelta(minutes=m)).timestamp(), "change": change}
+            for m in minutes]
+
+
+def test_clean_quarter_needs_its_three_periods_and_the_one_before():
+    rows = _r5(-5, 0, 5, 10, 15, 20, 25)
+    assert stats.clean_quarters(rows, 300) == {T, T + timedelta(minutes=15)}
+
+
+def test_first_period_after_a_gap_is_not_clean():
+    # 09:55 missing: the 10:00 row carries the change since the last value (catch-up)
+    rows = _r5(0, 5, 10, 15, 20, 25)
+    assert stats.clean_quarters(rows, 300) == {T + timedelta(minutes=15)}
+
+
+def test_missing_period_dirties_its_quarter_only_when_the_catch_up_stays_inside():
+    # 10:05 missing: 10:10 is the catch-up period and belongs to quarter 10:00 (dirty);
+    # quarter 10:15 has 10:10, 10:15, 10:20 and 10:25 measured and is clean.
+    rows = _r5(-5, 0, 10, 15, 20, 25, 30, 35, 40)
+    assert stats.clean_quarters(rows, 300) == {
+        T + timedelta(minutes=15), T + timedelta(minutes=30)}
+
+
+def test_change_none_is_not_measured():
+    rows = _r5(-5, 0, 10) + [{"start": (T + timedelta(minutes=5)).timestamp(), "change": None}]
+    assert stats.clean_quarters(rows, 300) == set()
+
+
+def test_zero_change_is_measured():
+    assert stats.clean_quarters(_r5(-5, 0, 5, 10, change=0.0), 300) == {T}
+
+
+def test_hourly_needs_the_hour_before():
+    rows = [{"start": (T + timedelta(hours=h)).timestamp(), "change": 1.0} for h in (0, 1, 3)]
+    assert stats.clean_quarters(rows, 3600) == {
+        T + timedelta(hours=1, minutes=m) for m in (0, 15, 30, 45)}
+
+
+def test_clean_quarters_rejects_other_periods():
+    with pytest.raises(ValueError):
+        stats.clean_quarters([], 900)
+
+
+def test_merge_streams_only_emits_complete_quarters():
+    q1, q2 = T, T + timedelta(minutes=15)
+    rows = stats.merge_streams(
+        batt_in={q1: 0.5, q2: 0.4}, batt_out={}, grid_in={q1: 0.1, q2: 0.2}, grid_out={},
+        solar={}, external=None, complete={q2})
+    assert [r["ts"] for r in rows] == [q2.isoformat()]
+
+
+def test_merge_streams_without_complete_is_unchanged():
+    q1 = T
+    rows = stats.merge_streams(batt_in={q1: 0.5}, batt_out={}, grid_in={}, grid_out={},
+                               solar={}, external=None)
+    assert len(rows) == 1

@@ -144,6 +144,51 @@ def sum_quarter_dicts(dicts: list[dict[datetime, float]]) -> dict[datetime, floa
     return result
 
 
+def measured_starts(rows: list[StatisticsRow], period_s: int) -> set[int]:
+    """UNIX starts (floored to ``period_s``) of the periods that carry a value.
+
+    A period is *measured* when the recorder compiled a row with a ``change`` that is
+    not None. An available sensor gets a row for every period even when its value does
+    not move (the recorder reads the state at the period start, HA 2026.8.3
+    recorder/history include_start_time_state=True), so a missing period means the
+    sensor was unavailable or not recorded - not that nothing happened."""
+    out: set[int] = set()
+    for row in rows:
+        if row.get("change") is None:
+            continue
+        start = int(row["start"])
+        out.add(start - start % period_s)
+    return out
+
+
+def clean_quarters(rows: list[StatisticsRow], period_s: int) -> set[datetime]:
+    """Quarters this sensor measured completely, with no catch-up inside.
+
+    A period is *clean* when it and the period before it are both measured. After a
+    gap the recorder continues the sum from the last compiled row, so the first period
+    after a gap carries the whole gap's change (HA 2026.8.3 sensor/recorder.py: the sum
+    restarts from the previous row's ``state``). That period is a catch-up, not a
+    measurement of its own interval.
+
+    5-minute statistics (``period_s`` 300): a quarter is clean when its three periods
+    are clean. Hourly statistics (3600, split into quarters): the four quarters of an
+    hour are clean when the hour is clean."""
+    m = measured_starts(rows, period_s)
+    out: set[datetime] = set()
+    if period_s == 300:
+        for q in {s - s % 900 for s in m}:
+            if all(p in m for p in (q - 300, q, q + 300, q + 600)):
+                out.add(datetime.fromtimestamp(q, tz=timezone.utc))
+    elif period_s == 3600:
+        for h in m:
+            if h - 3600 in m:
+                out.update(datetime.fromtimestamp(h + 900 * k, tz=timezone.utc)
+                           for k in range(4))
+    else:
+        raise ValueError(f"unsupported statistics period: {period_s} s")
+    return out
+
+
 def merge_streams(
     batt_in: dict[datetime, float] | None,
     batt_out: dict[datetime, float] | None,
@@ -151,6 +196,7 @@ def merge_streams(
     grid_out: dict[datetime, float] | None,
     solar: dict[datetime, float] | None,
     external: set[datetime] | None = None,
+    complete: set[datetime] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
@@ -196,6 +242,10 @@ def merge_streams(
         external:  set[datetime] – quarters flagged by flagged_quarters() as
                    externally controlled (may be None when no sensor is
                    configured; then every row's external_control is False).
+        complete:  set[datetime] – quarters every selected sensor measured cleanly
+                   (clean_quarters). When given, a quarter outside it is never emitted
+                   - a stream missing the quarter would otherwise be filled with 0.0,
+                   and a sum over several sensors would be partial.
 
     Returns:
         List of row dicts with keys:
@@ -221,6 +271,8 @@ def merge_streams(
     # been reformulated three times and each attempt to let the flag admit a quarter
     # of its own reintroduced fabricated zeros.
     valid_quarters = _batt_in.keys() | _batt_out.keys()
+    if complete is not None:
+        valid_quarters &= complete
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
