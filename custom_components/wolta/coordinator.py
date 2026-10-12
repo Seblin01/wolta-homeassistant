@@ -37,6 +37,7 @@ from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_DIRECTION_ISSUE_IGNORED,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
@@ -1511,7 +1512,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         issue_id = f"{_ISSUE_BATTERY_DIRECTION}_{self.config_entry.entry_id}"
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         form = block.get("form") if isinstance(block, dict) else None
-        if (not self._direction_reversed(betyg) or self._view_only
+        # Ignoreringen gäller bara den fixbara reparationen (den har en meny att avböja ur).
+        # since/ended har ingen meny och visas alltid.
+        ignored = (form in _BATTERY_DIRECTION_FIXABLE
+                   and bool(self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED)))
+        if (not self._direction_reversed(betyg) or self._view_only or ignored
                 or form not in _BATTERY_DIRECTION_FORMS):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return

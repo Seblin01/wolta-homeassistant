@@ -4123,3 +4123,33 @@ async def test_soc_missing_is_not_persistent_and_only_the_main_cycle_raises_it(h
     c._evaluate_soc_missing_issue(_MATURE)
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
     assert issue is not None and issue.is_persistent is False
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_respects_ignore_for_fixable_forms(hass, mock_entry):
+    from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
+    for form in ("all", "partial"):
+        c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})
+        c._evaluate_measured_params(_dir_results(form))
+        assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None, form
+
+
+@pytest.mark.asyncio
+async def test_direction_ignore_clears_an_open_issue(hass, mock_entry):
+    from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+    mock_entry.data = {**mock_entry.data, CONF_DIRECTION_ISSUE_IGNORED: True}
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["since", "ended"])
+async def test_direction_ignore_does_not_hide_non_fixable_forms(hass, mock_entry, form):
+    """since/ended har ingen meny att ignorera ur: de visas alltid."""
+    from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})
+    c._evaluate_measured_params(_dir_results(form))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None

@@ -600,3 +600,121 @@ async def test_fix_flow_dispatch_soc_missing(hass: HomeAssistant):
     hass.config_entries.async_get_entry = MagicMock(return_value=entry)
     flow = await async_create_fix_flow(hass, "soc_missing_e1", {"entry_id": "e1"})
     assert isinstance(flow, SocMissingRepairFlow)
+
+
+# ---------------------------------------------------------------------------
+# Omkastade laddfält: fixflödet vänder CONF_INVERT_BATTERY
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_DIRECTION_ISSUE_IGNORED,
+    CONF_INVERT_BATTERY,
+)
+from custom_components.wolta.repairs import BatteryDirectionRepairFlow  # noqa: E402
+
+
+def _direction_entry(invert):
+    entry = MagicMock()
+    entry.entry_id = "e1"
+    entry.data = {CONF_INVERT_BATTERY: invert} if invert is not None else {}
+    coordinator = MagicMock()
+    coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = coordinator
+    return entry, coordinator
+
+
+def _direction_flow(hass, entry, placeholders=None):
+    flow = BatteryDirectionRepairFlow(entry, placeholders)
+    flow.hass = hass
+    flow.issue_id = "battery_direction_e1"
+    return flow
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before,after", [(None, True), (False, True), (True, False)])
+async def test_direction_flip_toggles_invert_and_refreshes(hass: HomeAssistant, before, after):
+    entry, coordinator = _direction_entry(before)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    menu = await flow.async_step_init()
+    assert set(menu["menu_options"]) == {"flip", "ignore"}
+    form = await flow.async_step_flip()
+    assert form["type"] == "form"
+    result = await flow.async_step_flip({})
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_BATTERY] is after
+    assert CONF_DIRECTION_ISSUE_IGNORED not in new_data
+    coordinator.async_request_refresh.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_clears_ignore_flag_and_deletes_issue(hass: HomeAssistant):
+    """Vändningen tar bort issuen direkt: servern har inte räknat om, och ett andra klick
+    innan dess hade vänt tillbaka. Ignore-flaggan rensas (användaren engagerade sig)."""
+    from homeassistant.helpers import issue_registry as ir
+    ir.async_create_issue(hass, "wolta", "battery_direction_e1", is_fixable=True,
+                          severity=ir.IssueSeverity.WARNING,
+                          translation_key="battery_direction_all",
+                          translation_placeholders={})
+    entry, _c = _direction_entry(False)
+    entry.data = {CONF_INVERT_BATTERY: False, CONF_DIRECTION_ISSUE_IGNORED: True}
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert CONF_DIRECTION_ISSUE_IGNORED not in new_data
+    assert new_data[CONF_INVERT_BATTERY] is True
+    assert ir.async_get(hass).async_get_issue("wolta", "battery_direction_e1") is None
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_reads_current_flag_not_a_snapshot(hass: HomeAssistant):
+    """Flaggan läses vid själva klicket (entry.data), inte vid flödets skapande."""
+    entry, _c = _direction_entry(False)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    entry.data = {CONF_INVERT_BATTERY: True}  # ändrades via options medan formuläret var öppet
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_BATTERY] is False
+
+
+@pytest.mark.asyncio
+async def test_direction_ignore_persists_flag(hass: HomeAssistant):
+    entry, _c = _direction_entry(False)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    result = await flow.async_step_ignore()
+    assert result["type"] == "create_entry"
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_DIRECTION_ISSUE_IGNORED] is True
+    assert new_data[CONF_INVERT_BATTERY] is False
+
+
+@pytest.mark.asyncio
+async def test_direction_aborts_when_entry_missing(hass: HomeAssistant):
+    flow = BatteryDirectionRepairFlow(None)
+    flow.hass = hass
+    result = await flow.async_step_init()
+    assert result["type"] == "abort" and result["reason"] == "entry_not_found"
+
+
+@pytest.mark.asyncio
+async def test_create_fix_flow_dispatches_direction(hass: HomeAssistant):
+    entry, _c = _direction_entry(False)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(hass, "battery_direction_e1",
+                                       {"entry_id": "e1", "form": "all", "reversed_days": "120",
+                                        "batt_in": "sensor.a"})
+    assert isinstance(flow, BatteryDirectionRepairFlow)
+    flow.hass = hass
+    menu = await flow.async_step_init()
+    assert menu["description_placeholders"]["reversed_days"] == "120"
+    assert menu["description_placeholders"]["batt_in"] == "sensor.a"
+    # entry_id/form är flödets egna uppgifter, inte textens platshållare.
+    assert "entry_id" not in menu["description_placeholders"]
+    assert "form" not in menu["description_placeholders"]
+    form = await flow.async_step_flip()
+    assert form["description_placeholders"]["reversed_days"] == "120"
+    assert form["description_placeholders"]["batt_in"] == "sensor.a"
