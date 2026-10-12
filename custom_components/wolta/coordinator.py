@@ -1520,6 +1520,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         flipped = self._parse_utc(self.config_entry.data.get(CONF_DIRECTION_FLIPPED_AT))
         if flipped is None:
             return False
+        if self._state.get("pending_invert_recompute"):
+            # The corrected history has not landed and been recounted yet: any grade still
+            # describes the old direction, however new its as_of.
+            return True
         as_of = self._parse_utc(block.get("as_of"))
         return as_of is None or as_of <= flipped
 

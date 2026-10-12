@@ -4221,3 +4221,17 @@ async def test_direction_healthy_without_flags_does_not_write_entry(hass, mock_e
     with patch.object(hass.config_entries, "async_update_entry") as upd:
         c._evaluate_measured_params(_dir_results("all", state="ok"))
     upd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_holds_while_corrected_history_is_pending(hass, mock_entry):
+    """as_of efter vändningen räcker inte om den rättade historiken inte landat och räknats om
+    (pending_invert_recompute): betyget beskriver fortfarande den gamla riktningen."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._state["pending_invert_recompute"] = True
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+    c._state.pop("pending_invert_recompute")
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
