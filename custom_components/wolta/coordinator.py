@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from bisect import bisect_right
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from uuid import uuid4
 
 import aiohttp
 from astral import Observer
@@ -30,6 +32,8 @@ from .api import (
     WoltaApiError,
     WoltaAuthError,
     WoltaRateLimitError,
+    WoltaReplacementConflict,
+    WoltaReplacementGone,
 )
 from .const import (
     KEY_BATTERY_STATUS,
@@ -55,6 +59,7 @@ from .const import (
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
+    CONF_INVERT_INTERVALS,
     CONF_NAMEPLATE_KW,
     CONF_POWER_ISSUE_IGNORED,
     CONF_PURCHASE_DATE,
@@ -71,6 +76,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from . import intervals
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
@@ -138,6 +144,274 @@ class _Built:
     incomplete: int                   # quarters with a value somewhere but not complete
     blame: dict[str, int]             # sensor -> quarters it made incomplete
     asleep: set[str]                  # solar sensors not silent only because the sun was down
+    # Per stream (merge_streams' names, unswapped): quarters where every sensor of the
+    # stream measured cleanly. None for a stream without sensors - unbounded, it never
+    # limits a quarter. Field-scoped replacements judge only the streams they replace.
+    complete_by_stream: dict[str, set[datetime] | None]
+
+
+@dataclass(frozen=True)
+class _ReplacementType:
+    """The hooks a replacement job type plugs into the runner (_run_replacement_job).
+
+    A replacement spec is a dict {kind, window_start, window_end, fields, reason} with the
+    window as ISO strings in UTC on whole hours; the runner adds the id.
+
+    Contract: hooks mutate `job` (the dict in Store) in place and never replace it; the
+    runner saves it. `rows_for` must give the same rows for the same spec, since it runs
+    again on every resume of an open replacement. Hooks should not raise: the runner
+    tolerates it (logged, retried next cycle, and a replacement that keeps failing is
+    given up, and a job that keeps failing is parked), but a hook that raises never makes
+    progress. A hook that wants the job held back sets `job["retry_at"]` (ISO) rather
+    than returning None every cycle; one that waits for a reason that may never pass (no
+    data_since from the server) calls _note_job_failure, so the job is parked after
+    _JOB_MAX_FAILED_CYCLES cycles in a row."""
+
+    # (job, now, profile) -> the next spec; None to wait (nothing is opened and the regular
+    # upload goes on), or "done" when the job has nothing left to replace.
+    next_replacement: Callable[[dict, datetime, dict | None], Awaitable[dict | str | None]]
+    # (job, spec, result) after each committed window, before the job is saved. `result`
+    # is the server's commit result, or {} when it had nothing to replace (409 empty).
+    on_committed: Callable[[dict, dict, dict], Awaitable[None]]
+    # (job) once next_replacement says "done": apply the job's target to the applied state.
+    on_finished: Callable[[dict], Awaitable[None]]
+    # (job, spec, now) -> the rows of a "rows" replacement, or None when they cannot be
+    # built now (the job waits). Not needed by a type that only swaps.
+    rows_for: Callable[[dict, dict, datetime], Awaitable[list[dict] | None]] | None = None
+
+
+def desired_invert_intervals(data) -> list[intervals.Interval]:
+    """The battery inversion the owner wants, read from entry data. Before the
+    coordinator's one-time migration has run, the legacy flag stands in for it."""
+    if CONF_INVERT_INTERVALS in data:
+        return intervals.parse(data.get(CONF_INVERT_INTERVALS))
+    return [(None, None)] if data.get(CONF_INVERT_BATTERY) else []
+
+
+def with_desired_intervals(data, desired: list[intervals.Interval]) -> dict:
+    """Entry data with the desired intervals written, mirroring CONF_INVERT_BATTERY as
+    "everything inverted" so a downgrade reads the right global flag in the common case.
+    The one place that writes the pair: the coordinator, the options flow and the
+    repair flow all go through it."""
+    stored = intervals.dump(intervals.normalize(desired))
+    return {
+        **data,
+        CONF_INVERT_INTERVALS: stored,
+        CONF_INVERT_BATTERY: stored == [[None, None]],
+    }
+
+
+def direction_swap_intervals(block: dict) -> list[intervals.Interval]:
+    """The intervals the battery_direction repair flips (server spec §10.1).
+
+    A list `swap_intervals` of {"from", "to"} (ISO UTC or null for open) is taken as it
+    is. Without the key (an older backend) the v0.43 rule holds: "all" and "partial" flip
+    the whole history, the other forms nothing. Anything malformed flips nothing, and so
+    does a bound that is not on a whole UTC hour: the direction job swaps whole hours,
+    and a bound inside an hour could overlap a window it has already swapped."""
+    if "swap_intervals" not in block:
+        return [(None, None)] if block.get("form") in _BATTERY_DIRECTION_FIXABLE else []
+    raw = block.get("swap_intervals")
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        return []
+    swap = intervals.normalize(
+        intervals.parse([[item.get("from"), item.get("to")] for item in raw])
+    )
+    if any(t is not None and t != _floor_hour(t) for interval in swap for t in interval):
+        return []
+    return swap
+
+
+# The stored flow fields a sensor stream feeds (server spec §3). Either battery stream
+# replaces BOTH battery fields: which sensor lands in which field depends on the invert
+# intervals per quarter, so the pair is only ever replaced together.
+_STREAM_FIELDS: dict[str, tuple[str, ...]] = {
+    "solar": ("solar_kwh",),
+    "grid_in": ("grid_import_kwh",),
+    "grid_out": ("grid_export_kwh",),
+    "batt_in": ("batt_charged_kwh", "batt_discharged_kwh"),
+    "batt_out": ("batt_charged_kwh", "batt_discharged_kwh"),
+    "external_control": ("external_control",),
+}
+# The server's field order (its FIELDS); a replacement names its fields in it.
+_FIELD_ORDER = ("solar_kwh", "grid_import_kwh", "grid_export_kwh", "batt_charged_kwh",
+                "batt_discharged_kwh", "external_control")
+_ENERGY_FIELDS = _FIELD_ORDER[:5]
+
+
+def _parse_fingerprint(raw: str) -> dict[str, set[str]] | None:
+    """An entity fingerprint as {stream: set of entity ids} for every stream (a missing
+    key is a stream without sensors), or None when it cannot be read."""
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    out: dict[str, set[str]] = {}
+    for stream in _STREAM_FIELDS:
+        value = parsed.get(stream) or []
+        if not isinstance(value, list):
+            return None
+        out[stream] = {str(e) for e in value}
+    return out
+
+
+def replaced_streams(applied: str, desired: str) -> dict[str, list[str]]:
+    """The streams a sensor change replaces in the stored history, each with the sensors
+    added to it (sorted), from two entity fingerprints (JSON strings of
+    {stream: [entity ids]}, external_control only when a sensor is chosen).
+
+    A stream is replaced only when a sensor was added to it or swapped in. A change
+    that only removes sensors replaces nothing: a removed sensor is most often dead, and
+    the history recorded with it was right - the rows still to come simply go without
+    it. Nor are the battery fields replaced when either battery stream is left without
+    sensors, since the pair is only ever replaced together. An unreadable applied
+    fingerprint counts as every sensor added."""
+    new = _parse_fingerprint(desired)
+    if new is None:
+        return {}
+    old = _parse_fingerprint(applied)
+    out: dict[str, list[str]] = {}
+    for stream in _STREAM_FIELDS:
+        added = new[stream] - (old[stream] if old is not None else set())
+        if added:
+            out[stream] = sorted(added)
+    if ("batt_in" in out or "batt_out" in out) and not (new["batt_in"] and new["batt_out"]):
+        out.pop("batt_in", None)
+        out.pop("batt_out", None)
+    return out
+
+
+def replaced_fields(streams: list[str]) -> list[str]:
+    """The stored fields a change of `streams` replaces, in the server's order."""
+    fields = {f for s in streams for f in _STREAM_FIELDS.get(s, ())}
+    return [f for f in _FIELD_ORDER if f in fields]
+
+
+def _runs(
+    hours: list[datetime],
+    committed: list[tuple[datetime, datetime]] = (),
+    split: datetime | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """The windows of an entity job's energy phase from its sorted complete hours:
+    maximal runs of consecutive hours, runs at most _ENTITY_GAP_MERGE apart joined, and
+    then the smallest gaps joined until at most _ENTITY_MAX_WINDOWS remain (a soft cap:
+    only gaps that may be joined at all are).
+
+    A gap is never joined when a `committed` window lies in it (that window's rows are
+    replaced already and must not be removed or replaced twice), nor when it touches
+    `split`, the switch from hourly to 5-minute statistics, which stays a window
+    boundary."""
+    runs: list[list[datetime]] = []
+    for h in hours:
+        if runs and runs[-1][1] == h:
+            runs[-1][1] = h + timedelta(hours=1)
+        else:
+            runs.append([h, h + timedelta(hours=1)])
+
+    def joinable(left: list[datetime], right: list[datetime]) -> bool:
+        gap_start, gap_end = left[1], right[0]
+        if split is not None and gap_start <= split <= gap_end:
+            return False
+        return not any(ws < gap_end and gap_start < we for ws, we in committed)
+
+    merged: list[list[datetime]] = []
+    for run in runs:
+        if (merged and run[0] - merged[-1][1] <= _ENTITY_GAP_MERGE
+                and joinable(merged[-1], run)):
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+    while len(merged) > _ENTITY_MAX_WINDOWS:
+        candidates = [k for k in range(len(merged) - 1)
+                      if joinable(merged[k], merged[k + 1])]
+        if not candidates:
+            break
+        i = min(candidates, key=lambda k: merged[k + 1][0] - merged[k][1])
+        merged[i][1] = merged[i + 1][1]
+        del merged[i + 1]
+    return [(start, end) for start, end in merged]
+
+
+def _energy_windows(
+    built: _Built,
+    streams: dict[str, dict],
+    sources: list[_Source],
+    streams_by: dict[str, list[str]],
+    external: set[datetime],
+    read_from: datetime,
+    split: datetime,
+    done: list[tuple[datetime, datetime]],
+    window: tuple[datetime, datetime] | None,
+) -> tuple[list[list], list[list[dict]]] | None:
+    """The per-quarter part of WoltaCoordinator._energy_build, pure and run in the
+    executor: from the built streams (`streams` with the applied inversion swapped in),
+    the windows of the energy phase ([start, end, last_full] in ISO) and the rows of
+    each, or None when the added sensors (`streams_by`: replaced stream -> sensors
+    added to it) have measured nothing yet. See _energy_build for the rules."""
+    energy = sorted(s for s in streams_by if s != "external_control")
+    judged = set(energy)
+    if judged & {"batt_in", "batt_out"}:
+        judged |= {"batt_in", "batt_out"}
+    bounded = [built.complete_by_stream[s] for s in sorted(judged)
+               if built.complete_by_stream.get(s) is not None]
+    if not bounded:
+        return None
+    begun: int | None = None
+    for e in sorted({e for s in energy for e in streams_by[s]}):
+        measured: set[int] = set()
+        for src in sources:
+            measured |= measured_starts(src.raw.get(e) or [], _PERIOD_S[src.agg_fn])
+        if not measured:
+            return None
+        begun = min(measured) if begun is None else max(begun, min(measured))
+    complete = set.intersection(*bounded)
+    if begun is not None:
+        first_measured = datetime.fromtimestamp(begun, tz=timezone.utc)
+        complete = {q for q in complete if q >= first_measured}
+    if window is not None:
+        spans = [window]
+    else:
+        hours = sorted(
+            h for h in {_floor_hour(q) for q in complete}
+            if h >= read_from
+            and all(h + _QUARTER * k in complete for k in range(4))
+            and not any(ws <= h < we for ws, we in done))
+        spans = _runs(hours, done, split)
+    # Spans are sorted and disjoint: a quarter's span is found by bisection.
+    starts = [ws for ws, _we in spans]
+
+    def span_of(q: datetime) -> int | None:
+        i = bisect_right(starts, q) - 1
+        return i if i >= 0 and q < spans[i][1] else None
+
+    inside = {q for q in complete if span_of(q) is not None}
+    rows = stats.replacement_rows(
+        streams, built.complete, inside, replaced_fields(energy), external)
+    grouped: list[list[dict]] = [[] for _ in spans]
+    for row in rows:
+        i = span_of(datetime.fromisoformat(row["ts"]))
+        if i is not None:
+            grouped[i].append(row)
+    windows: list[list] = []
+    rows_by_window: list[list[dict]] = []
+    for (ws, we), mine in zip(spans, grouped):
+        if not mine:
+            continue
+        full = [r["ts"] for r in mine if all(f in r for f in _ENERGY_FIELDS)]
+        windows.append([ws.isoformat(), we.isoformat(), max(full) if full else None])
+        rows_by_window.append(mine)
+    return windows, rows_by_window
+
+
+def _floor_hour(t: datetime) -> datetime:
+    return t.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _ceil_hour(t: datetime) -> datetime:
+    floor = _floor_hour(t)
+    return floor if floor == t else floor + timedelta(hours=1)
 
 
 def _silent_sensors(
@@ -345,6 +619,49 @@ _ANCHOR_LOOKBACK = timedelta(hours=36)
 # The API's length limit for battery_sources `source` ('ha:<platform>:<entity_id>').
 _SOC_SOURCE_MAX = 200
 
+# At most this many replacements are committed per cycle (a direction job has one per
+# segment). A bound against a job that never finishes, not a target: the rest waits.
+_REPLACEMENTS_PER_CYCLE = 12
+
+# A sensor change's energy fields are replaced over runs of whole hours that are complete
+# for the replaced streams. Runs closer than this are one window (the hours between are
+# removed as honest gaps); a longer silence of the new sensors stays outside every window
+# and keeps the stored rows. At most this many windows per job: beyond it the smallest
+# gaps are merged first.
+_ENTITY_GAP_MERGE = timedelta(hours=6)
+_ENTITY_MAX_WINDOWS = 50
+# Where a sensor change's read switches from hourly to 5-minute statistics: a day inside
+# the regular short-term limit, so the 5-minute statistics a stored plan relies on are
+# still there when it is resumed (Home Assistant keeps them for 10 days by default).
+_ENTITY_SHORT_TERM_DAYS = 8
+# A stored plan older than this is made anew for what is left, before its 5-minute
+# statistics can be purged.
+_ENTITY_PLAN_MAX_AGE = timedelta(hours=12)
+# Failed reads of the external-control sensor's states before its phase is given up.
+_EXTERNAL_MAX_ERRORS = 3
+# Cycles in a row in which a started entity job cannot make its energy plan before the
+# phase is ended (nothing else can replace a started job).
+_ENTITY_PLAN_MAX_FAILURES = 4
+
+# After a commit the server refused with 413 (the result would exceed the profile's row
+# limit) the replacement is dropped and the job tries again this much later.
+_REPLACEMENT_FULL_RETRY = timedelta(days=1)
+
+# A replacement that failed this many cycles in a row without a verdict from the server
+# (5xx, a hook error) is tried once more; the next failure gives it up for
+# _REPLACEMENT_GIVE_UP_RETRY, so a deterministic server error cannot pause the regular
+# upload for good (staging the rows again keeps moving the server's expiry).
+_REPLACEMENT_MAX_FAILURES = 3
+_REPLACEMENT_GIVE_UP_RETRY = timedelta(days=1)
+
+# A job that fails at the job level this many cycles in a row - the server refuses it
+# with a 4xx it gives no handled code for, a plan cannot be built, the server gives no
+# data_since, or it conflicts or closes the replacement again and again - is parked: taken
+# out of the slot, and no job of its type is queued for _JOB_PARK_BACKOFF. Otherwise one
+# deterministic error would hold every later direction and sensor change for good.
+_JOB_MAX_FAILED_CYCLES = 5
+_JOB_PARK_BACKOFF = timedelta(hours=24)
+
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
 
@@ -379,13 +696,19 @@ _ISSUE_ENERGY_BALANCE = "energy_balance"
 _ENERGY_BALANCE_CAUSES = ("solar_low", "import_low", "source_missing", "unclear")
 # Laddning och urladdning omkastade enligt batteriets laddningsnivå. Servern avgör
 # (battery_direction.state == "reversed", tre-dygnsgolvet ligger där) - vi räknar aldrig om något
-# här. Fixbar bara när en vändning av HELA historiken är rätt: formen "all" (laddningsnivån täcker
-# betygsfönstret, allt omkastat) och "partial" (allt som kunnat kontrolleras är omkastat; texten
-# säger att tiden före är okänd). "since"/"ended" har rätt data före eller efter - en vändning av
-# hela historiken hade gjort den delen fel, så de får bara text.
+# här. The repair is fixable when the block carries a non-empty `swap_intervals` (the
+# server placed the boundaries on the hour, spec §10): the fix flips exactly those
+# intervals, whatever the form. Without the key (an older backend) the v0.43 rule holds:
+# only "all" and "partial" are fixable, by flipping the whole history.
 _ISSUE_BATTERY_DIRECTION = "battery_direction"
 _BATTERY_DIRECTION_FORMS = ("all", "partial", "since", "ended")
 _BATTERY_DIRECTION_FIXABLE = ("all", "partial")
+# Forms whose own translation key carries a description, not a fix flow (hassfest allows
+# only one of the two per key): when fixable they use "<key>_flip"; "all"/"partial" use
+# _ISSUE_BATTERY_DIRECTION_NO_FIX when the server found no boundary to flip.
+_BATTERY_DIRECTION_TEXT_FORMS = ("since", "ended")
+_ISSUE_BATTERY_DIRECTION_NO_FIX = "battery_direction_no_fix"
+_QUARTER = timedelta(minutes=15)
 # Fallback for the server's detect_min_days when the profile doesn't carry it (older
 # backend). Shared by WoltaData's default and the profile read so the sensor never
 # reports a different minimum than the evaluation assumed.
@@ -537,7 +860,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
         # Optional state-of-charge sensors (spec 2026-10-03). Their statistics ride along
         # with the flow rows as battery_state. Like the flex sensor they stay OUT of the
-        # entity fingerprint (a flow re-backfill would coarsen a year of quarter data);
+        # entity fingerprint (a SoC change touches no flow field);
         # adding one runs a SoC-only backfill instead, see _track_soc_selection.
         self._soc_entities: list[str] = list(entry.data.get(CONF_SOC) or [])
         # Per-entry issue id (the form _set_measured_issue already uses), NOT the
@@ -581,6 +904,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # observer it was computed for so a moved home position starts afresh.
         self._daylight_key: tuple | None = None
         self._daylight_cache: dict[int, tuple[float, float] | None] = {}
+        # Replacement job types by the job's "type" (see _run_replacement_job).
+        self._replacement_types: dict[str, _ReplacementType] = {
+            "direction": _ReplacementType(
+                next_replacement=self._direction_next,
+                on_committed=self._direction_committed,
+                on_finished=self._direction_finished,
+            ),
+            "entities": _ReplacementType(
+                next_replacement=self._entities_next,
+                on_committed=self._entities_committed,
+                on_finished=self._entities_finished,
+                rows_for=self._entities_rows,
+            ),
+        }
+        # The rows an entity job's plan built, per (job target, phase, window start, window
+        # end), handed to _entities_rows when the runner asks for them, so a year of
+        # statistics is not read again for every window. Taken once; lost on a restart,
+        # when the same read is made again.
+        self._entity_rows_cache: dict[tuple[str, str, str, str], list[dict]] = {}
+        # What the replacement job did in the current cycle (_run_replacement_job): a
+        # commit, an open with its rows staged, and the first job-level failure.
+        self._job_cycle: dict = {"committed": False, "staged": False, "failure": None}
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -591,12 +936,1157 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         loaded = await self._store.async_load()
         self._state = dict(loaded) if loaded else {}
         _LOGGER.debug("Coordinator state loaded: %s", self._state)
+        await self._migrate_invert_intervals()
         # Sidopoll för webbändringar (delad profil) – avregistreras vid unload.
         self.config_entry.async_on_unload(
             async_track_time_interval(
                 self.hass, self.async_check_profile_sync, _PROFILE_SYNC_INTERVAL
             )
         )
+
+    async def _migrate_invert_intervals(self) -> None:
+        """Move the boolean invert flag to intervals, once (no row moves).
+
+        Desired (entry.data): missing intervals become [[None, None]] when
+        CONF_INVERT_BATTERY is set, else []. Applied (Store): missing intervals come from
+        applied_invert - what the stored rows were built with - or, without that either,
+        from the desired value. The legacy keys are left as they are."""
+        data = self.config_entry.data
+        if CONF_INVERT_INTERVALS in data:
+            desired = self._desired_intervals()
+        else:
+            desired = [(None, None)] if data.get(CONF_INVERT_BATTERY) else []
+            self._set_desired_intervals(desired)
+        if "applied_invert_intervals" in self._state:
+            return
+        applied_invert = self._state.get("applied_invert")
+        if applied_invert is None:
+            applied = desired
+        else:
+            applied = [(None, None)] if applied_invert else []
+        self._state["applied_invert_intervals"] = intervals.dump(applied)
+        await self._store.async_save(self._state)
+
+    def _desired_intervals(self) -> list[intervals.Interval]:
+        """The battery inversion the owner wants (entry.data)."""
+        return intervals.parse(self.config_entry.data.get(CONF_INVERT_INTERVALS))
+
+    def _applied_intervals(self) -> list[intervals.Interval]:
+        """The battery inversion the server's stored rows are built with (Store).
+        Every row this client builds uses these, never the desired ones."""
+        return intervals.parse(self._state.get("applied_invert_intervals"))
+
+    def _set_desired_intervals(self, desired: list[intervals.Interval]) -> None:
+        """Write the desired intervals to entry.data, mirroring CONF_INVERT_BATTERY as
+        "everything inverted" so a downgrade reads the right global flag in the common
+        case. Writes only on an actual change."""
+        entry = self.config_entry
+        new_data = with_desired_intervals(entry.data, desired)
+        if new_data != dict(entry.data):
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+    def _set_applied_intervals(self, applied: list[intervals.Interval]) -> None:
+        """Record what the server's stored rows are now built with (saved by the caller).
+        The legacy applied_invert follows as "everything inverted", so a downgrade to a
+        version with the global flag does not re-send the history needlessly."""
+        stored = intervals.dump(intervals.normalize(applied))
+        self._state["applied_invert_intervals"] = stored
+        self._state["applied_invert"] = stored == [[None, None]]
+
+    # ------------------------------------------------------------------
+    # Replacement of stored flows (server spec 2026-10-13 §5, §9)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _new_replacement_job(job_type: str, target) -> dict:
+        """A replacement job as kept in Store under "replacement_job". At most one exists.
+
+        `target` is the desired value the job brings to the applied state; `replacement`
+        is the server-side replacement in flight ({id, kind, window_start, window_end,
+        fields, reason}) or None; `done_windows` lists the committed windows, so a
+        restart never repeats one; `retry_at` (ISO) holds the job back after a 429."""
+        return {
+            "type": job_type,
+            "target": target,
+            "replacement": None,
+            "done_windows": [],
+            "retry_at": None,
+        }
+
+    async def _run_replacement_job(self, now: datetime, profile: dict | None) -> bool:
+        """Advance the replacement job, before the regular upload. Returns True when the
+        regular upload must pause this cycle: a replacement is open on the server, and
+        every regular write would move the plant's flows_version under it, so its
+        commit would be refused (409 conflict, server spec §7). A job that has not
+        opened anything (waiting, or held back by a 429) pauses nothing.
+
+        A replacement left in Store by an earlier cycle is resumed by asking the server
+        first: committed is applied, open is staged and committed again, and anything
+        else (aborted, expired, restored, unknown) starts over with a new id."""
+        job = self._state.get("replacement_job")
+        if not job:
+            return False
+        hooks = self._replacement_types.get(job.get("type"))
+        if hooks is None:
+            # A type this version does not know can never finish; keeping it would hold
+            # the regular upload back for good. An open replacement expires server-side.
+            _LOGGER.warning("Dropping a Wolta replacement job of unknown type %r", job.get("type"))
+            self._state.pop("replacement_job", None)
+            await self._store.async_save(self._state)
+            return False
+        retry_at = job.get("retry_at")
+        if retry_at:
+            if now < self._parse_retry_at(retry_at):
+                return self._replacement_held(job)
+            job["retry_at"] = None
+            await self._store.async_save(self._state)
+        self._job_cycle = {"committed": False, "staged": False, "failure": None}
+        held = await self._advance_replacement_job(job, hooks, now, profile)
+        if await self._count_job_cycle(job, now):
+            return False  # parked: nothing of it is held open
+        return held
+
+    async def _advance_replacement_job(
+        self, job: dict, hooks: _ReplacementType, now: datetime, profile: dict | None
+    ) -> bool:
+        """One cycle of the job: up to _REPLACEMENTS_PER_CYCLE replacements, each resumed
+        or opened, staged and committed. Returns whether the regular upload must pause
+        (_run_replacement_job)."""
+        try:
+            for _ in range(_REPLACEMENTS_PER_CYCLE):
+                rep = job.get("replacement")
+                opened = False
+                rows: list[dict] | None = None
+                if rep is not None:
+                    status = await self._replacement_status(rep)
+                    if status is not None and status["status"] == "committed":
+                        await self._replacement_committed(
+                            job, hooks, rep, status.get("result") or {}
+                        )
+                        continue
+                    if status is not None and rep.get("abandoned"):
+                        # Given up earlier: it is never committed any more.
+                        await self._discard_replacement(rep["id"])
+                        status = None
+                    if status is None:
+                        job["replacement"] = None
+                        await self._store.async_save(self._state)
+                        rep = None
+                    else:
+                        opened = True
+                        if rep["kind"] == "rows":
+                            rows = await hooks.rows_for(job, rep, now)
+                            if rows is None:
+                                # Its rows cannot be built again: waiting would hold the
+                                # upload until the server expires it. Drop it and plan anew.
+                                await self._discard_replacement(rep["id"])
+                                job["replacement"] = None
+                                await self._store.async_save(self._state)
+                                rep, opened = None, False
+                if rep is None:
+                    if profile is None:
+                        # Fast-poll (or no profile this cycle): only an open replacement
+                        # is carried on; a new one waits for a full cycle.
+                        return False
+                    spec = await hooks.next_replacement(job, now, profile)
+                    if spec is None:
+                        return False
+                    if spec == "done":
+                        await hooks.on_finished(job)
+                        self._state.pop("replacement_job", None)
+                        await self._store.async_save(self._state)
+                        _LOGGER.info("Wolta replacement job (%s) finished", job["type"])
+                        return False
+                    if self._window_key(spec) in job["done_windows"]:
+                        # A hook error: committing the window again would, for a swap,
+                        # undo it. Keyed on the phase too: two phases of one job may
+                        # replace different fields over the same window.
+                        _LOGGER.warning(
+                            "Wolta replacement job (%s) asked for a window it already "
+                            "committed (%s..%s); not opening it",
+                            job["type"], spec["window_start"], spec["window_end"],
+                        )
+                        return False
+                    if spec["kind"] == "rows":
+                        # Built before the id is assigned: rows that cannot be built now
+                        # leave nothing behind that would pause the upload.
+                        rows = await hooks.rows_for(job, spec, now)
+                        if rows is None:
+                            return False
+                    rep = {**spec, "id": str(uuid4())}
+                    job["replacement"] = rep
+                    job.pop("failures", None)
+                result = await self._execute_replacement(rep, rows, now, opened=opened)
+                if result is None:
+                    return self._replacement_held(job)
+                await self._replacement_committed(job, hooks, rep, result)
+        except (WoltaAuthError, aiohttp.ClientError, TimeoutError):
+            raise  # lost profile → reauth; unreachable server → the cycle fails as before
+        except WoltaRateLimitError as err:
+            job["retry_at"] = (now + timedelta(seconds=err.retry_after)).isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta replacement rate limited; retrying in %s s", err.retry_after
+            )
+        except WoltaApiError as err:
+            rep = job.get("replacement")
+            if err.status is not None and 400 <= err.status < 500:
+                self._note_job_failure(f"HTTP {err.status}")
+            if rep is not None and err.status is not None and 400 <= err.status < 500:
+                # A refusal that repeating the same requests would not change (413: the
+                # result would exceed the profile's row limit; 409 without a code: a
+                # plant bound to a stream; 422: rows the server will not take). Drop the
+                # replacement so the regular upload is not held back by it.
+                await self._discard_replacement(rep["id"])
+                job["replacement"] = None
+                if err.status == 413:
+                    job["retry_at"] = (now + _REPLACEMENT_FULL_RETRY).isoformat()
+                await self._store.async_save(self._state)
+                _LOGGER.warning(
+                    "Wolta replacement refused (HTTP %s); retrying later", err.status
+                )
+            else:
+                _LOGGER.warning(
+                    "Wolta replacement failed (HTTP %s); retrying next cycle", err.status
+                )
+                await self._replacement_failed(job, hooks, now)
+        except Exception as err:  # pylint: disable=broad-except
+            # A job that cannot run must not stop the regular upload: a failing hook is
+            # counted like a server error, so an open replacement is given up in time.
+            _LOGGER.warning(
+                "Wolta replacement job failed (%s); retrying next cycle", type(err).__name__
+            )
+            _LOGGER.debug("Replacement job failure detail", exc_info=True)
+            self._note_job_failure(type(err).__name__)
+            await self._replacement_failed(job, hooks, now)
+        return self._replacement_held(job)
+
+    def _note_job_failure(self, why: str) -> None:
+        """Record a job-level failure in this cycle (see _JOB_MAX_FAILED_CYCLES): one
+        that repeating the same cycle would most likely meet again."""
+        if self._job_cycle.get("failure") is None:
+            self._job_cycle["failure"] = why
+
+    async def _count_job_cycle(self, job: dict, now: datetime) -> bool:
+        """Count the cycle the job just ran. Progress - a commit, or an open with its
+        rows staged and no job-level failure after it - resets the count; a cycle with a
+        job-level failure adds one; a cycle that only waited changes nothing. At
+        _JOB_MAX_FAILED_CYCLES in a row the job is parked (_park_job) - unless it still
+        holds a replacement: an open one is given up by _replacement_failed first, and
+        an abandoned one is never parked, since it may have been committed. Returns
+        True when the job was parked."""
+        if self._state.get("replacement_job") is not job:
+            return False  # finished, or dropped
+        cycle = self._job_cycle
+        if cycle["committed"] or (cycle["staged"] and cycle["failure"] is None):
+            if job.pop("job_failures", None) is not None:
+                await self._store.async_save(self._state)
+            return False
+        if cycle["failure"] is None:
+            return False
+        job["job_failures"] = job.get("job_failures", 0) + 1
+        if job["job_failures"] < _JOB_MAX_FAILED_CYCLES or job.get("replacement") is not None:
+            await self._store.async_save(self._state)
+            return False
+        await self._park_job(job, now, cycle["failure"])
+        return True
+
+    async def _park_job(self, job: dict, now: datetime, why: str) -> None:
+        """Take a job that keeps failing out of the slot, and queue none of its type
+        for _JOB_PARK_BACKOFF, so the other type can run meanwhile. What it committed
+        stays: the windows a direction job swapped are folded into the applied
+        intervals, so the job queued after the backoff does not swap them back. A
+        sensor change keeps its applied fingerprint; its next job replaces the same
+        values again where it already did."""
+        job_type = job.get("type")
+        if job_type == "direction" and job.get("done_windows"):
+            self._set_applied_intervals(intervals.sym_diff(
+                self._applied_intervals(), intervals.parse(job["done_windows"])))
+        self._state.pop("replacement_job", None)
+        self._entity_rows_cache = {}
+        until = now + _JOB_PARK_BACKOFF
+        self._state.setdefault("job_backoff", {})[job_type] = until.isoformat()
+        await self._store.async_save(self._state)
+        _LOGGER.warning(
+            "Wolta replacement job (%s) failed %s cycles in a row (last: %s); parking it "
+            "until %s", job_type, job.get("job_failures"), why, until.isoformat(),
+        )
+
+    def _job_backed_off(self, job_type: str, now: datetime) -> bool:
+        """Whether a job of `job_type` was parked and its backoff has not passed."""
+        backoff = self._state.get("job_backoff") or {}
+        raw = backoff.get(job_type)
+        if raw is None:
+            return False
+        if now < self._parse_retry_at(raw):
+            return True
+        backoff.pop(job_type, None)
+        if not backoff:
+            self._state.pop("job_backoff", None)
+        return False
+
+    @staticmethod
+    def _window_key(spec: dict) -> list[str]:
+        """How a committed window is booked in done_windows: [start, end], plus the
+        phase for a job type with phases (a direction job reads its windows back as
+        intervals, so they stay pairs)."""
+        key = [spec["window_start"], spec["window_end"]]
+        if spec.get("phase"):
+            key.append(spec["phase"])
+        return key
+
+    @staticmethod
+    def _replacement_held(job: dict) -> bool:
+        """Whether the job holds a replacement open on the server (the upload pauses).
+        One given up (`abandoned`) is never committed, so it pauses nothing."""
+        rep = job.get("replacement")
+        return rep is not None and not rep.get("abandoned")
+
+    @staticmethod
+    def _parse_retry_at(value) -> datetime:
+        """`retry_at` as an aware datetime; anything unreadable counts as expired."""
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is None or parsed.tzinfo is None:
+            _LOGGER.debug("Ignoring an unreadable replacement retry_at %r", value)
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return parsed
+
+    async def _replacement_failed(
+        self, job: dict, hooks: _ReplacementType, now: datetime
+    ) -> None:
+        """Count a cycle that failed without a verdict from the server. Past
+        _REPLACEMENT_MAX_FAILURES the replacement is given up: committed after all (a
+        502/504 can follow a commit that went through) is booked; anything else is
+        deleted and cleared. Either way the job waits _REPLACEMENT_GIVE_UP_RETRY and
+        the upload goes on. When the server cannot even say which it is, the
+        replacement stays in the job marked `abandoned` - pausing nothing, never
+        committed - until a GET can tell, so a committed swap is never repeated."""
+        rep = job.get("replacement")
+        if rep is None:
+            await self._store.async_save(self._state)
+            return
+        job["failures"] = job.get("failures", 0) + 1
+        if job["failures"] <= _REPLACEMENT_MAX_FAILURES:
+            await self._store.async_save(self._state)
+            return
+        _LOGGER.warning(
+            "Wolta replacement failed %s cycles in a row; giving it up for now",
+            job["failures"],
+        )
+        booked = False
+        try:
+            status = await self._replacement_status(rep)
+        except WoltaAuthError:
+            raise
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Replacement status unreadable while giving up", exc_info=True)
+            await self._discard_replacement(rep["id"])
+            rep["abandoned"] = True
+        else:
+            if status is not None and status["status"] == "committed":
+                await self._replacement_committed(job, hooks, rep, status.get("result") or {})
+                booked = True
+            elif status is not None:
+                await self._discard_replacement(rep["id"])
+            job["replacement"] = None
+        job.pop("failures", None)
+        if not booked:
+            # A window that went through after all is progress: the job goes on next
+            # cycle instead of waiting a day.
+            job["retry_at"] = (now + _REPLACEMENT_GIVE_UP_RETRY).isoformat()
+        await self._store.async_save(self._state)
+
+    async def _replacement_status(self, rep: dict) -> dict | None:
+        """The server's view of a replacement this client opened earlier: the GET body
+        when it is open or committed, None when it is gone and must start over.
+
+        Only the server's own answers about the replacement count as "gone" (an unknown
+        id, 410, or a closed status). Any other refusal of the GET itself - a 403 from a
+        proxy, a 400, a 408 - says nothing about the replacement: it is raised as an
+        unreadable status: the replacement is kept and paused for, never replaced by a
+        new id, since it may have been committed. If the status still cannot be read at
+        give-up (_replacement_failed), a DELETE is sent (a no-op on the server for a
+        committed replacement) and the replacement is marked abandoned - kept, pausing
+        nothing, never committed - until a GET can tell."""
+        try:
+            status = await self.client.get_replacement(self.token, rep["id"])
+        except WoltaReplacementGone:
+            return None
+        except (WoltaAuthError, WoltaRateLimitError):
+            raise
+        except WoltaApiError as err:
+            raise WoltaApiError(
+                f"Replacement status unreadable (HTTP {err.status})") from err
+        state = status.get("status") if isinstance(status, dict) else None
+        if state in ("open", "committed"):
+            return status
+        if state in ("aborted", "expired", "restored"):
+            return None
+        # Unreadable: guessing "gone" could swap a committed window twice.
+        raise WoltaApiError(f"Unexpected replacement status {state!r}")
+
+    async def _replacement_committed(
+        self, job: dict, hooks: _ReplacementType, rep: dict, result: dict
+    ) -> None:
+        """Book a committed window: done_windows, the type's hook, and no replacement in
+        flight - saved together, so a restart neither repeats nor loses the window."""
+        self._job_cycle["committed"] = True
+        window = self._window_key(rep)
+        if window not in job["done_windows"]:
+            job["done_windows"].append(window)
+        try:
+            await hooks.on_committed(job, rep, result)
+        except Exception as err:  # pylint: disable=broad-except
+            # The window is committed whatever the hook did: never hold it open.
+            _LOGGER.warning(
+                "Wolta replacement hook failed after a commit (%s)", type(err).__name__
+            )
+            _LOGGER.debug("on_committed failure detail", exc_info=True)
+        job["replacement"] = None
+        job.pop("failures", None)
+        await self._store.async_save(self._state)
+        _LOGGER.info(
+            "Wolta replacement committed (%s, %s, %s..%s)",
+            job["type"], rep["kind"], rep["window_start"], rep["window_end"],
+        )
+
+    async def _execute_replacement(
+        self, rep: dict, rows: list[dict] | None, now: datetime, *, opened: bool = False
+    ) -> dict | None:
+        """Open (idempotent on the id), stage the rows in chunks and commit one
+        replacement of the current job. `rows` is None for "swap_battery"; `opened` skips
+        the open of a replacement the server reported open.
+
+        Returns the commit result ({} when the server had nothing to replace, 409
+        empty), or None to try again later. On the server errors of spec §5.3-5.4 the
+        job's replacement is cleared, so the next attempt opens a new id: 409 conflict
+        (the server aborted it), 410 or an unknown id (gone), and a second 409
+        count_mismatch after the rows were sent again. A 429 on open (archive_full)
+        holds the job back until Retry-After. Store is saved before every call that
+        can change the server's state."""
+        job = self._state["replacement_job"]
+        rid = rep["id"]
+        if not opened and not await self._open_replacement(job, rep, now):
+            return None
+        expected = None if rows is None else len({row["ts"] for row in rows})
+        try:
+            if rows is not None:
+                await self._store.async_save(self._state)
+                await self.client.stage_replacement_rows(self.token, rid, rows)
+            self._job_cycle["staged"] = True
+            for attempt in (1, 2):
+                await self._store.async_save(self._state)
+                try:
+                    return await self.client.commit_replacement(self.token, rid, expected)
+                except WoltaReplacementConflict as err:
+                    if err.code == "count_mismatch" and rows is not None and attempt == 1:
+                        _LOGGER.warning(
+                            "Wolta replacement staging incomplete; sending the rows again"
+                        )
+                        await self._store.async_save(self._state)
+                        await self.client.stage_replacement_rows(self.token, rid, rows)
+                        continue
+                    if err.code == "empty":
+                        # Nothing to replace in the window; it stays open server-side.
+                        await self._discard_replacement(rid)
+                        return {}
+                    raise
+        except WoltaReplacementConflict as err:
+            self._note_job_failure(f"409 {err.code}")
+            if err.code != "conflict":  # conflict: the server already aborted it
+                await self._discard_replacement(rid)
+            _LOGGER.warning(
+                "Wolta replacement refused (%s); starting over with a new id", err.code
+            )
+        except WoltaReplacementGone as err:
+            self._note_job_failure(f"gone ({err.code or err.status})")
+            _LOGGER.warning(
+                "Wolta replacement closed by the server (%s); starting over with a new id",
+                err.code or err.status,
+            )
+        job["replacement"] = None
+        await self._store.async_save(self._state)
+        return None
+
+    async def _open_replacement(self, job: dict, rep: dict, now: datetime) -> bool:
+        """Open `rep` on the server after saving its id. False when it was not opened;
+        the job then has no replacement, so nothing pauses."""
+        await self._store.async_save(self._state)
+        try:
+            await self.client.open_replacement(
+                self.token,
+                rep["id"],
+                kind=rep["kind"],
+                window_start=datetime.fromisoformat(rep["window_start"]),
+                window_end=datetime.fromisoformat(rep["window_end"]),
+                fields=rep.get("fields"),
+                reason=rep["reason"],
+            )
+        except WoltaAuthError:
+            raise
+        except WoltaRateLimitError as err:
+            # 429 archive_full: the plant's archive of replaced rows is full until its
+            # oldest entries age out (Retry-After).
+            job["replacement"] = None
+            job["retry_at"] = (now + timedelta(seconds=err.retry_after)).isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta cannot open a replacement now (archive full or rate limited); "
+                "retrying in %s s",
+                err.retry_after,
+            )
+            return False
+        except WoltaApiError as err:
+            if err.status is not None and 400 <= err.status < 500:
+                # A refusal (422, a stream-bound 409, a conflict or a gone id): counted,
+                # so one that never passes parks the job instead of holding the slot.
+                self._note_job_failure(f"open refused (HTTP {err.status})")
+            job["replacement"] = None
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta replacement could not be opened (HTTP %s); retrying next cycle",
+                err.status,
+            )
+            return False
+        return True
+
+    def _replacement_floor(self, since: datetime) -> datetime:
+        """The earliest hour any replacement of this client may touch:
+        max(floor_hour(data_since), floor_hour(entry created_at - _BACKFILL_DAYS)).
+
+        This integration never uploads older history than that (its backfill and the
+        coverage check both reach _BACKFILL_DAYS back from when it was set up), so rows
+        before it came from elsewhere - a CSV upload or the web - and are left alone: a
+        direction swap has no state-of-charge grounds there, and a sensor change would
+        mix the new sensor's hourly values into rows this client never built. An entry
+        without a readable, timezone-aware created_at falls back to data_since."""
+        floor = _floor_hour(since)
+        created = getattr(self.config_entry, "created_at", None)
+        if not isinstance(created, datetime) or created.tzinfo is None:
+            _LOGGER.debug(
+                "No usable config entry created_at (%r); replacements start at data_since",
+                created)
+            return floor
+        return max(floor, _floor_hour(created - timedelta(days=_BACKFILL_DAYS)))
+
+    async def _discard_replacement(self, rid: str) -> None:
+        """Best-effort DELETE of a replacement left open server-side (it expires anyway)."""
+        try:
+            await self.client.delete_replacement(self.token, rid)
+        except WoltaAuthError:
+            raise
+        except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+            _LOGGER.debug("Discarding a replacement failed; it expires server-side", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Direction job: swap the battery fields of stored rows (server spec §9.3)
+    # ------------------------------------------------------------------
+
+    async def _queue_direction_job(self, now: datetime | None = None) -> None:
+        """Start a direction job when the desired inversion differs from the applied one
+        and no job runs. Nothing is re-sent and the bookmark stays: the server swaps the
+        battery fields of the rows it holds and queues the recount at commit. A change of
+        the desired value while a job runs is picked up here once that job is done.
+
+        A direction change goes before a sensor change: an entity job that has not
+        started on the server yet gives way, and is queued again once this one is done.
+        None is queued while a parked direction job's backoff lasts (_park_job)."""
+        job = self._state.get("replacement_job")
+        if job and not self._idle_entity_job(job):
+            return
+        if self._job_backed_off("direction", now or dt_util.utcnow()):
+            return
+        desired = self._desired_intervals()
+        if not intervals.sym_diff(desired, self._applied_intervals()):
+            return
+        if job:
+            _LOGGER.info(
+                "Wolta sensor change postponed: the battery direction is swapped first")
+        self._state["replacement_job"] = self._new_replacement_job(
+            "direction", intervals.dump(intervals.normalize(desired))
+        )
+        await self._store.async_save(self._state)
+        _LOGGER.info("Wolta battery direction changed; swapping it in the stored history")
+
+    async def _direction_next(self, job: dict, now: datetime, profile: dict | None):
+        """The next swap of the direction job, in chronological order.
+
+        The difference D = target Δ applied, less the windows already committed, is
+        bounded to [replacement floor, ceil_hour(bookmark + 15 min)) - the floor is
+        floor_hour(data_since), but never more than _BACKFILL_DAYS before the entry was
+        set up (_replacement_floor); outside it the server holds no rows this client
+        uploaded, and later rows are built with the target - and split into whole-hour segments. Only the last segment may reach into the hour
+        the bookmark lies in; its commit applies the target at once (_direction_committed),
+        before any upload. An earlier one stops at the bookmark's hour, so no row is
+        uploaded with the old direction into a window that is already booked."""
+        target = intervals.parse(job["target"])
+        remaining = intervals.difference(
+            intervals.sym_diff(target, self._applied_intervals()),
+            intervals.parse(job["done_windows"]),
+        )
+        bookmark = self._state.get("last_uploaded_ts")
+        if not remaining or not bookmark:
+            # Nothing stored by this client: the rows still to come carry the target.
+            return "done"
+        since = coverage.server_since(profile)
+        if since is coverage.MISSING:
+            since = coverage.server_since(job)  # the last commit's data_since
+        if since is coverage.MISSING:
+            _LOGGER.debug("No data_since from the server; the direction job waits")
+            self._note_job_failure("no data_since from the server")
+            return None
+        if since is None:
+            return "done"
+        bookmark_end = datetime.fromisoformat(bookmark) + _QUARTER
+        segments = intervals.hour_aligned(
+            intervals.clip(remaining, self._replacement_floor(since), _ceil_hour(bookmark_end))
+        )
+        for index, (start, end) in enumerate(segments):
+            final = index == len(segments) - 1
+            if not final:
+                end = min(end, _floor_hour(bookmark_end))
+            if start < end:
+                return {
+                    "kind": "swap_battery",
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "fields": None,
+                    "reason": "direction",
+                    "final": final,
+                }
+        return "done"
+
+    async def _direction_committed(self, job: dict, rep: dict, result: dict) -> None:
+        """After a committed swap: keep the server's data_since for the next segment, and
+        apply the target right after the last one - unless rows were uploaded past its
+        window since it was chosen (a replacement given up and booked later); then the
+        next segment covers them."""
+        if isinstance(result, dict) and "data_since" in result:
+            job["data_since"] = result["data_since"]
+        if not rep.get("final"):
+            return
+        bookmark = self._state.get("last_uploaded_ts")
+        if bookmark and _ceil_hour(datetime.fromisoformat(bookmark) + _QUARTER) > (
+            datetime.fromisoformat(rep["window_end"])
+        ):
+            return
+        self._set_applied_intervals(intervals.parse(job["target"]))
+
+    async def _direction_finished(self, job: dict) -> None:
+        self._set_applied_intervals(intervals.parse(job["target"]))
+
+    # ------------------------------------------------------------------
+    # Entity job: replace the fields of changed sensors in stored rows
+    # ------------------------------------------------------------------
+
+    def _entities_fingerprint(self) -> str:
+        """The selected sensors per stream as a JSON string - what the stored rows are
+        built from. external_control is in it only when a sensor is chosen, so an
+        installation without one keeps the fingerprint it had before the key existed.
+
+        The SoC sensors are deliberately NOT part of it (spec §6.5, §16): SoC has its own
+        bookkeeping in _track_soc_selection, and a SoC change touches no flow field."""
+        fp_map = dict(self._entity_map)
+        if self._external_entity:
+            fp_map["external_control"] = [self._external_entity]
+        return json.dumps(fp_map, sort_keys=True)
+
+    @staticmethod
+    def _idle_entity_job(job: dict) -> bool:
+        """An entity job that has nothing on the server yet: no replacement in flight
+        and no window committed. Such a job may be replaced (a new target, or a direction
+        change going first) without leaving anything half done."""
+        return (
+            job.get("type") == "entities"
+            and job.get("replacement") is None
+            and not job.get("done_windows")
+        )
+
+    async def _queue_entity_job(self, entities_now: str, now: datetime | None = None) -> None:
+        """Start an entity job when the selected sensors differ from those the stored
+        rows were built with (applied_entities). Nothing is re-sent and the bookmark stays:
+        the job replaces only the fields of the streams a sensor was added to or swapped
+        in (replaced_streams), from the new sensors' statistics. The first recording of
+        the fingerprint (an upgrade) just records it, and a change with nothing to replace
+        (sensors only removed) is applied at once.
+
+        A job that has not started on the server is retargeted when the selection changes
+        again (a new sensor without statistics would otherwise hold it for good), and
+        dropped when the selection is back to the applied one. None is queued while a
+        parked entity job's backoff lasts (_park_job)."""
+        applied = self._state.get("applied_entities")
+        if applied is None:
+            self._state["applied_entities"] = entities_now
+            await self._store.async_save(self._state)
+            return
+        job = self._state.get("replacement_job")
+        if job and not self._idle_entity_job(job):
+            return
+        if job and job.get("target") == entities_now:
+            return
+        if not job and applied == entities_now:
+            return
+        if self._job_backed_off("entities", now or dt_util.utcnow()):
+            return
+        retry_at = job.get("retry_at") if job else None
+        self._state.pop("replacement_job", None)
+        self._entity_rows_cache = {}
+        streams = replaced_streams(applied, entities_now)
+        if not streams:
+            self._state["applied_entities"] = entities_now
+            await self._store.async_save(self._state)
+            return
+        new_job = self._new_replacement_job("entities", entities_now)
+        new_job["streams"] = streams
+        new_job["fields"] = replaced_fields(list(streams))
+        new_job["judged"] = self._judged_selection(streams, entities_now)
+        new_job["phases_done"] = []
+        new_job["retry_at"] = retry_at  # a 429 still holds for the plant's archive
+        self._state["replacement_job"] = new_job
+        await self._store.async_save(self._state)
+        _LOGGER.info(
+            "Wolta sensor selection changed (%s); replacing those fields in the stored "
+            "history", ", ".join(streams),
+        )
+
+    async def _entities_next(self, job: dict, now: datetime, profile: dict | None):
+        """The next replacement of the entity job, or "done".
+
+        Two phases: the energy fields of the replaced energy streams, one replacement
+        per window of complete hours (_energy_next), then external_control in one
+        replacement of its own (_external_next). They differ in what bounds them - the
+        energy fields by the new sensors' statistics, the flag by the binary sensor's
+        recorded states - and the server needs every staged row to carry every replaced
+        field, so they cannot share rows.
+
+        Nothing stored (no bookmark, or data_since null): the rows still to come are
+        built with the new sensors, so the target applies at once."""
+        done = job.setdefault("phases_done", [])
+        if not self._state.get("last_uploaded_ts"):
+            return "done"
+        streams = job.get("streams") or {}
+        energy = sorted(s for s in streams if s != "external_control")
+        for phase, step in (("energy", self._energy_next),
+                            ("external", self._external_next)):
+            if phase in done or (phase == "energy" and not energy) or (
+                    phase == "external" and "external_control" not in streams):
+                continue
+            result = await step(job, now, profile)
+            if result == "phase_done":
+                done.append(phase)
+                continue
+            return result
+        return "done"
+
+    def _plan_since(self, profile: dict | None):
+        """Where a new plan reads from: floor_hour(data_since), never before the
+        replacement floor (_replacement_floor); MISSING to wait (a job-level failure),
+        None when the server holds no rows (the job is then done)."""
+        since = coverage.server_since(profile)
+        if since is coverage.MISSING or since is None:
+            if since is coverage.MISSING:
+                _LOGGER.debug("No data_since from the server; the sensor change waits")
+                self._note_job_failure("no data_since from the server")
+            return since
+        return self._replacement_floor(since)
+
+    async def _energy_next(self, job: dict, now: datetime, profile: dict | None):
+        """The next window of the energy phase, from the job's stored plan.
+
+        The plan is made once - the read from floor_hour(data_since) to now, its
+        hourly/5-minute split, and the windows with the latest quarter of each that
+        carries every field - so every window and every resume reads the same. One older
+        than _ENTITY_PLAN_MAX_AGE is made anew for what is not committed yet, before its
+        5-minute statistics can be purged. Returns a spec, None to wait (no statistics
+        from the added sensors yet), "phase_done", or "done" (no rows on the server)."""
+        if self._selection_left(job, "energy"):
+            return self._left_selection_step(
+                job, "energy", "the sensors it was planned for are no longer selected")
+        plan = job.get("energy_plan")
+        if plan is not None and now - datetime.fromisoformat(plan["planned_at"]) > (
+            _ENTITY_PLAN_MAX_AGE
+        ):
+            plan = None
+        if plan is None:
+            read_from = self._plan_since(profile)
+            if read_from is coverage.MISSING:
+                return None
+            if read_from is None:
+                return "done"
+            streams = job.get("streams") or {}
+            energy = sorted(s for s in streams if s != "external_control")
+            added = sorted({e for s in energy for e in streams[s]})
+            if not await self._entities_probe(added, read_from, now):
+                if self._started(job):
+                    return self._end_phase(
+                        job, "energy", "the added sensors have no statistics any more")
+                _LOGGER.debug("No statistics from the new sensors yet; the sensor change waits")
+                return None
+            split = _floor(now - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600)
+            built = await self._energy_build(job, read_from, split, now)
+            if built is None:
+                _LOGGER.debug("No complete hour from the new sensors yet; the sensor change waits")
+                return self._plan_failed(job)
+            windows, rows_by_window = built
+            if not windows:
+                if self._started(job):
+                    return "phase_done"
+                return None
+            job.pop("plan_failures", None)
+            plan = {
+                "read_from": read_from.isoformat(),
+                "read_end": now.isoformat(),
+                "split": split.isoformat(),
+                "planned_at": now.isoformat(),
+                "windows": windows,
+            }
+            job["energy_plan"] = plan
+            for (ws, we, _last), rows in zip(windows, rows_by_window):
+                self._entity_rows_cache[(job["target"], "energy", ws, we)] = rows
+        windows = plan["windows"]
+        for index, (ws, we, last_full) in enumerate(windows):
+            if [ws, we, "energy"] in job["done_windows"]:
+                continue
+            streams = job.get("streams") or {}
+            return {
+                "kind": "rows",
+                "reason": "entities_changed",
+                "phase": "energy",
+                "window_start": ws,
+                "window_end": we,
+                "fields": replaced_fields([s for s in streams if s != "external_control"]),
+                "read_from": plan["read_from"],
+                "read_end": plan["read_end"],
+                "split": plan["split"],
+                # The latest quarter of the window staged with every field, and whether
+                # it is the last window: the bookmark rule (_entities_committed).
+                "last_full": last_full,
+                "final": index == len(windows) - 1,
+            }
+        return "phase_done"
+
+    @staticmethod
+    def _started(job: dict) -> bool:
+        """Whether the job has committed a window: it is no longer idle, so no new
+        selection or direction change can replace it - only finishing it can."""
+        return bool(job.get("done_windows"))
+
+    @staticmethod
+    def _judged_selection(streams: dict, target: str) -> dict[str, list[str]] | None:
+        """The sensors of every stream the energy phase judges - the replaced energy
+        streams, plus the other battery stream when either is replaced - as the job's
+        target selects them. The phase's rows are built from the CURRENT selection
+        (_build reads _stream_ids/_statistic_ids), so these are what its windows and rows
+        stay valid for. None when the target cannot be read."""
+        selected = _parse_fingerprint(target)
+        if selected is None:
+            return None
+        judged = {s for s in streams if s != "external_control"}
+        if judged & {"batt_in", "batt_out"}:
+            judged |= {"batt_in", "batt_out"}
+        return {s: sorted(selected[s]) for s in sorted(judged)}
+
+    def _selection_left(self, job: dict, phase: str) -> bool:
+        """Whether the current selection is no longer the one `phase` was planned for
+        (the owner reconfigured while the job ran).
+
+        Energy phase: any difference in the sensors of a judged stream (_judged_selection)
+        - an added, removed or swapped sensor alike - since every row of the phase is
+        built from the current selection: a sensor added alongside would change which
+        quarters are complete, and the server removes every stored row in the window
+        that has no staged row. External phase: the chosen binary sensor differs.
+
+        It holds whether or not the job has started: a started job ends the phase
+        (_end_phase); one that has committed nothing waits, its replacement in flight is
+        dropped (_entities_rows gives None), and the next cycle retargets it
+        (_queue_entity_job)."""
+        streams = job.get("streams") or {}
+        if phase == "external":
+            return set(streams.get("external_control") or []) != (
+                {self._external_entity} if self._external_entity else set())
+        judged = job.get("judged")
+        if judged is None:
+            judged = self._judged_selection(streams, job.get("target"))
+        if judged is None:
+            return True  # an unreadable target: nothing to build its rows against
+        return any(
+            set(sensors) != set(self._entity_map.get(stream) or [])
+            for stream, sensors in judged.items())
+
+    def _left_selection_step(self, job: dict, phase: str, why: str) -> str | None:
+        """The phase's answer once its selection has left: a started job ends the phase;
+        one that has committed nothing waits for the next cycle's retarget."""
+        if self._started(job):
+            return self._end_phase(job, phase, why)
+        _LOGGER.debug("Wolta sensor selection changed again; the sensor change is retargeted")
+        job.pop("energy_plan", None)
+        return None
+
+    @staticmethod
+    def _end_phase(job: dict, phase: str, why: str) -> str:
+        """End a started job's phase early: the job finishes with its target, and the
+        next cycle queues a new job from that target to the current selection."""
+        _LOGGER.info("Wolta sensor change: ending the %s phase early (%s)", phase, why)
+        job.pop("energy_plan", None)
+        job.pop("plan_failures", None)
+        return "phase_done"
+
+    def _plan_failed(self, job: dict) -> str | None:
+        """A cycle in which the energy plan could not be made (no complete hour from the
+        added sensors). A job that has committed nothing just waits; a started one -
+        which nothing else can replace - ends its phase after _ENTITY_PLAN_MAX_FAILURES
+        cycles in a row."""
+        if not self._started(job):
+            return None
+        job["plan_failures"] = job.get("plan_failures", 0) + 1
+        if job["plan_failures"] >= _ENTITY_PLAN_MAX_FAILURES:
+            return self._end_phase(
+                job, "energy", "the added sensors' statistics cannot be read")
+        return None
+
+    async def _external_next(self, job: dict, now: datetime, profile: dict | None):
+        """The external_control phase: one replacement over the span the chosen binary
+        sensor's recorded states cover. No recorded state: nothing to replace, the phase
+        is done. A failed read is tried again next cycle; after _EXTERNAL_MAX_ERRORS in a
+        row the phase is given up, so it never holds the job (and with it every later
+        direction or sensor change) for good."""
+        if self._selection_left(job, "external"):
+            return self._left_selection_step(job, "external", "the sensor is no longer selected")
+        read_from = self._plan_since(profile)
+        if read_from is coverage.MISSING:
+            return None
+        if read_from is None:
+            return "done"
+        try:
+            plan = await self._external_rows(read_from, now)
+        except Exception as err:  # pylint: disable=broad-except
+            job["external_errors"] = job.get("external_errors", 0) + 1
+            _LOGGER.debug("External-control read failure detail", exc_info=True)
+            if job["external_errors"] >= _EXTERNAL_MAX_ERRORS:
+                _LOGGER.warning(
+                    "Wolta cannot read the external-control sensor's history (%s); its "
+                    "flags in the stored history are left as they are", type(err).__name__)
+                return "phase_done"
+            _LOGGER.warning(
+                "External-control history read failed (%s); retrying next cycle",
+                type(err).__name__)
+            return None
+        job.pop("external_errors", None)
+        if plan is None:
+            return "phase_done"
+        ws, we, rows = plan
+        spec = {
+            "kind": "rows",
+            "reason": "entities_changed",
+            "phase": "external",
+            "window_start": ws.isoformat(),
+            "window_end": we.isoformat(),
+            "fields": ["external_control"],
+            "read_from": read_from.isoformat(),
+            "read_end": now.isoformat(),
+        }
+        self._entity_rows_cache[(job["target"], "external", spec["window_start"],
+                                 spec["window_end"])] = rows
+        return spec
+
+    async def _entities_rows(
+        self, job: dict, spec: dict, now: datetime
+    ) -> list[dict] | None:
+        """The rows of the entity job's replacement: those its plan just built, or on a
+        resume the same read again - everything they depend on is in the spec (read
+        start and end, hourly/5-minute split, window), never `now`. None when they cannot
+        be built again: the runner then drops the replacement, and the energy plan is
+        made anew."""
+        phase = spec.get("phase", "energy")
+        if self._selection_left(job, phase):
+            # Reconfigured meanwhile: rows built now would have another composition than
+            # the plan. The runner drops the replacement; then a started job ends the
+            # phase and one that has committed nothing waits to be retargeted.
+            job.pop("energy_plan", None)
+            return None
+        key = (job["target"], phase, spec["window_start"], spec["window_end"])
+        cached = self._entity_rows_cache.pop(key, None)
+        if cached is not None:
+            return cached
+        window = (datetime.fromisoformat(spec["window_start"]),
+                  datetime.fromisoformat(spec["window_end"]))
+        read_from = datetime.fromisoformat(spec.get("read_from") or spec["window_start"])
+        read_end = datetime.fromisoformat(spec.get("read_end") or spec["window_end"])
+        if phase == "external":
+            plan = await self._external_rows(read_from, read_end, window=window)
+            return None if plan is None else plan[2]
+        split = (datetime.fromisoformat(spec["split"]) if spec.get("split")
+                 else _floor(read_end - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600))
+        built = await self._energy_build(job, read_from, split, read_end, window=window)
+        if not built or not built[1] or not built[1][0]:
+            job.pop("energy_plan", None)
+            return None
+        return built[1][0]
+
+    async def _entities_probe(
+        self, sensors: list[str], read_from: datetime, read_end: datetime
+    ) -> bool:
+        """Whether any sensor ADDED to the replaced streams has hourly statistics since
+        `read_from`: a cheap read before the full one, which a job waiting for a new
+        sensor would otherwise repeat for the whole history every cycle."""
+        if not sensors:
+            return False
+        raw = await async_fetch_change(
+            self.hass, set(sensors), _read_start(read_from, 3600), read_end, period="hour")
+        return any(measured_starts(raw.get(e) or [], 3600) for e in sensors)
+
+    async def _energy_build(
+        self,
+        job: dict,
+        read_from: datetime,
+        split: datetime,
+        read_end: datetime,
+        window: tuple[datetime, datetime] | None = None,
+    ) -> tuple[list[list], list[list[dict]]] | None:
+        """Read the flows from `read_from` to `read_end` (hourly before `split`, 5-minute
+        after) and build the energy phase's windows ([start, end, last_full] in ISO) and
+        the rows of each, or None when the added sensors have measured nothing yet.
+
+        A quarter is replaced when every sensor of the replaced streams measured it
+        cleanly (both battery streams count when either is replaced, since the pair is
+        replaced together), counted only from the first period every ADDED sensor
+        measured - before that, a solar sensor's nights would count as known zeros back to
+        read_from. The windows are the maximal runs of whole hours whose four quarters
+        are all complete, from read_from on and outside the windows already committed:
+        a new sensor's first period can never be clean, so a window never removes the
+        hour before it, and a window's last hour is a complete one. Runs at most
+        _ENTITY_GAP_MERGE apart are one window (the incomplete quarters between are
+        removed as honest gaps); a longer silence stays outside every window and keeps
+        its stored rows. More than _ENTITY_MAX_WINDOWS runs: the smallest gaps are merged
+        first. `window` given (a resume): only that window's rows."""
+        streams_by = job.get("streams") or {}
+        sources = await self._entities_sources(read_from, split, read_end)
+        external = await self._external_quarters(read_from, read_end)
+        done = [(datetime.fromisoformat(k[0]), datetime.fromisoformat(k[1]))
+                for k in job.get("done_windows") or [] if len(k) == 3 and k[2] == "energy"]
+        # `now` as the split implies it, so the solar anchor reads do not move. The
+        # judging, the windows and the rows are per quarter over up to a year: they run
+        # in the executor with the build (_energy_windows).
+        _built, planned = await self._build(
+            split + timedelta(days=_SHORT_TERM_DAYS), sources,
+            lambda built, streams: _energy_windows(
+                built, streams, sources, streams_by, external, read_from, split, done,
+                window))
+        return planned
+
+    async def _external_rows(
+        self,
+        read_from: datetime,
+        read_end: datetime,
+        window: tuple[datetime, datetime] | None = None,
+    ) -> tuple[datetime, datetime, list[dict]] | None:
+        """The external_control rows: the flag per quarter from the chosen binary
+        sensor's recorded states, over the span they cover - from the hour of the first
+        recorded state (never before `read_from`) to the hour after the last quarter that
+        ended by `read_end`. Every quarter of the window gets a row carrying only
+        external_control, so no stored row is left unstaged (the server would remove it);
+        a quarter the server holds no row for is skipped there. None when there is
+        nothing to replace (no sensor, no recorded state). A failed read raises."""
+        entity = self._external_entity
+        if not entity:
+            return None
+        points = await stats.async_fetch_states(self.hass, entity, read_from, read_end)
+        if not points:
+            return None
+        flagged = stats.flagged_quarters(points, read_end, start=read_from)
+        last_end = _floor(read_end, 900)  # quarters ending by read_end
+        if window is None:
+            start = max(read_from, _floor_hour(min(ts for ts, _state in points)))
+            if last_end <= start:
+                return None
+            window = (start, _ceil_hour(last_end))
+        start, end = window
+        rows = []
+        q = start
+        while q < min(end, last_end):
+            rows.append({"ts": q.isoformat(), "external_control": q in flagged})
+            q += _QUARTER
+        if not rows:
+            return None
+        return start, end, rows
+
+    async def _entities_sources(
+        self, read_from: datetime, split: datetime, end: datetime
+    ) -> list[_Source]:
+        """The statistics reads of the energy phase, split like _backfill_rows: hourly
+        before `split`, 5-minute after it, each one period early."""
+        sources: list[_Source] = []
+        hourly_end = min(split, end)
+        if hourly_end > read_from:
+            raw = await async_fetch_change(
+                self.hass, self._statistic_ids(), _read_start(read_from, 3600), hourly_end,
+                period="hour")
+            sources.append(_Source(raw, split_hour_to_quarters, read_from, hourly_end))
+        five_start = max(read_from, split)
+        if end > five_start:
+            raw = await async_fetch_change(
+                self.hass, self._statistic_ids(), _read_start(five_start, 300), end,
+                period="5minute")
+            sources.append(_Source(raw, aggregate_5min_to_15min, five_start, end))
+        return sources
+
+    async def _entities_committed(self, job: dict, rep: dict, result: dict) -> None:
+        """After a committed window.
+
+        The energy phase moves the bookmark to the latest quarter of the window staged
+        with every field when that is later than the bookmark (the server inserted those
+        rows), or when the bookmark lay inside the window (rows after that quarter may
+        have been removed). After the last window, a bookmark past it steps back too: the
+        quarters after the window still hold the old sensors' values, and the regular
+        upload sends them again once they are complete. A step back stops at the
+        5-minute boundary of the plan (_ENTITY_SHORT_TERM_DAYS). Nothing moves on an
+        empty result: the server replaced nothing. The external phase is done with its one window. The
+        applied fingerprint follows once every phase is done (_entities_finished)."""
+        phase = rep.get("phase", "energy")
+        if phase == "external":
+            done = job.setdefault("phases_done", [])
+            if phase not in done:
+                done.append(phase)
+        if isinstance(result, dict) and result:
+            _LOGGER.info(
+                "Wolta sensor change replaced %s in %s..%s: %s row(s) updated, %s inserted,"
+                " %s removed, %s partial row(s) skipped",
+                ", ".join(rep.get("fields") or []), rep["window_start"], rep["window_end"],
+                result.get("updated_rows"), result.get("inserted_rows"),
+                result.get("removed_rows"), result.get("skipped_partial"),
+            )
+        if phase != "energy" or not result:
+            return
+        bookmark = self._state.get("last_uploaded_ts")
+        if not bookmark:
+            return
+        mark = datetime.fromisoformat(bookmark)
+        start = datetime.fromisoformat(rep["window_start"])
+        end = datetime.fromisoformat(rep["window_end"])
+        full = datetime.fromisoformat(rep["last_full"]) if rep.get("last_full") else None
+        new = None
+        if full is not None and (full > mark or start <= mark < end):
+            new = full
+        elif rep.get("final") and mark >= end:
+            new = full if full is not None else end - _QUARTER
+        if new is not None and new < mark:
+            # A step back never passes the 5-minute boundary (with the plan's margin):
+            # from further back the regular upload would heal from hourly statistics and
+            # overwrite the recent quarters with hour/4 values. What lies before it is
+            # older than the 5-minute statistics anyway, and the window covered it. A
+            # bookmark already behind the boundary heals from hourly statistics anyway.
+            floor = _floor(dt_util.utcnow() - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600)
+            if mark > floor:
+                new = max(new, floor)
+        if new is not None and new != mark:
+            self._state["last_uploaded_ts"] = new.isoformat()
+
+    async def _entities_finished(self, job: dict) -> None:
+        self._entity_rows_cache = {}
+        self._state["applied_entities"] = job["target"]
 
     # ------------------------------------------------------------------
     # Main update
@@ -723,144 +2213,36 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 results = await self.client.results(self.token)
                 return self._build_data(results, last_uploaded=None)
 
-            # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
-            # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
-            # the corrected battery direction. applied_invert is recorded in state so this only happens
-            # on an actual change, not on every tick.
-            invert_now = bool(self.config_entry.data.get(CONF_INVERT_BATTERY))
-            applied_invert = self._state.get("applied_invert")
-            if applied_invert is None:
-                # First-time recording (e.g. an existing install upgrading): initialize without
-                # touching the bookmark – the already-uploaded data was built with the current flag.
-                self._state["applied_invert"] = invert_now
-                await self._store.async_save(self._state)
-            elif applied_invert != invert_now:
-                # Actual change → reset the bookmark for a full re-backfill with the corrected direction,
-                # and flag that the grade should be recomputed IMMEDIATELY after the upload (bypassing the
-                # 7-day cadence in _maybe_recompute) so the corrected grade shows up without a ~24h delay.
-                self._state.pop("last_uploaded_ts", None)
-                self._state["applied_invert"] = invert_now
-                self._state["pending_invert_recompute"] = True
-                await self._store.async_save(self._state)
-
-            # Entity selections changed (reconfigure flow) → full re-backfill so the
-            # server-side history is rebuilt from the new sensors. Same self-heal
-            # pattern as applied_invert above; first-time recording (upgrade) leaves
-            # the bookmark untouched.
-            # external_control-nyckeln ingår BARA när sensorn är vald: annars ändras
-            # fingerprintet för varje befintlig installation vid uppgradering → onödig
-            # full re-backfill för hela flottan.
-            _fp_map = dict(self._entity_map)
-            if self._external_entity:
-                _fp_map["external_control"] = [self._external_entity]
-            # The SoC sensors are deliberately NOT part of this fingerprint (spec §6.5, §16):
-            # a flow re-backfill rewrites day 9-365 from HOURLY statistics split over four
-            # quarters, overwriting quarter data that once came from 5-minute statistics HA
-            # has since purged - irreversible, and it recomputes the grade. SoC has its own
-            # bookkeeping in _track_soc_selection.
-            entities_now = json.dumps(_fp_map, sort_keys=True)
-            applied_entities = self._state.get("applied_entities")
-            if applied_entities is None:
-                self._state["applied_entities"] = entities_now
-                await self._store.async_save(self._state)
-            elif applied_entities != entities_now:
-                self._state.pop("last_uploaded_ts", None)
-                self._state["applied_entities"] = entities_now
-                self._state["pending_invert_recompute"] = True
-                await self._store.async_save(self._state)
+            # A changed battery direction or sensor selection is no longer re-sent: the
+            # bookmark stays and the server's stored rows are replaced in place - a
+            # direction job swaps the battery fields, an entity job replaces only the
+            # changed sensors' fields (both before the replacement runner below; one job
+            # at a time, the direction first). The server queues the recount at commit.
+            entities_now = self._entities_fingerprint()
 
             await self._track_soc_selection()
+            await self._queue_direction_job(now)
+            await self._queue_entity_job(entities_now, now)
 
-            bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
-            full_backfill = bookmark is None
-
-            backfill_start = now - timedelta(days=_BACKFILL_DAYS)
-            # Deliberately NOT floored like _short_term_start(): SoC has no completeness
-            # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
-            short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
-            if bookmark is None:
-                rows = await self._backfill_rows(now)
-                flow_start = backfill_start
-            else:
-                flow_start = datetime.fromisoformat(bookmark)
-                if now - flow_start > timedelta(days=_SHORT_TERM_DAYS):
-                    rows = await self._heal_rows(flow_start, now)
-                else:
-                    rows = await self._incremental_rows(flow_start, now)
-
-            # The SoC read has its OWN bookmark (soc_uploaded_ts), never the flows'. The
-            # flow bookmark moves whenever the flows were delivered - also when the SoC
-            # read failed or a 422 dropped SoC from the call - and a read from there would
-            # lose the quarters in between for good, although HA keeps 5-minute statistics
-            # for ~10 days. A pending SoC backfill (sensor added, or first start with
-            # sensors chosen) widens the read to the whole backfill window; the flow rows
-            # stay those of the branch above, the flow bookmark is never steered by SoC.
-            soc_backfill = bool(self._state.get("soc_backfill_pending"))
-            soc_start = flow_start  # first time with sensors and no backfill pending
-            soc_bookmark = self._soc_bookmark()
-            if soc_backfill:
-                soc_start = backfill_start
-            elif soc_bookmark is not None:
-                soc_start = soc_bookmark
-            soc_start = max(soc_start, backfill_start)
-            soc_hourly_until = max(soc_start, short_term_start)
-
+            # A replacement of stored flows runs before the regular upload (server spec
+            # §9): while one is open on the server, neither the regular PUT /data nor the
+            # coverage fill writes, since either would make its commit a 409 conflict.
+            paused = await self._run_replacement_job(now, profile_payload)
             put_payload: dict | None = None
-            if rows:
-                # Read here, not per branch: SoC only rides along with flow rows (the API
-                # requires at least one row), so a cycle without rows reads nothing.
-                # Hours before the short-term limit, quarters after it, whatever the flow
-                # branch is.
-                soc, soc_ok = await self._soc_state(
-                    soc_start, now, hourly_until=soc_hourly_until)
-                try:
-                    soc_delivered, put_response = await self._put_rows(rows, soc)
-                except WoltaApiError as err:
-                    if err.status == 413:
-                        # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
-                        # reachable for linked profiles with web CSV + HA backfill).
-                        # Surface via repairs and skip the upload – results still work.
-                        # Bookmark is NOT advanced (nothing was persisted server-side).
-                        ir.async_create_issue(
-                            self.hass,
-                            DOMAIN,
-                            _ISSUE_PROFILE_FULL,
-                            is_fixable=False,
-                            severity=ir.IssueSeverity.WARNING,
-                            translation_key=_ISSUE_PROFILE_FULL,
-                        )
-                    else:
-                        raise
-                else:
-                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
-                    put_payload = put_response
-                    self._state["last_uploaded_ts"] = rows[-1]["ts"]
-                    # The SoC backfill is done only when the read raised nothing AND the
-                    # PUT carrying it went through; otherwise the next cycle retries it.
-                    if soc_backfill and soc_ok and soc_delivered:
-                        self._state.pop("soc_backfill_pending", None)
-                    # The SoC bookmark moves on the same condition, and only with sensors
-                    # chosen: without them no key is ever written (fleet default).
-                    if self._soc_entities and soc_ok and soc_delivered:
-                        self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
-                            soc, self._state["last_uploaded_ts"])
-                    await self._store.async_save(self._state)
-                    # Clear failure counter on success
-                    self._state.pop("consecutive_failure_days", None)
-                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+            backfill_read = False
+            if not paused:
+                put_payload, backfill_read = await self._upload_regular(now)
 
             # Coverage reconciliation (spec 2026-10-10 täckningsavstämning): after the
             # regular upload, so the server state includes our own writes and its spike
             # rule; before _maybe_recompute, so a fill's forced recompute runs this cycle.
             # Not during fast-poll - the profile GET is skipped then for the same reason.
-            if self.update_interval != _FAST_POLL:
+            if not paused and self.update_interval != _FAST_POLL:
                 try:
                     await self._reconcile_coverage(
                         now,
                         put_payload if put_payload is not None else profile_payload,
-                        # The full backfill read the whole window when it delivered or found
-                        # nothing to send; only a failed (413) delivery leaves it unread.
-                        full_backfill=full_backfill and (put_payload is not None or not rows),
+                        full_backfill=backfill_read,
                     )
                 except WoltaAuthError:
                     raise  # purged profile → the reauth path below
@@ -918,6 +2300,93 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 self._track_failure(err)
             raise UpdateFailed(f"wolta.se unreachable: {err}") from err
 
+    async def _upload_regular(self, now: datetime) -> tuple[dict | None, bool]:
+        """The regular upload: read the flows since the bookmark (or the full backfill
+        without one), PUT them with the SoC rows, advance the bookmarks. Returns the PUT
+        response (None when nothing was delivered) and whether a full backfill read
+        the whole window."""
+        bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
+        full_backfill = bookmark is None
+
+        backfill_start = now - timedelta(days=_BACKFILL_DAYS)
+        # Deliberately NOT floored like _short_term_start(): SoC has no completeness
+        # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
+        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        if bookmark is None:
+            rows = await self._backfill_rows(now)
+            flow_start = backfill_start
+        else:
+            flow_start = datetime.fromisoformat(bookmark)
+            if now - flow_start > timedelta(days=_SHORT_TERM_DAYS):
+                rows = await self._heal_rows(flow_start, now)
+            else:
+                rows = await self._incremental_rows(flow_start, now)
+
+        # The SoC read has its OWN bookmark (soc_uploaded_ts), never the flows'. The
+        # flow bookmark moves whenever the flows were delivered - also when the SoC
+        # read failed or a 422 dropped SoC from the call - and a read from there would
+        # lose the quarters in between for good, although HA keeps 5-minute statistics
+        # for ~10 days. A pending SoC backfill (sensor added, or first start with
+        # sensors chosen) widens the read to the whole backfill window; the flow rows
+        # stay those of the branch above, the flow bookmark is never steered by SoC.
+        soc_backfill = bool(self._state.get("soc_backfill_pending"))
+        soc_start = flow_start  # first time with sensors and no backfill pending
+        soc_bookmark = self._soc_bookmark()
+        if soc_backfill:
+            soc_start = backfill_start
+        elif soc_bookmark is not None:
+            soc_start = soc_bookmark
+        soc_start = max(soc_start, backfill_start)
+        soc_hourly_until = max(soc_start, short_term_start)
+
+        put_payload: dict | None = None
+        if rows:
+            # Read here, not per branch: SoC only rides along with flow rows (the API
+            # requires at least one row), so a cycle without rows reads nothing.
+            # Hours before the short-term limit, quarters after it, whatever the flow
+            # branch is.
+            soc, soc_ok = await self._soc_state(
+                soc_start, now, hourly_until=soc_hourly_until)
+            try:
+                soc_delivered, put_response = await self._put_rows(rows, soc)
+            except WoltaApiError as err:
+                if err.status == 413:
+                    # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
+                    # reachable for linked profiles with web CSV + HA backfill).
+                    # Surface via repairs and skip the upload – results still work.
+                    # Bookmark is NOT advanced (nothing was persisted server-side).
+                    ir.async_create_issue(
+                        self.hass,
+                        DOMAIN,
+                        _ISSUE_PROFILE_FULL,
+                        is_fixable=False,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key=_ISSUE_PROFILE_FULL,
+                    )
+                else:
+                    raise
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                put_payload = put_response
+                self._state["last_uploaded_ts"] = rows[-1]["ts"]
+                # The SoC backfill is done only when the read raised nothing AND the
+                # PUT carrying it went through; otherwise the next cycle retries it.
+                if soc_backfill and soc_ok and soc_delivered:
+                    self._state.pop("soc_backfill_pending", None)
+                # The SoC bookmark moves on the same condition, and only with sensors
+                # chosen: without them no key is ever written (fleet default).
+                if self._soc_entities and soc_ok and soc_delivered:
+                    self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
+                        soc, self._state["last_uploaded_ts"])
+                await self._store.async_save(self._state)
+                # Clear failure counter on success
+                self._state.pop("consecutive_failure_days", None)
+                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+
+        # The full backfill read the whole window when it delivered or found nothing to
+        # send; only a failed (413) delivery leaves it unread.
+        return put_payload, full_backfill and (put_payload is not None or not rows)
+
     def _build_data(self, results: dict, *, last_uploaded: datetime | None) -> WoltaData:
         """WoltaData + polltakt ur ett /results-svar. EN sanning för pending-tolkningen,
         delad av strömningsvägen och view-only-grenen.
@@ -955,10 +2424,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     def _stream_ids(self) -> dict[str, list[str]]:
         """The selected statistic ids per stream, keyed by merge_streams' parameter
-        names, with the invert flag applied (_effective_stream): a snapshot taken on the
-        event loop, so the build in the executor reads no config entry."""
-        return {name: list(self._entity_map[self._effective_stream(name)])
-                for name in self._entity_map}
+        names, as configured: a snapshot taken on the event loop, so the build in the
+        executor reads no config entry. The battery direction is NOT applied here - it
+        can differ per quarter, so _build_rows swaps the built values instead."""
+        return {name: list(ids) for name, ids in self._entity_map.items()}
 
     async def _build_rows(
         self, now: datetime, sources: list[_Source], external: set[datetime]
@@ -969,17 +2438,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         The build is pure but CPU-heavy: a backfill judges a year of hourly and nine
         days of 5-minute periods for every sensor, plus the sun's position per day. Off
         the event loop it cannot stall Home Assistant. What reads Home Assistant - the
-        stream ids under the invert flag and the home position for the sun - is taken
-        here, on the loop, and handed in."""
+        stream ids, the applied invert intervals and the home position for the sun - is
+        taken here, on the loop, and handed in.
+
+        The battery direction: the streams are built as the sensors say, then charge and
+        discharge swap for every quarter starting inside an APPLIED invert interval - the
+        intervals the server's stored rows are built with, so a new row always matches
+        its stored neighbours. Completeness is untouched by the swap: both battery
+        streams' sensors are judged for every quarter either way. ``built`` keeps the
+        unswapped streams; only the rows carry the swap."""
+        return await self._build(
+            now, sources,
+            lambda built, streams: merge_streams(
+                **streams, external=external, complete=built.complete))
+
+    async def _build(self, now: datetime, sources: list[_Source], finish: Callable):
+        """_build_rows' build with the last step given: `finish(built, swapped streams)`
+        runs in the executor after the streams are built and the APPLIED invert intervals
+        swapped in, and its result is returned beside `built`."""
         sources = await self._anchor_solar(now, sources)
         ids = self._stream_ids()
+        applied = self._applied_intervals()
         sun_down = ({_PERIOD_S[src.agg_fn]: self._sun_down_fn(_PERIOD_S[src.agg_fn])
                      for src in sources} if ids["solar"] else {})
 
-        def job() -> tuple[_Built, list[dict]]:
+        def job():
             built = self._build_streams(*sources, ids=ids, sun_down=sun_down)
-            return built, merge_streams(
-                **built.streams, external=external, complete=built.complete)
+            streams = intervals.apply_invert(built.streams, applied)
+            return built, finish(built, streams)
 
         return await self.hass.async_add_executor_job(job)
 
@@ -1027,12 +2513,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             streams[name] = merged
 
         sensors = {e for stream_ids in ids.values() for e in stream_ids}
-        # The solar stream is not swapped by the invert flag.
         solar = set(ids["solar"])
         periods = {_PERIOD_S[src.agg_fn] for src in sources}
         if sun_down is None:
             sun_down = {p: self._sun_down_fn(p) for p in periods} if solar else {}
         complete: set[datetime] = set()
+        by_stream: dict[str, set[datetime] | None] = {
+            name: (set() if stream_ids else None) for name, stream_ids in ids.items()}
         blame = {e: 0 for e in sensors}
         # Newest measured period per sensor over the whole read, with its source's period.
         newest: dict[str, tuple[int, int]] = {}
@@ -1059,6 +2546,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             else:
                 src_complete = set()
             complete |= src_complete
+            for name, stream_ids in ids.items():
+                if stream_ids:
+                    by_stream[name] |= set.intersection(*(clean[e] for e in stream_ids))
             for e in sensors:
                 blame[e] += len(src_candidates - clean[e])
         asleep: set[str] = set()
@@ -1069,7 +2559,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             asleep = _discount_night(newest, solar, first, step, sun_down[step])
         silent = _silent_sensors(sensors, newest, _ENERGY_EMPTY_MIN_WINDOW)
         incomplete = len(candidates - complete)
-        return _Built(streams, complete, silent, incomplete, blame, asleep - silent)
+        return _Built(streams, complete, silent, incomplete, blame, asleep - silent,
+                      by_stream)
 
     def _sun_down_fn(self, period_s: int) -> Callable[[int], bool]:
         """``sun_down(period_start)`` for statistics periods of ``period_s`` at Home
@@ -1151,10 +2642,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         whose only sensor died after it had worked - the bookmark quarter keeps such a
         stream non-empty in every read. A stream without configured sensors is never
         empty: solar-less plants are a normal configuration. Nor is a stream whose
-        sensors are all asleep (_asleep_streams)."""
+        sensors are all asleep (_asleep_streams).
+
+        Named by role as it stands now (_effective_stream): ``built`` holds the
+        unswapped streams, so a role's data is the stream of the sensors feeding it,
+        and the repair texts pair each role with exactly those sensors."""
         out = []
-        for name, data in built.streams.items():
-            entities = set(self._entity_map[self._effective_stream(name)])
+        for name in built.streams:
+            source = self._effective_stream(name)
+            entities = set(self._entity_map[source])
+            data = built.streams[source]
             if not entities or entities <= built.asleep:
                 continue
             if not data or entities <= built.silent:
@@ -1166,9 +2663,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         sensors that trail only by night (_discount_night) - an inverter that sleeps
         from sunset, or through a polar night. Such a read says nothing about the
         sensors: it neither counts toward energy_empty nor clears it."""
-        return [name for name, data in built.streams.items()
-                if (entities := set(self._entity_map[self._effective_stream(name)]))
-                and not data and entities <= built.asleep]
+        out = []
+        for name in built.streams:
+            source = self._effective_stream(name)  # by role, as in _empty_streams
+            entities = set(self._entity_map[source])
+            if entities and not built.streams[source] and entities <= built.asleep:
+                out.append(name)
+        return out
 
     async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
         """Track selected sensors that are silent (_silent_sensors: no measured period,
@@ -1270,11 +2771,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         ir.async_delete_issue(self.hass, DOMAIN, self._energy_issue_id)
 
     def _effective_stream(self, stream: str) -> str:
-        """With the invert flag (issue #1), batt_in reads the discharge sensor and batt_out
-        the charge sensor – the battery direction is flipped so a reversed sensor mapping is corrected
-        without the user touching their HA sensors. Only the battery currents are affected (grid/solar untouched).
-        The flag is read live from config_entry so an options change takes effect without a reload."""
-        if not self.config_entry.data.get(CONF_INVERT_BATTERY):
+        """The stream whose sensors feed ``stream``'s role NOW (issue #1): inside an
+        applied invert interval batt_in reads the discharge sensor and batt_out the
+        charge sensor. Only the battery currents are affected (grid/solar untouched).
+
+        For texts and the silence diagnostics only - the rows swap per quarter
+        (_build_rows), and history may be inverted in some intervals but not in others.
+        Answers from the APPLIED intervals, like the rows: a desired value that has not
+        reached the server's data yet describes nothing that was sent."""
+        if not intervals.contains(self._applied_intervals(), dt_util.utcnow()):
             return stream
         if stream == "batt_in":
             return "batt_out"
@@ -1293,8 +2798,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         upload at all. Be clear about what that costs, though - it is NOT
         self-healing. Nothing re-reads quarters below the bookmark; the incremental
         and heal paths both start there, so quarters uploaded unflagged stay
-        unflagged until something resets the bookmark (an entity-fingerprint change,
-        i.e. the user re-picking sensors, which triggers a full re-backfill). The
+        unflagged until something rewrites them (re-picking the external-control
+        sensor, whose entity job replaces the flag in the stored history). The
         error direction is still the safe one - those quarters are graded normally
         rather than wrongly neutralised - but the flag is lost for them, not deferred.
 
@@ -1834,10 +3339,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not period_end_str:
             return
 
-        # An invert change (issue #1) just uploaded corrected data via a full re-backfill →
-        # FORCE a recompute bypassing the 7-day cadence, otherwise the corrected grade won't show until
-        # the nightly rewarm/next tick. The flag is set by the self-heal and only cleared once the recompute
-        # succeeds (survives a failed attempt).
+        # New history was just uploaded (a coverage fill) → FORCE a recompute bypassing the 7-day
+        # cadence, otherwise the grade won't show it until the nightly rewarm/next tick. A direction
+        # swap or a sensor change's replacement does not set it: the server queues the recount at
+        # commit. The flag is only cleared once the recompute succeeds (survives a
+        # failed attempt).
         force = bool(self._state.get("pending_invert_recompute"))
 
         last_recompute_str = self._state.get("last_recompute")
@@ -2022,16 +3528,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     if k not in (CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)}
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
+    def direction_change_pending(self) -> bool:
+        """Whether a change of the battery direction has not reached the stored rows yet:
+        a direction job exists, or the desired intervals differ from the applied ones.
+        The direction repair refuses a second flip meanwhile - computed from a grade of
+        the old direction, it would flip the same period back."""
+        job = self._state.get("replacement_job")
+        if isinstance(job, dict) and job.get("type") == "direction":
+            return True
+        return bool(intervals.sym_diff(self._desired_intervals(), self._applied_intervals()))
+
     def _direction_flip_pending(self, block: dict) -> bool:
-        """True while the owner's flip is newer than the server's direction data. A missing or
+        """True while a flip has not reached the grade yet: a direction job still runs, or
+        the owner's flip is newer than the server's direction data. A missing or
         unreadable as_of counts as "not recounted yet"."""
+        job = self._state.get("replacement_job")
+        if isinstance(job, dict) and job.get("type") == "direction":
+            # The stored rows are not all swapped yet: any grade still describes the old
+            # direction, however new its as_of.
+            return True
         flipped = self._parse_utc(self.config_entry.data.get(CONF_DIRECTION_FLIPPED_AT))
         if flipped is None:
             return False
-        if self._state.get("pending_invert_recompute"):
-            # The corrected history has not landed and been recounted yet: any grade still
-            # describes the old direction, however new its as_of.
-            return True
         as_of = self._parse_utc(block.get("as_of"))
         return as_of is None or as_of <= flipped
 
@@ -2045,25 +3563,29 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_util.UTC)
 
     def _evaluate_battery_direction_issue(self, betyg: dict) -> None:
-        """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixbar för all/partial
-        (vänd riktningen, historiken skickas om), annars bara text. Saknas blocket (äldre
-        backend) eller är state något annat än "reversed" tas issuen bort.
+        """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixable when the
+        server gives intervals to flip (direction_swap_intervals): the fix swaps exactly
+        those in the stored rows, nothing is re-sent. Otherwise text only. Saknas blocket
+        (äldre backend) eller är state något annat än "reversed" tas issuen bort.
 
         Aldrig i visningsläget: där mappar Woltas koppling fälten, inte de här sensorerna."""
         issue_id = f"{_ISSUE_BATTERY_DIRECTION}_{self.config_entry.entry_id}"
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         form = block.get("form") if isinstance(block, dict) else None
-        # Ignoreringen gäller bara den fixbara reparationen (den har en meny att avböja ur).
-        # since/ended har ingen meny och visas alltid.
-        ignored = (form in _BATTERY_DIRECTION_FIXABLE
-                   and bool(self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED)))
         if isinstance(block, dict) and block.get("state") in ("ok", "verified"):
             self._clear_direction_flags()
-        if (not self._direction_reversed(betyg) or self._view_only or ignored
+        if (not self._direction_reversed(betyg) or self._view_only
                 or form not in _BATTERY_DIRECTION_FORMS):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
-        if form in _BATTERY_DIRECTION_FIXABLE and self._direction_flip_pending(block):
+        swap = direction_swap_intervals(block)
+        fixable = bool(swap)
+        # Ignoreringen gäller bara den fixbara reparationen (den har en meny att avböja ur);
+        # the text-only one is always shown.
+        if fixable and self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        if fixable and self._direction_flip_pending(block):
             # Owner flipped the direction and the server has not recounted since: this grade
             # still describes the old direction. Leave the registry alone - a deleted issue
             # stays deleted, and nothing is raised to invite a second flip back.
@@ -2082,17 +3604,33 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             "since": block.get("since") or "-",
             "batt_in": _names("batt_in"),
             "batt_out": _names("batt_out"),
+            "swap_period": self._swap_period(swap),
         }
+        key = f"{_ISSUE_BATTERY_DIRECTION}_{form}"
+        if fixable and form in _BATTERY_DIRECTION_TEXT_FORMS:
+            key = f"{key}_flip"
+        elif not fixable and form not in _BATTERY_DIRECTION_TEXT_FORMS:
+            key = _ISSUE_BATTERY_DIRECTION_NO_FIX
         ir.async_create_issue(
             self.hass, DOMAIN, issue_id,
-            is_fixable=form in _BATTERY_DIRECTION_FIXABLE,
+            is_fixable=fixable,
             severity=ir.IssueSeverity.WARNING,
-            translation_key=f"{_ISSUE_BATTERY_DIRECTION}_{form}",
+            translation_key=key,
             translation_placeholders=placeholders,
             # En egen RepairsFlow ärver inte translation_placeholders: samma värden följer
-            # med på issuen så flödets texter kan fyllas i.
-            data={"entry_id": self.config_entry.entry_id, "form": form, **placeholders},
+            # med på issuen så flödets texter kan fyllas i. The flow flips swap_intervals.
+            data={"entry_id": self.config_entry.entry_id, "form": form,
+                  "swap_intervals": intervals.dump(swap), **placeholders},
         )
+
+    @staticmethod
+    def _swap_period(swap: list[intervals.Interval]) -> str:
+        """The intervals to flip in local time, for the repair texts. Language-neutral:
+        "2026-09-28 15:00 → …" (an open end shows as …)."""
+        def _fmt(t: datetime | None) -> str:
+            return "…" if t is None else dt_util.as_local(t).strftime("%Y-%m-%d %H:%M")
+
+        return ", ".join(f"{_fmt(s)} → {_fmt(e)}" for s, e in swap) or "-"
 
     def _evaluate_energy_balance_issue(self, betyg: dict) -> None:
         """Non-fixable repair when the backend has excluded the grade because the household

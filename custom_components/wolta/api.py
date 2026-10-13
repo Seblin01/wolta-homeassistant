@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,18 @@ PREFILL_TIMEOUT = aiohttp.ClientTimeout(total=8)
 # limit — see the 413 incident 2026-07-05 (backfill against Bronäs).
 MAX_ROWS_PER_PUT = 5_000
 
+# Identifies this client in the `client` field of a replacement (server spec
+# 2026-10-13 §5.1). The product token of USER_AGENT (wolta-hacs/<version>), so the
+# server sees the same client name in both places.
+REPLACEMENT_CLIENT = USER_AGENT.split(" ", 1)[0]
+
+
+def _utc_iso(value: datetime) -> str:
+    """ISO 8601 in UTC. A naive datetime is refused: its instant would be a guess."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("datetime must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat()
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -115,6 +128,29 @@ class WoltaRateLimitError(WoltaApiError):
         super().__init__(f"Rate limited; retry after {retry_after}s")
 
 
+class WoltaReplacementGone(WoltaApiError):
+    """A replacement the server no longer has open: 404 with an `error` detail
+    (`unknown_replacement`) or 410 (`replacement_closed`). Start over with a new id.
+    Not a WoltaAuthError: the profile token is fine."""
+
+    def __init__(
+        self, message: str = "", status: int | None = None, code: str | None = None
+    ) -> None:
+        super().__init__(message, status=status)
+        self.code = code
+
+
+class WoltaReplacementConflict(WoltaApiError):
+    """409 with a dict `detail` carrying an `error` code: `conflict`, `count_mismatch`,
+    `empty`, `no_rows_for_swap`, ... `code` is the server error code. A 409 with a
+    string detail (the stream-bound refusal) is not this: it arrives as a plain
+    WoltaApiError with status 409."""
+
+    def __init__(self, code: str, message: str = "", status: int | None = 409) -> None:
+        super().__init__(message or f"Replacement conflict: {code}", status=status)
+        self.code = code
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -135,10 +171,19 @@ class WoltaApiClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _replacement_request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """_request for the replacement endpoints, which read the error body of a
+        404/409/410: a dict `detail` with an `error` code means "this replacement"
+        (WoltaReplacementGone / WoltaReplacementConflict), while any other 404 is
+        still a lost profile token (WoltaAuthError)."""
+        return await self._request(method, path, _replacement_errors=True, **kwargs)
+
     async def _request(
         self,
         method: str,
         path: str,
+        *,
+        _replacement_errors: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Issue a single HTTP request and return the parsed JSON body.
@@ -147,6 +192,8 @@ class WoltaApiClient:
             WoltaAuthError: for HTTP 404.
             WoltaRateLimitError: for HTTP 429 (reads Retry-After header).
             WoltaApiError: for any other non-2xx response.
+        With _replacement_errors (see _replacement_request) 404/409/410 are told apart
+        by their body first; see WoltaReplacementGone and WoltaReplacementConflict.
         """
         url = f"{self._base}{path}"
         # PREPENDED to Home Assistant's own User-Agent, never a replacement.
@@ -162,6 +209,14 @@ class WoltaApiClient:
         ua = f"{USER_AGENT} {ha_ua}" if ha_ua else USER_AGENT
         kwargs["headers"] = {"User-Agent": ua, **(kwargs.get("headers") or {})}
         async with self._session.request(method, url, **kwargs) as resp:
+            if _replacement_errors and resp.status in (404, 409, 410):
+                code = await self._error_code(resp)
+                if resp.status == 409 and code is not None:
+                    raise WoltaReplacementConflict(code, f"409 {code} from {url}")
+                if resp.status == 410 or (resp.status == 404 and code is not None):
+                    raise WoltaReplacementGone(
+                        f"{resp.status} from {url}", status=resp.status, code=code
+                    )
             if resp.status == 404:
                 raise WoltaAuthError(f"404 from {url}")
             if resp.status == 429:
@@ -182,6 +237,18 @@ class WoltaApiClient:
                 return await resp.json()
             except Exception:
                 return None
+
+    @staticmethod
+    async def _error_code(resp: aiohttp.ClientResponse) -> str | None:
+        """The `detail.error` code of an error response, or None for any other shape
+        (a plain-string detail, a non-JSON body, an empty body)."""
+        try:
+            body = await resp.json(content_type=None)
+        except Exception:  # noqa: BLE001 - an unreadable body is simply "no code"
+            return None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        code = detail.get("error") if isinstance(detail, dict) else None
+        return code if isinstance(code, str) and code else None
 
     @staticmethod
     def _auth(token: str) -> dict[str, str]:
@@ -351,6 +418,80 @@ class WoltaApiClient:
                 "PUT", "/profile/data", json=body, headers=self._auth(token)
             )
         return last_response
+
+    async def open_replacement(
+        self,
+        token: str,
+        rid: str,
+        *,
+        kind: str,
+        window_start: datetime,
+        window_end: datetime,
+        fields: list[str] | None,
+        reason: str,
+    ) -> dict:
+        """Open (or re-open, idempotently) a replacement of stored flows.
+
+        PUT /api/v1/profile/replacements/{rid} -> 201 (new) / 200 (same id and content).
+        `fields` is required for kind "rows" and omitted for "swap_battery". The
+        window is whole UTC hours; both ends must be timezone-aware.
+        """
+        body: dict[str, Any] = {
+            "kind": kind,
+            "window_start": _utc_iso(window_start),
+            "window_end": _utc_iso(window_end),
+            "reason": reason,
+            "client": REPLACEMENT_CLIENT,
+        }
+        if fields is not None:
+            body["fields"] = fields
+        return await self._replacement_request(
+            "PUT", f"/profile/replacements/{rid}", json=body, headers=self._auth(token)
+        )
+
+    async def stage_replacement_rows(self, token: str, rid: str, rows: list[dict]) -> dict:
+        """Send rows to an open "rows" replacement, MAX_ROWS_PER_PUT per request.
+
+        PUT /api/v1/profile/replacements/{rid}/rows -> {"staged_rows", "expires_at"} of
+        the last chunk. A repeated timestamp overwrites, so a chunk can be re-sent.
+        No rows means no request (the server refuses an empty body) and returns {}.
+        """
+        last: dict = {}
+        for i in range(0, len(rows), MAX_ROWS_PER_PUT):
+            last = await self._replacement_request(
+                "PUT",
+                f"/profile/replacements/{rid}/rows",
+                json={"rows": rows[i : i + MAX_ROWS_PER_PUT]},
+                headers=self._auth(token),
+            )
+        return last
+
+    async def commit_replacement(
+        self, token: str, rid: str, expected_rows: int | None
+    ) -> dict:
+        """Swap the replacement in, in one server transaction.
+
+        POST /api/v1/profile/replacements/{rid}/commit. `expected_rows` is the number
+        of distinct timestamps sent (required for "rows"); None sends {} for
+        "swap_battery". Returns the result dict (including `data_since`).
+        """
+        body: dict[str, Any] = {} if expected_rows is None else {"expected_rows": expected_rows}
+        return await self._replacement_request(
+            "POST", f"/profile/replacements/{rid}/commit", json=body, headers=self._auth(token)
+        )
+
+    async def get_replacement(self, token: str, rid: str) -> dict:
+        """GET /api/v1/profile/replacements/{rid} -> status, staged_rows, result, ...
+        Status "aborted", "expired" or "restored" means start over with a new id."""
+        return await self._replacement_request(
+            "GET", f"/profile/replacements/{rid}", headers=self._auth(token)
+        )
+
+    async def delete_replacement(self, token: str, rid: str) -> None:
+        """DELETE /api/v1/profile/replacements/{rid} -> 204. Idempotent."""
+        await self._replacement_request(
+            "DELETE", f"/profile/replacements/{rid}", headers=self._auth(token)
+        )
 
     async def recompute(self, token: str) -> None:
         """Trigger a server-side recomputation for the profile.

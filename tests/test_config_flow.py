@@ -1849,8 +1849,8 @@ async def test_options_flow_reserve_pct_zero_is_sent(hass: HomeAssistant) -> Non
 
 
 async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssistant) -> None:
-    """Toggling battery-invert in options → entry.data is updated + coordinator refresh (self-heal
-    re-backfill), and NO patch_profile (client-side upload transform, not a backend field)."""
+    """Toggling battery-invert in options → entry.data is updated + coordinator refresh (it
+    starts the direction job), and NO patch_profile (client-side transform, not a backend field)."""
     entry = _make_mock_entry(hass)
 
     mock_client = MagicMock()
@@ -1889,7 +1889,7 @@ async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssis
     # The flag is stored in entry.data
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert updated.data[CONF_INVERT_BATTERY] is True
-    # The coordinator is refreshed → self-heal backfill runs
+    # The coordinator is refreshed → the direction job starts
     mock_coordinator.async_request_refresh.assert_awaited()
 
 
@@ -4299,3 +4299,80 @@ async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip
     assert result["reason"] == "reconfigure_successful"
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+
+
+# ---------------------------------------------------------------------------
+# The invert toggle means "the whole history" over the desired intervals
+# ---------------------------------------------------------------------------
+
+
+async def _submit_invert(hass, entry, invert: bool):
+    """Open the options flow, return the settings form's invert default, and submit the
+    unchanged plant values with `invert`."""
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock()
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry))
+    mock_coordinator = MagicMock()
+    mock_coordinator.async_trigger_recompute = AsyncMock()
+    mock_coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = mock_coordinator
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        default = next(
+            k.default() for k in result["data_schema"].schema
+            if str(k) == CONF_INVERT_BATTERY)
+        with patch.object(hass.config_entries, "async_update_entry",
+                          wraps=hass.config_entries.async_update_entry) as upd:
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input=_opts(**{CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0,
+                                    CONF_EFF: 0.9, CONF_INVERT_BATTERY: invert}),
+            )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    return default, upd, mock_coordinator
+
+
+@pytest.mark.asyncio
+async def test_options_invert_on_writes_the_whole_history(hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    entry = _make_mock_entry(hass, {CONF_INVERT_INTERVALS: [], CONF_INVERT_BATTERY: False})
+    default, upd, coordinator = await _submit_invert(hass, entry, True)
+    assert default is False
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_INVERT_INTERVALS] == [[None, None]]
+    assert updated.data[CONF_INVERT_BATTERY] is True
+    coordinator.async_request_refresh.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_invert_off_clears_every_interval(hass: HomeAssistant) -> None:
+    """A partial flip (from a repair) shows as on; turning it off restores [] everywhere."""
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    entry = _make_mock_entry(hass, {
+        CONF_INVERT_INTERVALS: [["2026-09-28T13:00:00+00:00", None]],
+        CONF_INVERT_BATTERY: False})
+    default, _upd, _c = await _submit_invert(hass, entry, False)
+    assert default is True
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_INVERT_INTERVALS] == []
+    assert updated.data[CONF_INVERT_BATTERY] is False
+
+
+@pytest.mark.asyncio
+async def test_options_invert_unchanged_writes_nothing(hass: HomeAssistant) -> None:
+    """Left on over a partial flip: no write, the partial intervals stay."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT, CONF_INVERT_INTERVALS
+    partial = [["2026-09-28T13:00:00+00:00", None]]
+    entry = _make_mock_entry(hass, {CONF_INVERT_INTERVALS: partial, CONF_INVERT_BATTERY: False})
+    _default, upd, coordinator = await _submit_invert(hass, entry, True)
+    # (Finishing an options flow writes the options; entry.data is not written.)
+    assert all("data" not in c.kwargs for c in upd.call_args_list)
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_INVERT_INTERVALS] == partial
+    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+    coordinator.async_request_refresh.assert_not_awaited()

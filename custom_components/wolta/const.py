@@ -40,6 +40,12 @@ CONF_EXPORT_EXTRA_PCT = "export_extra_pct"
 # (Emaldo, signed Shelly) map the directions the wrong way → inverted grade. The flag swaps
 # batt_in/batt_out in the upload path so the user doesn't have to change their HA sensors.
 CONF_INVERT_BATTERY = "invert_battery"
+# The DESIRED battery inversion as half-open UTC intervals (intervals.py stored form:
+# a list of [from_iso | None, to_iso | None]). CONF_INVERT_BATTERY is kept as a mirror,
+# true exactly when the intervals are [[None, None]], so a downgrade reads the right
+# global flag in the common case. What the server's stored rows were built with (the
+# APPLIED intervals) lives in the coordinator's Store, not here.
+CONF_INVERT_INTERVALS = "invert_intervals"
 # False for profiles adopted via the link-existing flow: the web profile (incl. CSV
 # history) is not ours to delete when the integration is removed. Missing key = True
 # (every pre-v0.10.0 entry was created by HA → documented delete-on-remove kept).
@@ -100,7 +106,7 @@ CONF_EXTERNAL_CONTROL = "external_control_entity"
 # Ersättningssensor (spec 2026-08-28): läses månadsvis ur LTS och PATCH:as till servern
 # som flex_compensation-poster med source='sensor'. Ingår MEDVETET INTE i
 # applied_entities-fingerprintet - den påverkar inga energirader och får inte trigga
-# re-backfill (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
+# en ersättning av lagrade flöden (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
 CONF_FLEX_COMPENSATION = "flex_compensation_entity"
 # Optional battery state-of-charge sensors, one per battery unit (spec 2026-10-03). The
 # entity ids are CLIENT-LOCAL configuration and never PATCHed to the server - only the

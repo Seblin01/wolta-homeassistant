@@ -18,7 +18,7 @@
     },
     "statistics_missing": {
       "title": "Wolta has stopped uploading: a selected sensor has no statistics",
-      "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period may not be sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. Either change triggers a full re-send of all complete quarters in the history. This warning clears itself once the sensor reports data again."
+      "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period may not be sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. If you pick a replacement, Wolta replaces the values of that sensor's energy stream (for example solar) in the history it already stores, from the statistics of the sensors now selected for the stream. The other streams' values are kept, except in short stretches (up to six hours) where the new sensors have no data: those quarters are removed. If you only remove the sensor, the stored history is left as it is. This warning clears itself once the sensor reports data again."
     },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
@@ -169,17 +169,18 @@
             "title": "Wolta: charging and discharging look swapped",
             "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for all {reversed_days} days Wolta could check ({first_checked} – {last_reversed}). The charge ({batt_in}) and discharge ({batt_out}) sensors are probably swapped. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right.",
             "menu_options": {
-              "flip": "Flip the direction and re-send the history",
+              "flip": "Flip the direction in the stored history",
               "ignore": "Ignore"
             }
           },
           "flip": {
             "title": "Flip battery charge and discharge?",
-            "description": "Wolta's 'Battery charge/discharge reversed' setting is toggled – if it is off it is switched on, and the other way round – and the whole history is re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
+            "description": "Charging and discharging are swapped in the data Wolta already has, and new data is sent the right way round. Nothing is re-sent. This warning clears once Wolta has recalculated, by the next day at the latest."
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },
@@ -191,17 +192,18 @@
             "title": "Wolta: charging and discharging look swapped",
             "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for all {reversed_days} days since {first_checked}. Before that Wolta has no state of charge and cannot judge the direction. If the sensors ({batt_in}, {batt_out}) have been the same all along, you can flip the direction here. If you changed a sensor or a setting, correct what changed under Reconfigure instead. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right.",
             "menu_options": {
-              "flip": "Flip the direction and re-send the history",
+              "flip": "Flip the direction in the stored history",
               "ignore": "Ignore"
             }
           },
           "flip": {
             "title": "Flip battery charge and discharge?",
-            "description": "Wolta's 'Battery charge/discharge reversed' setting is toggled – if it is off it is switched on, and the other way round – and the whole history is re-sent the right way round. This warning clears once Wolta has recalculated, by the next day at the latest."
+            "description": "Charging and discharging are swapped in the data Wolta already has, and new data is sent the right way round. Nothing is re-sent. This warning clears once Wolta has recalculated, by the next day at the latest."
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },
@@ -212,6 +214,56 @@
     "battery_direction_ended": {
       "title": "Wolta: charging and discharging were swapped for a period",
       "description": "Between {first_reversed} and {last_reversed}, charging and discharging were swapped in your data. After that the direction is right. Those days are still in your grading window. Let the window on wolta.se start after {last_reversed}, so the grade is only based on correct data. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
+    },
+    "battery_direction_since_flip": {
+      "title": "Wolta: charging and discharging became swapped",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Wolta: charging and discharging became swapped",
+            "description": "Since {since}, your data says the battery charges when its state of charge falls, and the other way round. Before that the direction was right. Something changed that day: a sensor, a setting or an update. Wolta can flip the direction for this period only: {swap_period}. The time before stays as it is, and nothing is re-sent. If you would rather correct what changed, do that instead of flipping here. Doing both makes the direction wrong again. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right.",
+            "menu_options": {
+              "flip": "Flip the direction for this period",
+              "ignore": "Ignore"
+            }
+          },
+          "flip": {
+            "title": "Flip charge and discharge for this period?",
+            "description": "Charging and discharging are swapped in the data Wolta already has for {swap_period}, and new data from the period is sent the right way round. The time outside the period is unchanged, and nothing is re-sent. This warning clears once Wolta has recalculated, by the next day at the latest."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
+        }
+      }
+    },
+    "battery_direction_ended_flip": {
+      "title": "Wolta: charging and discharging were swapped for a period",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Wolta: charging and discharging were swapped for a period",
+            "description": "Between {first_reversed} and {last_reversed}, charging and discharging were swapped in your data. After that the direction is right. Wolta can flip the direction for this period only: {swap_period}. The time before and after stays as it is, and nothing is re-sent. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right.",
+            "menu_options": {
+              "flip": "Flip the direction for this period",
+              "ignore": "Ignore"
+            }
+          },
+          "flip": {
+            "title": "Flip charge and discharge for this period?",
+            "description": "Charging and discharging are swapped in the data Wolta already has for {swap_period}. The time outside the period is unchanged, and nothing is re-sent. This warning clears once Wolta has recalculated, by the next day at the latest."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
+        }
+      }
+    },
+    "battery_direction_no_fix": {
+      "title": "Wolta: charging and discharging look swapped",
+      "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for {reversed_days} days. Wolta cannot tell precisely enough when it started, so it flips nothing for you. Check the charge ({batt_in}) and discharge ({batt_out}) sensors under Reconfigure. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
     }
   },
   "config": {
@@ -283,7 +335,7 @@
       },
       "reconfigure": {
         "title": "Change energy sensors",
-        "description": "Pick the new sensors. Home Assistant re-uploads your full history from the new sensors and your grade is recomputed – no need to remove the integration.",
+        "description": "Pick the new sensors. Wolta replaces the changed sensors' values in the history it already stores, from the new sensors' statistics, and your grade is recomputed. Nothing else is re-sent, and there is no need to remove the integration.",
         "data": {
           "batt_in": "Battery charge energy",
           "batt_out": "Battery discharge energy",
@@ -331,7 +383,7 @@
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful",
-      "reconfigure_successful": "Sensors updated. Your history is being re-uploaded in the background.",
+      "reconfigure_successful": "Sensors updated. The changed sensors' values are being replaced in your history in the background.",
       "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again."
     }
   },
@@ -403,7 +455,7 @@
           "invert_battery": "Battery charge/discharge reversed"
         },
         "data_description": {
-          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge on upload, so you don't have to change your Home Assistant sensors."
+          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge for the whole history, so you don't have to change your Home Assistant sensors. Wolta corrects the data it already has; nothing is re-sent. Also shown as on when a repair flipped only part of the history. Turning it off restores the original direction everywhere."
         }
       },
       "account_link": {

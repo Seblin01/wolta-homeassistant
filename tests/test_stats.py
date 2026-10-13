@@ -1855,3 +1855,96 @@ def test_known_zero_gaps_hourly():
     assert stats.known_zero_gaps(rows, 3600) == [
         (int((_D + timedelta(hours=2)).timestamp()),
          int((_D + timedelta(hours=4)).timestamp()))]
+
+
+# ---------------------------------------------------------------------------
+# replacement_rows (sensor change: replace only the changed fields)
+# ---------------------------------------------------------------------------
+
+
+class TestReplacementRows:
+    Q0 = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+    Q1 = datetime(2026, 6, 1, 10, 15, tzinfo=timezone.utc)
+    Q2 = datetime(2026, 6, 1, 10, 30, tzinfo=timezone.utc)
+
+    def _streams(self):
+        return {
+            "batt_in": {self.Q0: 0.1, self.Q1: 0.2},
+            "batt_out": {self.Q0: 0.3, self.Q1: 0.4},
+            "grid_in": {self.Q0: 1.0, self.Q1: 1.1},
+            "grid_out": {self.Q0: 0.5},
+            "solar": {self.Q0: 2.0, self.Q1: 2.1, self.Q2: 2.2},
+        }
+
+    def test_partial_quarter_carries_only_the_replaced_fields(self):
+        """Complete for solar but not for grid: the row carries solar_kwh only."""
+        rows = stats.replacement_rows(
+            self._streams(), complete_all=set(), complete_replaced={self.Q2},
+            fields=["solar_kwh"], external=set())
+        assert rows == [{"ts": self.Q2.isoformat(), "solar_kwh": 2.2}]
+
+    def test_quarter_complete_for_all_carries_every_field(self):
+        rows = stats.replacement_rows(
+            self._streams(), complete_all={self.Q0}, complete_replaced={self.Q0},
+            fields=["solar_kwh"], external={self.Q0})
+        assert rows == [{
+            "ts": self.Q0.isoformat(),
+            "batt_charged_kwh": 0.1,
+            "batt_discharged_kwh": 0.3,
+            "solar_kwh": 2.0,
+            "grid_import_kwh": 1.0,
+            "grid_export_kwh": 0.5,
+            "external_control": True,
+        }]
+
+    def test_one_row_per_replaced_quarter_in_order(self):
+        """Only quarters in complete_replaced; a full one beside a partial one."""
+        rows = stats.replacement_rows(
+            self._streams(), complete_all={self.Q0, self.Q1},
+            complete_replaced={self.Q1, self.Q2},
+            fields=["batt_charged_kwh", "batt_discharged_kwh"], external=set())
+        assert [r["ts"] for r in rows] == [self.Q1.isoformat(), self.Q2.isoformat()]
+        assert len(rows[0]) == 7
+        assert rows[1] == {
+            "ts": self.Q2.isoformat(), "batt_charged_kwh": 0.0, "batt_discharged_kwh": 0.0}
+
+    def test_external_control_as_a_replaced_field(self):
+        rows = stats.replacement_rows(
+            self._streams(), complete_all=set(), complete_replaced={self.Q1},
+            fields=["external_control"], external={self.Q1})
+        assert rows == [{"ts": self.Q1.isoformat(), "external_control": True}]
+
+    def test_partial_row_ignores_a_spike_in_a_field_it_does_not_carry(self):
+        """Only the carried fields are judged against the 500 kWh cap: a spike in a
+        stream that is not replaced must not drop the replaced value."""
+        streams = self._streams()
+        streams["grid_in"][self.Q1] = 900.0
+        rows = stats.replacement_rows(
+            streams, complete_all=set(), complete_replaced={self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert rows == [{"ts": self.Q1.isoformat(), "solar_kwh": 2.1}]
+        # A spike in the carried field still drops the row.
+        streams["solar"][self.Q1] = 700.0
+        assert stats.replacement_rows(
+            streams, complete_all=set(), complete_replaced={self.Q1},
+            fields=["solar_kwh"], external=set()) == []
+
+    def test_full_row_over_the_cap_falls_back_to_the_replaced_fields(self):
+        """merge_streams drops a full row with a spike in any field. Dropped whole, the
+        quarter would have no staged row and the server would remove the stored one, so
+        a spike in a field that is not replaced leaves a partial row with the replaced
+        fields; a spike in a replaced field still drops the quarter."""
+        streams = self._streams()
+        streams["grid_in"][self.Q1] = 900.0
+        rows = stats.replacement_rows(
+            streams, complete_all={self.Q0, self.Q1}, complete_replaced={self.Q0, self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert [r["ts"] for r in rows] == [self.Q0.isoformat(), self.Q1.isoformat()]
+        assert len(rows[0]) == 7
+        assert rows[1] == {"ts": self.Q1.isoformat(), "solar_kwh": 2.1}
+
+        streams["solar"][self.Q1] = 700.0
+        rows = stats.replacement_rows(
+            streams, complete_all={self.Q0, self.Q1}, complete_replaced={self.Q0, self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert [r["ts"] for r in rows] == [self.Q0.isoformat()]

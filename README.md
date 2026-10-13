@@ -25,8 +25,11 @@ night), and for any sensor whose counter has not moved across the gap. If a sele
 sensor stops producing statistics altogether, uploading pauses
 and a repair names the sensor. Periods when Home Assistant itself was not running are
 still sent (Home Assistant records them as zero), and Wolta's server sets them aside.
-A full re-send after reconfiguration only replaces the quarters that are complete;
-quarters the server already holds that are now incomplete keep their earlier values.
+A reconfiguration does not upload your whole history again: the integration sends only
+the changed sensors' values for the affected range, and the server corrects what it
+already stores (see [Correcting stored history](#correcting-stored-history)). Inside that
+range, gaps of up to 6 hours where the new sensor has no complete statistics are left
+empty; longer silences, and everything outside the range, keep their earlier values.
 
 ## Sensors
 
@@ -120,7 +123,7 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - What you paid for the battery, and the purchase date — used for IRR, payback and this year's actual savings. Enter the invoice total, after any green deduction; it is treated as the whole investment. If Home Assistant's sensor history suggests a purchase date, it's offered as a one-time suggestion here rather than being set automatically — accept it, type your own, or clear it if you don't know the date. Clearing a field removes the value.
 - Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). Clearing a field reverts it to your country's standard tariff.
 - Reserve floor (%) — the share of usable capacity your control system never discharges below. Clearing the field removes the reserve.
-- **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams on upload. See Troubleshooting below.
+- **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams. It applies to the history Wolta already stores as well as to new uploads, without re-sending anything. See Troubleshooting below.
 
 Only changed fields are sent to Wolta. After saving, a recompute is triggered automatically. The optimisation grade updates first; the economy figures (IRR, payback, actual savings) are recomputed in the background and follow a few minutes later. Throughout, the sensors keep their previous values instead of dropping to `unavailable` (v0.7.1+).
 
@@ -132,7 +135,19 @@ Only zones in the same country are offered. The amounts you have entered — wha
 
 A correction recalculates the grade and the economics against the new price series on your whole stored history, so **your figures will change**. The integration updates its own stored zone at the same time; nothing else needs doing.
 
-**Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The full history is re-uploaded from the new sensors and the grade recomputed — no need to remove the integration.
+**Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The integration reads the changed sensors' statistics and sends their values for the affected range, starting from the new sensor's first full hour of statistics; Wolta replaces only those values and recomputes the grade — no need to remove the integration. Removing a sensor never rewrites history. See [Correcting stored history](#correcting-stored-history).
+
+### Correcting stored history
+
+Changing the battery direction or the energy sensors does not make the integration upload your whole history again. It asks the server to correct what it already stores:
+
+- **Battery direction.** The server swaps the battery charge and discharge values for exactly the period that was affected, losslessly, and nothing is sent again. Turning the toggle on or off, or confirming the direction repair, covers the stored history that the setting changes.
+- **Changed sensors.** Only the values that come from a sensor you changed are replaced: solar, grid import, grid export, the two battery streams together, or the external control flag. The integration reads the changed sensors' statistics and sends their values for the affected range; the regular upload then sends the last few hours again. Other values stay as they are. The replacement starts from the new sensor's first full hour of statistics; earlier hours keep their old values. Inside the replaced range, gaps of up to 6 hours where the new sensor has no complete statistics are left empty, while longer silences keep the old values. The external control flag is replaced only over the period the binary sensor's recorded history covers. If the new sensors have no statistics yet, the integration waits and tries again on each update.
+- **Removing a sensor** never rewrites history.
+- **Older history.** A correction never touches stored history older than one year before the integration was set up. History from before that, for example a file uploaded on wolta.se, stays as it is.
+- **Replaced values are kept.** The server keeps the replaced values for 90 days.
+
+While a correction is running, regular uploads and the history check wait until it finishes. The progress is shown in the integration's diagnostics (**desired** against **applied** direction, and the running job).
 
 ## External control (Grid Rewards and similar flex-market services)
 
@@ -222,14 +237,16 @@ Leaving the field empty — the default — changes nothing: no extra sensor is 
 
 ## Troubleshooting
 
-**Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams, re-reads your history and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If you have picked a state-of-charge sensor, Wolta's own direction repair settles the question: if no repair appears and the server confirms the direction, do not turn this setting on. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
+**Optimisation grade is strongly negative or looks inverted.** This almost always means the battery charge and discharge streams are mapped the wrong way round — some battery integrations and energy meters report the two directions in a way Wolta reads reversed, which makes it look as though the battery charges when power is expensive and discharges when it is cheap. Open the **Configure** dialog and turn on **Battery charge/discharge reversed**. Wolta swaps the two streams for the affected period on the server, without re-sending your history, and recomputes the grade automatically — you don't need to change any of your Home Assistant sensors. If you have picked a state-of-charge sensor, Wolta's own direction repair settles the question: if no repair appears and the server confirms the direction, do not turn this setting on. If the grade still looks wrong afterwards, please [open an issue](https://github.com/Seblin01/wolta-homeassistant/issues).
 
 **"Wolta: charging and discharging look swapped" repair appears (v0.43.0+).** Wolta compares the battery's state of charge with your charge and discharge data. If the state of charge falls while your data says the battery is charging, and rises while it says discharging, the two streams are reversed and Home Assistant raises a repair. The grade is then kept out of the comparison with other installations, the economics use rule-of-thumb figures instead of your measured data, and the battery value sensor falls back to the modelled value until the direction is right. What the repair offers depends on how far back the problem goes:
 
-- **All the days Wolta can check are reversed** (reported as `all`): the repair offers to flip the direction. Confirming toggles **Battery charge/discharge reversed** (if it is off it is switched on, and the other way round), and the integration re-sends your history the right way round. The repair stays away until Wolta has recalculated after the flip, at the latest the next day, so it does not come back in the meantime.
+- **All the days Wolta can check are reversed** (reported as `all`): the repair offers to flip the direction. Confirming toggles **Battery charge/discharge reversed** (if it is off it is switched on, and the other way round), and the server swaps the stored battery values for exactly the affected period, without re-sending your history. The server keeps the replaced values for 90 days. The repair stays away until Wolta has recalculated after the flip, at the latest the next day, so it does not come back in the meantime.
 - **Reversed for all the days since the state of charge became available, with no state of charge before that** (reported as `partial`): the flip is offered too, with a caveat. It is only right if your sensors have been the same the whole time. If you changed a sensor or a setting along the way, correct what changed under **Reconfigure** instead.
-- **The direction became reversed at a certain date**: the right part of the history would become wrong if you flipped everything, so the repair only explains. Correct what changed on that date (a sensor, a setting or an update) and do not flip the direction. Once it is right again, let the grading window on wolta.se start after the correction.
-- **The direction was reversed for a period that has ended**: the direction is right again. The repair only explains; let the grading window on wolta.se start after the last reversed day so the grade is only based on correct data.
+- **The direction became reversed at a certain date**: flipping everything would make the right part of the history wrong. When the server gives the reversed period, the repair offers to flip the direction for that period only; the time before stays as it is. If you would rather correct what changed on that date (a sensor, a setting or an update), do that instead of flipping, since doing both makes the direction wrong again. Without a period from the server the repair only explains: correct what changed, and once it is right again, let the grading window on wolta.se start after the correction.
+- **The direction was reversed for a period that has ended**: the direction is right again. When the server gives the period, the repair offers to flip the direction for that period only; the time before and after stays as it is. Otherwise the repair only explains; let the grading window on wolta.se start after the last reversed day so the grade is only based on correct data.
+
+While a direction change is still being applied to the stored history, the flip is refused, so a repair computed from the old direction cannot flip the same period back.
 
 For the flip repair you can also choose **Ignore**, which is remembered until the server reports the direction as fine. The check needs a battery state-of-charge sensor (see below) and a recent enough Wolta server; it is not raised in view-only mode. The repair clears itself once the server no longer finds the direction reversed.
 

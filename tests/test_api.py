@@ -13,6 +13,8 @@ from custom_components.wolta.api import (
     WoltaApiError,
     WoltaAuthError,
     WoltaRateLimitError,
+    WoltaReplacementConflict,
+    WoltaReplacementGone,
 )
 
 
@@ -814,3 +816,265 @@ async def test_put_data_soc_chunks_follow_flow_chunks_and_repeat_the_last():
     assert second["battery_state"] == soc[5_000:]
     assert len(first["battery_state"]) == 5_000 and len(second["battery_state"]) == 1_000
     assert first["battery_sources"] == sources and second["battery_sources"] == sources
+
+
+# ---------------------------------------------------------------------------
+# Replacement endpoints (server spec 2026-10-13 §5)
+# ---------------------------------------------------------------------------
+
+RID = "11111111-2222-4333-8444-555555555555"
+REP_URL = f"{BASE_URL}/api/v1/profile/replacements/{RID}"
+
+
+def _last(aioclient_mock: AiohttpClientMocker):
+    return aioclient_mock.mock_calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_open_replacement_puts_body_with_bearer(aioclient_mock: AiohttpClientMocker):
+    from datetime import datetime, timedelta, timezone
+
+    from custom_components.wolta.api import _integration_version
+
+    aioclient_mock.put(REP_URL, status=201, json={"id": RID, "status": "open"})
+    client = _client(aioclient_mock)
+    start = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    # A non-UTC aware datetime must be serialized as UTC.
+    end = (start + timedelta(hours=3)).astimezone(timezone(timedelta(hours=2)))
+    out = await client.open_replacement(
+        TOKEN, RID, kind="rows", window_start=start, window_end=end,
+        fields=["solar_kwh", "grid_import_kwh"], reason="entities_changed",
+    )
+    assert out == {"id": RID, "status": "open"}
+    method, url, body, headers = _last(aioclient_mock)
+    assert method.lower() == "put" and str(url).endswith(f"/api/v1/profile/replacements/{RID}")
+    assert body == {
+        "kind": "rows",
+        "window_start": "2026-09-28T12:00:00+00:00",
+        "window_end": "2026-09-28T15:00:00+00:00",
+        "fields": ["solar_kwh", "grid_import_kwh"],
+        "reason": "entities_changed",
+        "client": f"wolta-hacs/{_integration_version()}",
+    }
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_open_replacement_swap_omits_fields(aioclient_mock: AiohttpClientMocker):
+    from datetime import datetime, timezone
+
+    aioclient_mock.put(REP_URL, status=200, json={"id": RID})
+    client = _client(aioclient_mock)
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    await client.open_replacement(
+        TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+        fields=None, reason="direction",
+    )
+    body = _last(aioclient_mock)[2]
+    assert "fields" not in body and body["kind"] == "swap_battery"
+    assert body["reason"] == "direction"
+
+
+@pytest.mark.asyncio
+async def test_open_replacement_rejects_naive_datetimes():
+    from datetime import datetime
+
+    client = WoltaApiClient(session=None)
+    naive = datetime(2026, 9, 28, 12)
+    with pytest.raises(ValueError):
+        await client.open_replacement(
+            TOKEN, RID, kind="rows", window_start=naive, window_end=naive,
+            fields=["solar_kwh"], reason="entities_changed",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage_replacement_rows_chunks_and_returns_last(
+    aioclient_mock: AiohttpClientMocker,
+):
+    from custom_components.wolta.api import MAX_ROWS_PER_PUT
+
+    aioclient_mock.put(
+        f"{REP_URL}/rows", status=200, json={"staged_rows": 1, "expires_at": "x"}
+    )
+    client = _client(aioclient_mock)
+    rows = [_row(i) for i in range(MAX_ROWS_PER_PUT + 1)]
+    result = await client.stage_replacement_rows(TOKEN, RID, rows)
+    puts = [c for c in aioclient_mock.mock_calls if c[0].lower() == "put"]
+    assert len(puts) == 2
+    assert len(puts[0][2]["rows"]) == MAX_ROWS_PER_PUT and len(puts[1][2]["rows"]) == 1
+    assert set(puts[0][2]) == {"rows"}
+    assert all(c[3]["Authorization"] == f"Bearer {TOKEN}" for c in puts)
+    assert result == {"staged_rows": 1, "expires_at": "x"}
+
+
+@pytest.mark.asyncio
+async def test_stage_replacement_rows_empty_sends_nothing(aioclient_mock: AiohttpClientMocker):
+    client = _client(aioclient_mock)
+    assert await client.stage_replacement_rows(TOKEN, RID, []) == {}
+    assert aioclient_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_commit_replacement_sends_expected_rows(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{REP_URL}/commit", status=200, json={"data_since": "d"})
+    client = _client(aioclient_mock)
+    assert await client.commit_replacement(TOKEN, RID, 42) == {"data_since": "d"}
+    method, url, body, headers = _last(aioclient_mock)
+    assert method.lower() == "post" and str(url).endswith(f"/replacements/{RID}/commit")
+    assert body == {"expected_rows": 42}
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_commit_replacement_swap_sends_empty_body(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{REP_URL}/commit", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.commit_replacement(TOKEN, RID, None)
+    assert _last(aioclient_mock)[2] == {}
+
+
+@pytest.mark.asyncio
+async def test_get_replacement(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.get(REP_URL, status=200, json={"status": "open", "staged_rows": 3})
+    client = _client(aioclient_mock)
+    assert await client.get_replacement(TOKEN, RID) == {"status": "open", "staged_rows": 3}
+    method, _url, _body, headers = _last(aioclient_mock)
+    assert method.lower() == "get" and headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_delete_replacement_returns_none(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.delete(REP_URL, status=204)
+    client = _client(aioclient_mock)
+    assert await client.delete_replacement(TOKEN, RID) is None
+    method, _url, _body, headers = _last(aioclient_mock)
+    assert method.lower() == "delete" and headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_replacement_404_with_error_detail_is_gone_not_auth(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.get(REP_URL, status=404, json={"detail": {"error": "unknown_replacement"}})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaReplacementGone) as exc_info:
+        await client.get_replacement(TOKEN, RID)
+    assert not isinstance(exc_info.value, WoltaAuthError)
+    assert exc_info.value.status == 404 and exc_info.value.code == "unknown_replacement"
+
+
+@pytest.mark.asyncio
+async def test_replacement_404_with_string_detail_is_auth_error(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.get(REP_URL, status=404, json={"detail": "okänd profil"})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.get_replacement(TOKEN, RID)
+
+
+@pytest.mark.asyncio
+async def test_replacement_404_with_unreadable_body_is_auth_error(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.get(REP_URL, status=404, text="<html>not found</html>")
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.get_replacement(TOKEN, RID)
+
+
+@pytest.mark.asyncio
+async def test_replacement_410_is_gone(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.put(
+        f"{REP_URL}/rows", status=410, json={"detail": {"error": "replacement_closed"}}
+    )
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaReplacementGone) as exc_info:
+        await client.stage_replacement_rows(TOKEN, RID, [_row(0)])
+    assert exc_info.value.status == 410 and exc_info.value.code == "replacement_closed"
+
+
+@pytest.mark.asyncio
+async def test_replacement_410_without_body_is_still_gone(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{REP_URL}/commit", status=410)
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaReplacementGone):
+        await client.commit_replacement(TOKEN, RID, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["conflict", "count_mismatch", "empty"])
+async def test_replacement_409_carries_the_error_code(
+    aioclient_mock: AiohttpClientMocker, code: str
+):
+    aioclient_mock.post(
+        f"{REP_URL}/commit", status=409, json={"detail": {"error": code, "message": "m"}}
+    )
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaReplacementConflict) as exc_info:
+        await client.commit_replacement(TOKEN, RID, 5)
+    assert exc_info.value.code == code and exc_info.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_replacement_409_without_error_detail_is_generic_api_error(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.post(f"{REP_URL}/commit", status=409, json={"detail": "x"})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError) as exc_info:
+        await client.commit_replacement(TOKEN, RID, 5)
+    assert not isinstance(exc_info.value, WoltaReplacementConflict)
+    assert exc_info.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_replacement_409_with_string_detail_is_plain_api_error(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """The stream-bound refusal has a string detail: a plain WoltaApiError(409), never a
+    WoltaReplacementConflict."""
+    aioclient_mock.put(REP_URL, status=409, json={"detail": "stream-bound plant"})
+    client = _client(aioclient_mock)
+    from datetime import datetime, timezone
+
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    with pytest.raises(WoltaApiError) as exc_info:
+        await client.open_replacement(
+            TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+            fields=None, reason="direction",
+        )
+    assert type(exc_info.value) is WoltaApiError and exc_info.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_replacement_429_archive_full_carries_retry_after(
+    aioclient_mock: AiohttpClientMocker,
+):
+    from datetime import datetime, timezone
+
+    aioclient_mock.put(
+        REP_URL, status=429, headers={"Retry-After": "86400"},
+        json={"detail": {"error": "archive_full"}},
+    )
+    client = _client(aioclient_mock)
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    with pytest.raises(WoltaRateLimitError) as exc_info:
+        await client.open_replacement(
+            TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+            fields=None, reason="direction",
+        )
+    assert exc_info.value.retry_after == 86400
+
+
+@pytest.mark.asyncio
+async def test_ordinary_404_elsewhere_is_still_auth_error(aioclient_mock: AiohttpClientMocker):
+    """The structured-404 reading is confined to the replacement calls."""
+    aioclient_mock.post(
+        f"{BASE_URL}/api/v1/profile/recompute", status=404,
+        json={"detail": {"error": "unknown_replacement"}},
+    )
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.recompute(TOKEN)

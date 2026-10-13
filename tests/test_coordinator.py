@@ -911,47 +911,283 @@ async def test_effective_stream_identity_without_invert(hass: HomeAssistant, moc
 
 @pytest.mark.asyncio
 async def test_effective_stream_swaps_battery_when_inverted(hass: HomeAssistant, mock_entry):
-    """Invert flag set: batt_in reads the discharge sensor, batt_out the charge sensor.
-    Grid/solar are untouched (only the battery direction is flipped)."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    """Applied inversion covering now: batt_in reads the discharge sensor, batt_out the
+    charge sensor. Grid/solar are untouched (only the battery direction is flipped)."""
     client = _mock_client()
-    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
-    assert coordinator._effective_stream("batt_in") == "batt_out"
-    assert coordinator._effective_stream("batt_out") == "batt_in"
-    assert coordinator._effective_stream("grid_in") == "grid_in"
-    assert coordinator._effective_stream("solar") == "solar"
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client,
+        store_state={"applied_invert_intervals": [[None, None]]})
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        assert coordinator._effective_stream("batt_in") == "batt_out"
+        assert coordinator._effective_stream("batt_out") == "batt_in"
+        assert coordinator._effective_stream("grid_in") == "grid_in"
+        assert coordinator._effective_stream("solar") == "solar"
 
 
 @pytest.mark.asyncio
-async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entry):
-    """Flag changed since the last upload (applied_invert in state) → the bookmark is reset →
-    full re-backfill (the LTS 'hour' window is fetched) so history is overwritten with the correct direction."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
+async def test_effective_stream_answers_for_now_from_the_applied_intervals(
+    hass: HomeAssistant, mock_entry
+):
+    """The texts name what feeds each role NOW: an applied interval that ended before
+    now does not swap, one that started before now does - whatever the desired flag."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
 
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    t = (NOW - timedelta(hours=1)).isoformat()
+    # Desired says "invert everything": it must not leak into the answer - only the
+    # applied intervals (what the stored rows are built with) decide.
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True,
+                       CONF_INVERT_INTERVALS: [[None, None]]}
     client = _mock_client()
-    fetch_calls: list[str] = []
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW):
+        ended = await _make_coordinator(
+            hass, mock_entry, client, store_state={"applied_invert_intervals": [[None, t]]})
+        assert ended._effective_stream("batt_in") == "batt_in"
+        started = await _make_coordinator(
+            hass, mock_entry, client, store_state={"applied_invert_intervals": [[t, None]]})
+        assert started._effective_stream("batt_in") == "batt_out"
 
-    async def mock_fetch(h, ids, start, end, period):
-        fetch_calls.append(period)
-        return {}
 
-    bookmark_str = (NOW - timedelta(days=1)).isoformat()  # fresh → normally incremental
+@pytest.mark.asyncio
+async def test_stream_ids_never_swap(hass: HomeAssistant, mock_entry):
+    """The streams are built as the sensors say; the swap happens per quarter later."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True,
+                       CONF_INVERT_INTERVALS: [[None, None]]}
+    client = _mock_client()
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client, store_state={"applied_invert_intervals": [[None, None]]})
+    ids = coordinator._stream_ids()
+    assert ids["batt_in"] == ["sensor.batt_in"]
+    assert ids["batt_out"] == ["sensor.batt_out"]
+
+
+@pytest.mark.asyncio
+async def test_applied_and_desired_intervals_are_parsed(hass: HomeAssistant, mock_entry):
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+
+    t = NOW - timedelta(hours=3)
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_INTERVALS: [[t.isoformat(), None]]}
+    client = _mock_client()
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client, store_state={"applied_invert_intervals": [[None, None]]})
+    assert coordinator._desired_intervals() == [(t, None)]
+    assert coordinator._applied_intervals() == [(None, None)]
+
+
+async def _run_setup(hass, coordinator):
+    """Run the coordinator's _async_setup with the entry write and the side-poll timer
+    patched out; returns the async_update_entry mock."""
+    with (
+        patch.object(hass.config_entries, "async_update_entry") as mock_upd,
+        patch("custom_components.wolta.coordinator.async_track_time_interval"),
+    ):
+        await coordinator._async_setup()
+    return mock_upd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("flag", "expected"), [(True, [[None, None]]), (False, [])])
+async def test_setup_migrates_the_invert_flag_to_intervals(
+    hass: HomeAssistant, mock_entry, flag, expected
+):
+    """Migration: an entry without intervals gets them from the boolean flag, and the
+    Store's applied intervals follow (no applied_invert either -> from the desired value)."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: flag}
+    client = _mock_client()
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+    mock_upd = await _run_setup(hass, coordinator)
+
+    mock_upd.assert_called_once()
+    data = mock_upd.call_args.kwargs["data"]
+    assert data[CONF_INVERT_INTERVALS] == expected
+    assert data[CONF_INVERT_BATTERY] is flag              # mirrored, unchanged
+    assert coordinator._state["applied_invert_intervals"] == expected
+    coordinator._store.async_save.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_setup_migration_without_any_flag_gives_empty_intervals(
+    hass: HomeAssistant, mock_entry
+):
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    client = _mock_client()
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+    mock_upd = await _run_setup(hass, coordinator)
+    data = mock_upd.call_args.kwargs["data"]
+    assert data[CONF_INVERT_INTERVALS] == []
+    assert data[CONF_INVERT_BATTERY] is False
+    assert coordinator._state["applied_invert_intervals"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("applied_invert", "expected"),
+                         [(True, [[None, None]]), (False, [])])
+async def test_setup_derives_applied_intervals_from_applied_invert(
+    hass: HomeAssistant, mock_entry, applied_invert, expected
+):
+    """Migration: the stored rows were built with applied_invert, not with whatever the
+    entry now desires - the applied intervals come from it when present."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: not applied_invert,
+                       CONF_INVERT_INTERVALS: [] if applied_invert else [[None, None]]}
+    client = _mock_client()
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client, store_state={"applied_invert": applied_invert})
+    mock_upd = await _run_setup(hass, coordinator)
+
+    mock_upd.assert_not_called()                          # entry already migrated
+    assert coordinator._state["applied_invert_intervals"] == expected
+    assert coordinator._state["applied_invert"] is applied_invert  # legacy key untouched
+
+
+@pytest.mark.asyncio
+async def test_setup_migration_is_a_no_op_once_done(hass: HomeAssistant, mock_entry):
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+
+    t = (NOW - timedelta(hours=3)).isoformat()
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_INTERVALS: [[t, None]]}
+    client = _mock_client()
+    coordinator = await _make_coordinator(
+        hass, mock_entry, client,
+        store_state={"applied_invert": True, "applied_invert_intervals": [[None, t]]})
+    mock_upd = await _run_setup(hass, coordinator)
+
+    mock_upd.assert_not_called()
+    coordinator._store.async_save.assert_not_awaited()
+    assert coordinator._state["applied_invert_intervals"] == [[None, t]]
+
+
+def _distinct_battery_stats(start, end) -> dict:
+    """_energy_stats with the discharge sensor at 0.2 per period (charge stays 0.1), so a
+    swapped row is told apart from an unswapped one."""
+    stats = _energy_stats(start, end)
+    stats["sensor.batt_out"] = [{**r, "change": 0.2} for r in stats["sensor.batt_out"]]
+    return stats
+
+
+@pytest.mark.asyncio
+async def test_build_swaps_the_battery_per_quarter_from_the_applied_intervals(
+    hass: HomeAssistant, mock_entry
+):
+    """Per-quarter inversion: with applied [[T, None]] the quarters before T carry
+    charge/discharge as the sensors say and the quarters from T carry them swapped."""
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+
+    t = NOW - timedelta(hours=3)
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_INTERVALS: []}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        return _distinct_battery_stats(start, end)
+
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
-        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
-        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
-            store_state={"last_uploaded_ts": bookmark_str, "applied_invert": False},
-        )
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint(),
+                         "applied_invert_intervals": [[t.isoformat(), None]]})
         await coordinator._async_update_data()
 
-    assert "hour" in fetch_calls, "invert change should force a full backfill (the LTS window)"
-    assert coordinator._state.get("applied_invert") is True
+    sent = [r for call in client.put_data.call_args_list for r in call.args[1]]
+    before = [r for r in sent if datetime.fromisoformat(r["ts"]) < t]
+    after = [r for r in sent if datetime.fromisoformat(r["ts"]) >= t]
+    assert before and after
+    for r in before:
+        assert r["batt_charged_kwh"] == pytest.approx(0.3)
+        assert r["batt_discharged_kwh"] == pytest.approx(0.6)
+    for r in after:
+        assert r["batt_charged_kwh"] == pytest.approx(0.6)
+        assert r["batt_discharged_kwh"] == pytest.approx(0.3)
+        assert r["grid_import_kwh"] == pytest.approx(0.3)   # nothing else moves
+
+
+@pytest.mark.asyncio
+async def test_build_ignores_the_desired_intervals(hass: HomeAssistant, mock_entry):
+    """Until a replacement makes it applied, a desired inversion swaps nothing."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True,
+                       CONF_INVERT_INTERVALS: [[None, None]]}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        return _distinct_battery_stats(start, end)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": True, "applied_entities": _fingerprint(),
+                         "applied_invert_intervals": []})
+        await coordinator._async_update_data()
+
+    sent = [r for call in client.put_data.call_args_list for r in call.args[1]]
+    assert sent
+    assert all(r["batt_charged_kwh"] == pytest.approx(0.3) for r in sent)
+    assert all(r["batt_discharged_kwh"] == pytest.approx(0.6) for r in sent)
+
+
+@pytest.mark.asyncio
+async def test_complete_by_stream_judges_each_stream_by_its_own_sensors(
+    hass: HomeAssistant, mock_entry
+):
+    """A solar period missing makes its quarter incomplete for solar (and overall) but
+    not for grid_in; a stream without sensors is unbounded (None)."""
+    from custom_components.wolta.coordinator import _Source
+    from custom_components.wolta.stats import aggregate_5min_to_15min
+
+    start = NOW - timedelta(hours=2)
+    hole = NOW - timedelta(hours=1)            # the quarter [hole, hole + 15 min)
+    raw = _energy_stats(start - timedelta(minutes=5), NOW)
+    raw["sensor.solar"] = [r for r in raw["sensor.solar"]
+                           if r["start"] != (hole + timedelta(minutes=5)).timestamp()]
+    client = _mock_client()
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+    src = _Source(raw, aggregate_5min_to_15min, start, NOW)
+
+    built = coordinator._build_streams(src)
+    by_stream = built.complete_by_stream
+    assert hole not in built.complete
+    assert hole not in by_stream["solar"]
+    assert hole in by_stream["grid_in"]
+    assert hole in by_stream["batt_in"] and hole in by_stream["batt_out"]
+    assert start in by_stream["solar"]
+    assert by_stream["grid_in"] >= built.complete
+
+    no_solar = coordinator._build_streams(
+        src, ids={**coordinator._stream_ids(), "solar": []})
+    assert no_solar.complete_by_stream["solar"] is None
+    assert hole in no_solar.complete                    # solar no longer decides
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_text_names_the_sensors_feeding_the_role_under_inversion(
+    hass: HomeAssistant, mock_entry
+):
+    """The streams are built unswapped, the repair text answers for now: with the
+    discharge sensor empty and the direction inverted, the charge role is the empty one
+    and the text names the sensor that is actually silent."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _run_energy_cycles(
+        hass, mock_entry, client, empty=("sensor.batt_out",), cycles=3,
+        extra_state={"applied_invert_intervals": [[None, None]]})
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._energy_issue_id)
+    assert issue is not None
+    assert issue.translation_placeholders["streams"] == "batt_in: sensor.batt_out"
 
 
 @pytest.mark.asyncio
@@ -982,47 +1218,9 @@ async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entr
 
 
 @pytest.mark.asyncio
-async def test_invert_change_forces_recompute_despite_recent_last_recompute(
-    hass: HomeAssistant, mock_entry
-):
-    """After an invert change (issue #1), the grade should be recomputed IMMEDIATELY, bypassing the 7-day gate –
-    even if last_recompute is fresh. The force flag is set by the self-heal and cleared once the recompute
-    succeeds."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
-    client = _mock_client()
-    recent_last_recompute = "2025-05-29"  # 2 days before period-end 2025-05-31 → normally SKIP
-
-    with (
-        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
-        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
-        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
-        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
-        _patch_aggregator("split_hour_to_quarters", return_value={}),
-    ):
-        coordinator = await _make_coordinator(
-            hass, mock_entry, client,
-            store_state={
-                "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
-                "last_recompute": recent_last_recompute,
-                "applied_invert": False,  # differs from the entry flag → self-heal fires
-            },
-        )
-        await coordinator._async_update_data()
-
-    assert client.recompute.called, "invert change should force recompute past the 7-day gate"
-    assert coordinator._state.get("pending_invert_recompute") is None, \
-        "the force flag should be cleared once the recompute succeeds"
-
-
-@pytest.mark.asyncio
 async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, mock_entry):
-    """If the forced recompute gets a 429, the force flag should be retained (retry on the next tick)."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    """If the forced recompute gets a 429, the force flag should be retained (retry on the next tick).
+    The flag is set by a coverage fill or a sensor change; a direction change no longer sets it."""
     client = _mock_client(raise_on_recompute=WoltaRateLimitError(3600))
 
     with (
@@ -1038,7 +1236,7 @@ async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, moc
             store_state={
                 "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
                 "last_recompute": "2025-05-29",
-                "applied_invert": False,
+                "pending_invert_recompute": True,
             },
         )
         await coordinator._async_update_data()
@@ -1148,11 +1346,14 @@ async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_e
 
 
 @pytest.mark.asyncio
-async def test_entity_change_resets_bookmark(hass: HomeAssistant, mock_entry):
-    """Ändrade sensorval (reconfigure) → bookmark nollas → full re-backfill,
-    samma självläkningsmönster som invert-togglen."""
-    import json as _json
-
+async def test_entity_change_keeps_bookmark_and_queues_a_replacement(
+    hass: HomeAssistant, mock_entry
+):
+    """Changed sensor selection (reconfigure): the bookmark stays and nothing is re-sent
+    or force-recomputed; an entity job replaces the changed fields on the server
+    (tests/test_coordinator_replacement.py). An unreadable fingerprint counts as every
+    stream changed (those with a sensor now are replaced). Without data_since from the
+    server the job waits."""
     client = _mock_client()
     client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
@@ -1172,11 +1373,17 @@ async def test_entity_change_resets_bookmark(hass: HomeAssistant, mock_entry):
                          "applied_entities": "OLD-FINGERPRINT"})
         await coordinator._async_update_data()
 
-    assert "last_uploaded_ts" not in coordinator._state
-    assert coordinator._state["applied_entities"] == _json.dumps(
-        coordinator._entity_map, sort_keys=True)
-    # pending-flaggan sätts och konsumeras i samma tick → recompute triggad direkt
-    client.recompute.assert_awaited()
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == "OLD-FINGERPRINT"
+    assert "pending_invert_recompute" not in coordinator._state
+    job = coordinator._state["replacement_job"]
+    assert job["type"] == "entities"
+    assert job["target"] == coordinator._entities_fingerprint()
+    # external_control has no sensor chosen: a removed (or never chosen) one is not
+    # replaced.
+    assert job["fields"] == [
+        "solar_kwh", "grid_import_kwh", "grid_export_kwh", "batt_charged_kwh",
+        "batt_discharged_kwh"]
 
 
 @pytest.mark.asyncio
@@ -1248,8 +1455,9 @@ async def test_coordinator_external_control_empty_string_is_none(
 async def test_entity_fingerprint_changes_when_external_control_added(
     hass: HomeAssistant, mock_entry
 ):
-    """Selecting an external-control sensor must trigger the same self-heal
-    bookmark reset as changing any other entity selection (issue #1 pattern)."""
+    """Selecting an external-control sensor changes the fingerprint like any other
+    entity selection: an entity job replaces the external_control field, and the
+    bookmark stays."""
     import json as _json
 
     mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
@@ -1279,9 +1487,11 @@ async def test_entity_fingerprint_changes_when_external_control_added(
                          "applied_entities": pre_existing_fingerprint})
         await coordinator._async_update_data()
 
-    assert "last_uploaded_ts" not in coordinator._state
-    assert coordinator._state["applied_entities"] != pre_existing_fingerprint
-    client.recompute.assert_awaited()
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == pre_existing_fingerprint
+    job = coordinator._state["replacement_job"]
+    assert job["target"] != pre_existing_fingerprint
+    assert job["fields"] == ["external_control"]
 
 
 @pytest.mark.asyncio
@@ -2817,6 +3027,7 @@ async def _run_energy_cycles(
     bookmark_age: timedelta = timedelta(hours=6),
     advance: timedelta = timedelta(hours=6),
     fingerprint: str | None = None,
+    extra_state: dict | None = None,
 ):
     """Run N incremental cycles with the given streams empty. The clock advances
     ``advance`` per cycle so each read window is a real slow-poll window - with a
@@ -2836,7 +3047,8 @@ async def _run_energy_cycles(
             hass, mock_entry, client,
             store_state={"last_uploaded_ts": (NOW - bookmark_age).isoformat(),
                          "applied_invert": False,
-                         "applied_entities": fingerprint or _fingerprint()})
+                         "applied_entities": fingerprint or _fingerprint(),
+                         **(extra_state or {})})
         for _ in range(cycles):
             await coordinator._async_update_data()
             clock["now"] = clock["now"] + advance
@@ -3463,7 +3675,8 @@ async def test_inverted_battery_judges_the_same_sensors(hass: HomeAssistant, moc
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
             store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
-                         "applied_invert": True, "applied_entities": _fingerprint()})
+                         "applied_invert": True, "applied_entities": _fingerprint(),
+                         "applied_invert_intervals": [[None, None]]})
         await coordinator._async_update_data()
 
     sent = [r for call in client.put_data.call_args_list for r in call.args[1]]
@@ -4848,17 +5061,155 @@ async def test_direction_healthy_without_flags_does_not_write_entry(hass, mock_e
 
 
 @pytest.mark.asyncio
-async def test_direction_guard_holds_while_corrected_history_is_pending(hass, mock_entry):
-    """as_of efter vändningen räcker inte om den rättade historiken inte landat och räknats om
-    (pending_invert_recompute): betyget beskriver fortfarande den gamla riktningen."""
+async def test_direction_guard_holds_while_a_direction_job_runs(hass, mock_entry):
+    """as_of efter vändningen räcker inte medan riktningsjobbet pågår: de lagrade raderna är
+    inte alla vända, så betyget beskriver fortfarande den gamla riktningen."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._state["replacement_job"] = c._new_replacement_job("direction", [[None, None]])
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+    c._state.pop("replacement_job")
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_ignores_the_legacy_recompute_flag(hass, mock_entry):
+    """pending_invert_recompute no longer stands for a flip (the server queues the recount
+    at commit): with a newer as_of and no job the repair returns."""
     from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
     c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
     c._state["pending_invert_recompute"] = True
     c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
-    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
-    c._state.pop("pending_invert_recompute")
-    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_holds_for_a_direction_job_without_a_flip_stamp(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._state["replacement_job"] = c._new_replacement_job("direction", [[None, None]])
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+def _swap_results(form, swap, **kw):
+    results = _dir_results(form, **kw)
+    results["betyg"]["battery_direction"]["swap_intervals"] = swap
+    return results
+
+
+_SWAP_FROM = {"from": "2026-09-28T13:00:00+00:00", "to": None,
+              "gap_hours_from": 1, "gap_hours_to": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["since", "ended", "all", "partial"])
+async def test_direction_issue_fixable_for_every_form_with_swap_intervals(
+    hass, mock_entry, form
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, [_SWAP_FROM]))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    expected = (f"battery_direction_{form}_flip" if form in ("since", "ended")
+                else f"battery_direction_{form}")
+    assert issue.translation_key == expected
+    assert issue.data["swap_intervals"] == [["2026-09-28T13:00:00+00:00", None]]
+    assert issue.translation_placeholders["swap_period"].endswith("→ …")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form,key", [
+    ("since", "battery_direction_since"), ("ended", "battery_direction_ended"),
+    ("all", "battery_direction_no_fix"), ("partial", "battery_direction_no_fix")])
+async def test_direction_issue_with_empty_swap_intervals_is_text_only(
+    hass, mock_entry, form, key
+):
+    """No boundary the server could place with evidence: the text without a fix."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, []))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is False
+    assert issue.translation_key == key
+    assert issue.data["swap_intervals"] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_without_the_key_keeps_the_v043_rule(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    assert issue.data["swap_intervals"] == [[None, None]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["x", [1], [{"from": "not-a-date", "to": None}]])
+async def test_direction_issue_with_malformed_swap_intervals_is_not_fixable(
+    hass, mock_entry, swap
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results("since", swap))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID).is_fixable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form,key", [
+    ("since", "battery_direction_since"), ("ended", "battery_direction_ended"),
+    ("all", "battery_direction_no_fix")])
+@pytest.mark.parametrize("swap", [
+    [{"from": "2026-09-28T13:30:00+00:00", "to": None}],
+    [{"from": None, "to": "2026-09-28T13:00:05+00:00"}],
+    # Judged in UTC: 14:30 at UTC+01:00 is 13:30 UTC.
+    [{"from": "2026-09-28T13:00:00+00:00", "to": "2026-09-30T14:30:00+01:00"}],
+])
+async def test_direction_issue_with_swap_bounds_off_the_hour_is_text_only(
+    hass, mock_entry, form, key, swap
+):
+    """The direction job swaps whole UTC hours: a bound inside an hour is not offered as
+    a fix (it could overlap a window already swapped); the issue only explains."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, swap))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is False
+    assert issue.translation_key == key
+    assert issue.data["swap_intervals"] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_with_swap_bounds_on_the_hour_in_another_offset_is_fixable(
+    hass, mock_entry
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(
+        "since", [{"from": "2026-09-28T15:00:00+02:00", "to": None}]))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    assert issue.data["swap_intervals"] == [["2026-09-28T13:00:00+00:00", None]]
+
+
+@pytest.mark.asyncio
+async def test_direction_ignore_applies_to_a_fixable_since_issue(hass, mock_entry):
+    from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})
+    c._evaluate_measured_params(_swap_results("since", [_SWAP_FROM]))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+    c._evaluate_measured_params(_swap_results("since", []))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_holds_for_a_flipped_since_issue(hass, mock_entry):
+    """After a flip, with a direction job in Store, the fixable issue is not raised again
+    however new as_of is."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._state["replacement_job"] = c._new_replacement_job(
+        "direction", [["2026-09-28T13:00:00+00:00", None]])
+    c._evaluate_measured_params(_swap_results("since", [_SWAP_FROM],
+                                              as_of="2026-10-14T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio

@@ -453,6 +453,67 @@ def merge_streams(
     return rows
 
 
+def replacement_rows(
+    streams: dict[str, dict[datetime, float]],
+    complete_all: set[datetime],
+    complete_replaced: set[datetime],
+    fields: list[str],
+    external: set[datetime],
+) -> list[dict[str, Any]]:
+    """Rows for a field-scoped replacement of stored flows (a sensor change).
+
+    One row per quarter in *complete_replaced* (the quarters every sensor of the
+    replaced streams measured cleanly), with merge_streams' values and field names.
+    A quarter that is also in *complete_all* carries every energy field and
+    external_control: the server inserts such a row where it holds none. Any other
+    quarter carries only *fields* (and ``ts``): the server updates those fields of a
+    stored row and never inserts a partial one.
+
+    *streams* holds merge_streams' keyword arguments (batt_in, batt_out, grid_in,
+    grid_out, solar), with the battery direction already applied.
+
+    The per-quarter cap judges what a row carries: a partial row is dropped only when
+    one of *its* fields exceeds the cap - a spike in a sensor that is not replaced must
+    not cost the replaced value. For the same reason a full row that merge_streams drops
+    over the cap falls back to a partial row with only the replaced fields: dropped
+    whole, the quarter would have no staged row and the server would remove it."""
+    full_quarters = set(complete_all) & set(complete_replaced)
+    out: list[dict[str, Any]] = merge_streams(
+        **streams, external=external, complete=full_quarters)
+    emitted = {row["ts"] for row in out}
+    over_cap = {qt for qt in full_quarters if qt.isoformat() not in emitted}
+    partial = sorted((set(complete_replaced) - full_quarters) | over_cap)
+    if not partial:
+        return out
+    source = {
+        "batt_charged_kwh": streams.get("batt_in") or {},
+        "batt_discharged_kwh": streams.get("batt_out") or {},
+        "solar_kwh": streams.get("solar") or {},
+        "grid_import_kwh": streams.get("grid_in") or {},
+        "grid_export_kwh": streams.get("grid_out") or {},
+    }
+    dropped = 0
+    for qt in partial:
+        row: dict[str, Any] = {"ts": qt.isoformat()}
+        for f in fields:
+            if f == "external_control":
+                row[f] = qt in external
+            else:
+                value = source[f].get(qt, 0.0)
+                row[f] = value if value > 0.0 else 0.0  # as merge_streams floors it
+        if any(v > _BACKEND_MAX_KWH for k, v in row.items()
+               if k not in ("ts", "external_control")):
+            dropped += 1
+            continue
+        out.append(row)
+    if dropped:
+        _LOGGER.warning(
+            "Dropped %d replacement row(s) exceeding %.0f kWh per 15 min",
+            dropped, _BACKEND_MAX_KWH)
+    out.sort(key=lambda r: r["ts"])
+    return out
+
+
 def flagged_quarters(
     points: list[tuple[datetime, str]],
     end: datetime,
