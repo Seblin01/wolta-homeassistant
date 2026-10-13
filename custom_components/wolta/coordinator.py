@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from uuid import uuid4
 
 import aiohttp
 from astral import Observer
@@ -30,6 +31,8 @@ from .api import (
     WoltaApiError,
     WoltaAuthError,
     WoltaRateLimitError,
+    WoltaReplacementConflict,
+    WoltaReplacementGone,
 )
 from .const import (
     KEY_BATTERY_STATUS,
@@ -144,6 +147,26 @@ class _Built:
     # stream measured cleanly. None for a stream without sensors - unbounded, it never
     # limits a quarter. Field-scoped replacements judge only the streams they replace.
     complete_by_stream: dict[str, set[datetime] | None]
+
+
+@dataclass(frozen=True)
+class _ReplacementType:
+    """The hooks a replacement job type plugs into the runner (_run_replacement_job).
+
+    A replacement spec is a dict {kind, window_start, window_end, fields, reason} with the
+    window as ISO strings in UTC on whole hours; the runner adds the id."""
+
+    # (job, now, profile) -> the next spec; None to wait (nothing is opened and the regular
+    # upload goes on), or "done" when the job has nothing left to replace.
+    next_replacement: Callable[[dict, datetime, dict | None], Awaitable[dict | str | None]]
+    # (job, spec, result) after each committed window, before the job is saved. `result`
+    # is the server's commit result, or {} when it had nothing to replace (409 empty).
+    on_committed: Callable[[dict, dict, dict], Awaitable[None]]
+    # (job) once next_replacement says "done": apply the job's target to the applied state.
+    on_finished: Callable[[dict], Awaitable[None]]
+    # (job, spec, now) -> the rows of a "rows" replacement, or None when they cannot be
+    # built now (the job waits). Not needed by a type that only swaps.
+    rows_for: Callable[[dict, dict, datetime], Awaitable[list[dict] | None]] | None = None
 
 
 def _silent_sensors(
@@ -350,6 +373,14 @@ _ANCHOR_LOOKBACK = timedelta(hours=36)
 
 # The API's length limit for battery_sources `source` ('ha:<platform>:<entity_id>').
 _SOC_SOURCE_MAX = 200
+
+# At most this many replacements are committed per cycle (a direction job has one per
+# segment). A bound against a job that never finishes, not a target: the rest waits.
+_REPLACEMENTS_PER_CYCLE = 12
+
+# After a commit the server refused with 413 (the result would exceed the profile's row
+# limit) the replacement is dropped and the job tries again this much later.
+_REPLACEMENT_FULL_RETRY = timedelta(days=1)
 
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
@@ -587,6 +618,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # observer it was computed for so a moved home position starts afresh.
         self._daylight_key: tuple | None = None
         self._daylight_cache: dict[int, tuple[float, float] | None] = {}
+        # Replacement job types by the job's "type" (see _run_replacement_job).
+        self._replacement_types: dict[str, _ReplacementType] = {}
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -650,6 +683,264 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         }
         if new_data != dict(entry.data):
             self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # ------------------------------------------------------------------
+    # Replacement of stored flows (server spec 2026-10-13 §5, §9)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _new_replacement_job(job_type: str, target) -> dict:
+        """A replacement job as kept in Store under "replacement_job". At most one exists.
+
+        `target` is the desired value the job brings to the applied state; `replacement`
+        is the server-side replacement in flight ({id, kind, window_start, window_end,
+        fields, reason}) or None; `done_windows` lists the committed windows, so a
+        restart never repeats one; `retry_at` (ISO) holds the job back after a 429."""
+        return {
+            "type": job_type,
+            "target": target,
+            "replacement": None,
+            "done_windows": [],
+            "retry_at": None,
+        }
+
+    async def _run_replacement_job(self, now: datetime, profile: dict | None) -> bool:
+        """Advance the replacement job, before the regular upload. Returns True when the
+        regular upload must pause this cycle: a replacement is open on the server, and
+        every regular write would move the plant's flows_version under it, so its
+        commit would be refused (409 conflict, server spec §7). A job that has not
+        opened anything (waiting, or held back by a 429) pauses nothing.
+
+        A replacement left in Store by an earlier cycle is resumed by asking the server
+        first: committed is applied, open is staged and committed again, and anything
+        else (aborted, expired, restored, unknown) starts over with a new id."""
+        job = self._state.get("replacement_job")
+        if not job:
+            return False
+        hooks = self._replacement_types.get(job.get("type"))
+        if hooks is None:
+            # A type this version does not know can never finish; keeping it would hold
+            # the regular upload back for good. An open replacement expires server-side.
+            _LOGGER.warning("Dropping a Wolta replacement job of unknown type %r", job.get("type"))
+            self._state.pop("replacement_job", None)
+            await self._store.async_save(self._state)
+            return False
+        retry_at = job.get("retry_at")
+        if retry_at:
+            if now < datetime.fromisoformat(retry_at):
+                return job.get("replacement") is not None
+            job["retry_at"] = None
+            await self._store.async_save(self._state)
+        try:
+            for _ in range(_REPLACEMENTS_PER_CYCLE):
+                rep = job.get("replacement")
+                opened = False
+                rows: list[dict] | None = None
+                if rep is not None:
+                    status = await self._replacement_status(rep)
+                    if status is not None and status["status"] == "committed":
+                        await self._replacement_committed(
+                            job, hooks, rep, status.get("result") or {}
+                        )
+                        continue
+                    if status is None:
+                        job["replacement"] = None
+                        await self._store.async_save(self._state)
+                        rep = None
+                    else:
+                        opened = True
+                        if rep["kind"] == "rows":
+                            rows = await hooks.rows_for(job, rep, now)
+                            if rows is None:
+                                return True  # still open on the server: wait, paused
+                if rep is None:
+                    spec = await hooks.next_replacement(job, now, profile)
+                    if spec is None:
+                        return False
+                    if spec == "done":
+                        await hooks.on_finished(job)
+                        self._state.pop("replacement_job", None)
+                        await self._store.async_save(self._state)
+                        _LOGGER.info("Wolta replacement job (%s) finished", job["type"])
+                        return False
+                    if spec["kind"] == "rows":
+                        # Built before the id is assigned: rows that cannot be built now
+                        # leave nothing behind that would pause the upload.
+                        rows = await hooks.rows_for(job, spec, now)
+                        if rows is None:
+                            return False
+                    rep = {**spec, "id": str(uuid4())}
+                    job["replacement"] = rep
+                result = await self._execute_replacement(rep, rows, opened=opened)
+                if result is None:
+                    return job.get("replacement") is not None
+                await self._replacement_committed(job, hooks, rep, result)
+        except (WoltaAuthError, aiohttp.ClientError, TimeoutError):
+            raise  # lost profile → reauth; unreachable server → the cycle fails as before
+        except WoltaRateLimitError as err:
+            job["retry_at"] = (now + timedelta(seconds=err.retry_after)).isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta replacement rate limited; retrying in %s s", err.retry_after
+            )
+        except WoltaApiError as err:
+            rep = job.get("replacement")
+            if rep is not None and err.status is not None and 400 <= err.status < 500:
+                # A refusal that repeating the same requests would not change (413: the
+                # result would exceed the profile's row limit; 409 without a code: a
+                # plant bound to a stream; 422: rows the server will not take). Drop the
+                # replacement so the regular upload is not held back by it.
+                await self._discard_replacement(rep["id"])
+                job["replacement"] = None
+                if err.status == 413:
+                    job["retry_at"] = (now + _REPLACEMENT_FULL_RETRY).isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta replacement failed (HTTP %s); retrying next cycle", err.status
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            # A job that cannot run must not stop the regular upload: only a replacement
+            # the server holds open pauses it, and that one expires within a day.
+            _LOGGER.warning(
+                "Wolta replacement job failed (%s); retrying next cycle", type(err).__name__
+            )
+            _LOGGER.debug("Replacement job failure detail", exc_info=True)
+        return job.get("replacement") is not None
+
+    async def _replacement_status(self, rep: dict) -> dict | None:
+        """The server's view of a replacement this client opened earlier: the GET body
+        when it is open or committed, None when it is gone and must start over."""
+        try:
+            status = await self.client.get_replacement(self.token, rep["id"])
+        except WoltaReplacementGone:
+            return None
+        state = status.get("status") if isinstance(status, dict) else None
+        if state in ("open", "committed"):
+            return status
+        if state in ("aborted", "expired", "restored"):
+            return None
+        # Unreadable: guessing "gone" could swap a committed window twice.
+        raise WoltaApiError(f"Unexpected replacement status {state!r}")
+
+    async def _replacement_committed(
+        self, job: dict, hooks: _ReplacementType, rep: dict, result: dict
+    ) -> None:
+        """Book a committed window: done_windows, the type's hook, and no replacement in
+        flight - saved together, so a restart neither repeats nor loses the window."""
+        window = [rep["window_start"], rep["window_end"]]
+        if window not in job["done_windows"]:
+            job["done_windows"].append(window)
+        await hooks.on_committed(job, rep, result)
+        job["replacement"] = None
+        await self._store.async_save(self._state)
+        _LOGGER.info(
+            "Wolta replacement committed (%s, %s, %s..%s)",
+            job["type"], rep["kind"], rep["window_start"], rep["window_end"],
+        )
+
+    async def _execute_replacement(
+        self, rep: dict, rows: list[dict] | None, *, opened: bool = False
+    ) -> dict | None:
+        """Open (idempotent on the id), stage the rows in chunks and commit one
+        replacement of the current job. `rows` is None for "swap_battery"; `opened` skips
+        the open of a replacement the server reported open.
+
+        Returns the commit result ({} when the server had nothing to replace, 409
+        empty), or None to try again later. On the server errors of spec §5.3-5.4 the
+        job's replacement is cleared, so the next attempt opens a new id: 409 conflict
+        (the server aborted it), 410 or an unknown id (gone), and a second 409
+        count_mismatch after the rows were sent again. A 429 on open (archive_full)
+        holds the job back until Retry-After. Store is saved before every call that
+        can change the server's state."""
+        job = self._state["replacement_job"]
+        rid = rep["id"]
+        if not opened and not await self._open_replacement(job, rep):
+            return None
+        expected = None if rows is None else len({row["ts"] for row in rows})
+        try:
+            if rows is not None:
+                await self._store.async_save(self._state)
+                await self.client.stage_replacement_rows(self.token, rid, rows)
+            for attempt in (1, 2):
+                await self._store.async_save(self._state)
+                try:
+                    return await self.client.commit_replacement(self.token, rid, expected)
+                except WoltaReplacementConflict as err:
+                    if err.code == "count_mismatch" and rows is not None and attempt == 1:
+                        _LOGGER.warning(
+                            "Wolta replacement staging incomplete; sending the rows again"
+                        )
+                        await self._store.async_save(self._state)
+                        await self.client.stage_replacement_rows(self.token, rid, rows)
+                        continue
+                    if err.code == "empty":
+                        # Nothing to replace in the window; it stays open server-side.
+                        await self._discard_replacement(rid)
+                        return {}
+                    raise
+        except WoltaReplacementConflict as err:
+            if err.code != "conflict":  # conflict: the server already aborted it
+                await self._discard_replacement(rid)
+            _LOGGER.warning(
+                "Wolta replacement refused (%s); starting over with a new id", err.code
+            )
+        except WoltaReplacementGone as err:
+            _LOGGER.warning(
+                "Wolta replacement closed by the server (%s); starting over with a new id",
+                err.code or err.status,
+            )
+        job["replacement"] = None
+        await self._store.async_save(self._state)
+        return None
+
+    async def _open_replacement(self, job: dict, rep: dict) -> bool:
+        """Open `rep` on the server after saving its id. False when it was not opened;
+        the job then has no replacement, so nothing pauses."""
+        await self._store.async_save(self._state)
+        try:
+            await self.client.open_replacement(
+                self.token,
+                rep["id"],
+                kind=rep["kind"],
+                window_start=datetime.fromisoformat(rep["window_start"]),
+                window_end=datetime.fromisoformat(rep["window_end"]),
+                fields=rep.get("fields"),
+                reason=rep["reason"],
+            )
+        except WoltaAuthError:
+            raise
+        except WoltaRateLimitError as err:
+            # 429 archive_full: the plant's archive of replaced rows is full until its
+            # oldest entries age out (Retry-After).
+            job["replacement"] = None
+            job["retry_at"] = (
+                dt_util.utcnow() + timedelta(seconds=err.retry_after)
+            ).isoformat()
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta cannot open a replacement now (archive full or rate limited); "
+                "retrying in %s s",
+                err.retry_after,
+            )
+            return False
+        except WoltaApiError as err:
+            job["replacement"] = None
+            await self._store.async_save(self._state)
+            _LOGGER.warning(
+                "Wolta replacement could not be opened (HTTP %s); retrying next cycle",
+                err.status,
+            )
+            return False
+        return True
+
+    async def _discard_replacement(self, rid: str) -> None:
+        """Best-effort DELETE of a replacement left open server-side (it expires anyway)."""
+        try:
+            await self.client.delete_replacement(self.token, rid)
+        except WoltaAuthError:
+            raise
+        except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+            _LOGGER.debug("Discarding a replacement failed; it expires server-side", exc_info=True)
 
     # ------------------------------------------------------------------
     # Main update
@@ -824,96 +1115,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
             await self._track_soc_selection()
 
-            bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
-            full_backfill = bookmark is None
-
-            backfill_start = now - timedelta(days=_BACKFILL_DAYS)
-            # Deliberately NOT floored like _short_term_start(): SoC has no completeness
-            # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
-            short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
-            if bookmark is None:
-                rows = await self._backfill_rows(now)
-                flow_start = backfill_start
-            else:
-                flow_start = datetime.fromisoformat(bookmark)
-                if now - flow_start > timedelta(days=_SHORT_TERM_DAYS):
-                    rows = await self._heal_rows(flow_start, now)
-                else:
-                    rows = await self._incremental_rows(flow_start, now)
-
-            # The SoC read has its OWN bookmark (soc_uploaded_ts), never the flows'. The
-            # flow bookmark moves whenever the flows were delivered - also when the SoC
-            # read failed or a 422 dropped SoC from the call - and a read from there would
-            # lose the quarters in between for good, although HA keeps 5-minute statistics
-            # for ~10 days. A pending SoC backfill (sensor added, or first start with
-            # sensors chosen) widens the read to the whole backfill window; the flow rows
-            # stay those of the branch above, the flow bookmark is never steered by SoC.
-            soc_backfill = bool(self._state.get("soc_backfill_pending"))
-            soc_start = flow_start  # first time with sensors and no backfill pending
-            soc_bookmark = self._soc_bookmark()
-            if soc_backfill:
-                soc_start = backfill_start
-            elif soc_bookmark is not None:
-                soc_start = soc_bookmark
-            soc_start = max(soc_start, backfill_start)
-            soc_hourly_until = max(soc_start, short_term_start)
-
+            # A replacement of stored flows runs before the regular upload (server spec
+            # §9): while one is open on the server, neither the regular PUT /data nor the
+            # coverage fill writes, since either would make its commit a 409 conflict.
+            paused = await self._run_replacement_job(now, profile_payload)
             put_payload: dict | None = None
-            if rows:
-                # Read here, not per branch: SoC only rides along with flow rows (the API
-                # requires at least one row), so a cycle without rows reads nothing.
-                # Hours before the short-term limit, quarters after it, whatever the flow
-                # branch is.
-                soc, soc_ok = await self._soc_state(
-                    soc_start, now, hourly_until=soc_hourly_until)
-                try:
-                    soc_delivered, put_response = await self._put_rows(rows, soc)
-                except WoltaApiError as err:
-                    if err.status == 413:
-                        # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
-                        # reachable for linked profiles with web CSV + HA backfill).
-                        # Surface via repairs and skip the upload – results still work.
-                        # Bookmark is NOT advanced (nothing was persisted server-side).
-                        ir.async_create_issue(
-                            self.hass,
-                            DOMAIN,
-                            _ISSUE_PROFILE_FULL,
-                            is_fixable=False,
-                            severity=ir.IssueSeverity.WARNING,
-                            translation_key=_ISSUE_PROFILE_FULL,
-                        )
-                    else:
-                        raise
-                else:
-                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
-                    put_payload = put_response
-                    self._state["last_uploaded_ts"] = rows[-1]["ts"]
-                    # The SoC backfill is done only when the read raised nothing AND the
-                    # PUT carrying it went through; otherwise the next cycle retries it.
-                    if soc_backfill and soc_ok and soc_delivered:
-                        self._state.pop("soc_backfill_pending", None)
-                    # The SoC bookmark moves on the same condition, and only with sensors
-                    # chosen: without them no key is ever written (fleet default).
-                    if self._soc_entities and soc_ok and soc_delivered:
-                        self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
-                            soc, self._state["last_uploaded_ts"])
-                    await self._store.async_save(self._state)
-                    # Clear failure counter on success
-                    self._state.pop("consecutive_failure_days", None)
-                    ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+            backfill_read = False
+            if not paused:
+                put_payload, backfill_read = await self._upload_regular(now)
 
             # Coverage reconciliation (spec 2026-10-10 täckningsavstämning): after the
             # regular upload, so the server state includes our own writes and its spike
             # rule; before _maybe_recompute, so a fill's forced recompute runs this cycle.
             # Not during fast-poll - the profile GET is skipped then for the same reason.
-            if self.update_interval != _FAST_POLL:
+            if not paused and self.update_interval != _FAST_POLL:
                 try:
                     await self._reconcile_coverage(
                         now,
                         put_payload if put_payload is not None else profile_payload,
-                        # The full backfill read the whole window when it delivered or found
-                        # nothing to send; only a failed (413) delivery leaves it unread.
-                        full_backfill=full_backfill and (put_payload is not None or not rows),
+                        full_backfill=backfill_read,
                     )
                 except WoltaAuthError:
                     raise  # purged profile → the reauth path below
@@ -970,6 +1190,93 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             if not self._view_only:
                 self._track_failure(err)
             raise UpdateFailed(f"wolta.se unreachable: {err}") from err
+
+    async def _upload_regular(self, now: datetime) -> tuple[dict | None, bool]:
+        """The regular upload: read the flows since the bookmark (or the full backfill
+        without one), PUT them with the SoC rows, advance the bookmarks. Returns the PUT
+        response (None when nothing was delivered) and whether a full backfill read
+        the whole window."""
+        bookmark = self._state.get("last_uploaded_ts")  # ISO str | None
+        full_backfill = bookmark is None
+
+        backfill_start = now - timedelta(days=_BACKFILL_DAYS)
+        # Deliberately NOT floored like _short_term_start(): SoC has no completeness
+        # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
+        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        if bookmark is None:
+            rows = await self._backfill_rows(now)
+            flow_start = backfill_start
+        else:
+            flow_start = datetime.fromisoformat(bookmark)
+            if now - flow_start > timedelta(days=_SHORT_TERM_DAYS):
+                rows = await self._heal_rows(flow_start, now)
+            else:
+                rows = await self._incremental_rows(flow_start, now)
+
+        # The SoC read has its OWN bookmark (soc_uploaded_ts), never the flows'. The
+        # flow bookmark moves whenever the flows were delivered - also when the SoC
+        # read failed or a 422 dropped SoC from the call - and a read from there would
+        # lose the quarters in between for good, although HA keeps 5-minute statistics
+        # for ~10 days. A pending SoC backfill (sensor added, or first start with
+        # sensors chosen) widens the read to the whole backfill window; the flow rows
+        # stay those of the branch above, the flow bookmark is never steered by SoC.
+        soc_backfill = bool(self._state.get("soc_backfill_pending"))
+        soc_start = flow_start  # first time with sensors and no backfill pending
+        soc_bookmark = self._soc_bookmark()
+        if soc_backfill:
+            soc_start = backfill_start
+        elif soc_bookmark is not None:
+            soc_start = soc_bookmark
+        soc_start = max(soc_start, backfill_start)
+        soc_hourly_until = max(soc_start, short_term_start)
+
+        put_payload: dict | None = None
+        if rows:
+            # Read here, not per branch: SoC only rides along with flow rows (the API
+            # requires at least one row), so a cycle without rows reads nothing.
+            # Hours before the short-term limit, quarters after it, whatever the flow
+            # branch is.
+            soc, soc_ok = await self._soc_state(
+                soc_start, now, hourly_until=soc_hourly_until)
+            try:
+                soc_delivered, put_response = await self._put_rows(rows, soc)
+            except WoltaApiError as err:
+                if err.status == 413:
+                    # Profile hit MAX_PROFILE_ROWS (80k ≈ 2.3 yr of 15-min data,
+                    # reachable for linked profiles with web CSV + HA backfill).
+                    # Surface via repairs and skip the upload – results still work.
+                    # Bookmark is NOT advanced (nothing was persisted server-side).
+                    ir.async_create_issue(
+                        self.hass,
+                        DOMAIN,
+                        _ISSUE_PROFILE_FULL,
+                        is_fixable=False,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key=_ISSUE_PROFILE_FULL,
+                    )
+                else:
+                    raise
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                put_payload = put_response
+                self._state["last_uploaded_ts"] = rows[-1]["ts"]
+                # The SoC backfill is done only when the read raised nothing AND the
+                # PUT carrying it went through; otherwise the next cycle retries it.
+                if soc_backfill and soc_ok and soc_delivered:
+                    self._state.pop("soc_backfill_pending", None)
+                # The SoC bookmark moves on the same condition, and only with sensors
+                # chosen: without them no key is ever written (fleet default).
+                if self._soc_entities and soc_ok and soc_delivered:
+                    self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
+                        soc, self._state["last_uploaded_ts"])
+                await self._store.async_save(self._state)
+                # Clear failure counter on success
+                self._state.pop("consecutive_failure_days", None)
+                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+
+        # The full backfill read the whole window when it delivered or found nothing to
+        # send; only a failed (413) delivery leaves it unread.
+        return put_payload, full_backfill and (put_payload is not None or not rows)
 
     def _build_data(self, results: dict, *, last_uploaded: datetime | None) -> WoltaData:
         """WoltaData + polltakt ur ett /results-svar. EN sanning för pending-tolkningen,
