@@ -143,3 +143,68 @@ async def test_diagnostics_show_coverage_memo_without_server_hash_prefix(hass: H
 
     assert diag["coordinator_state"]["coverage"] == memo
     assert not hashlib.sha256(token.encode()).hexdigest().startswith(memo["token"])
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_show_replacement_state_without_token(hass: HomeAssistant):
+    """Desired against applied direction intervals, the running job and the backoff are
+    visible for troubleshooting; the token is not."""
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: "super-secret", CONF_ZONE: "SE3",
+                  CONF_INVERT_INTERVALS: [["2026-10-01T00:00:00+00:00", None]]}
+    coordinator = MagicMock()
+    coordinator._state = {
+        "applied_invert_intervals": [],
+        "replacement_job": {
+            "type": "direction",
+            "target": [["2026-10-01T00:00:00+00:00", None]],
+            "replacement": {
+                "id": "rep-1", "kind": "swap_battery", "phase": "energy",
+                "window_start": "2026-10-01T00:00:00+00:00",
+                "window_end": "2026-10-05T00:00:00+00:00",
+                "fields": None, "reason": "direction",
+            },
+            "done_windows": [["a", "b"], ["c", "d"]],
+            "retry_at": "2026-10-13T12:00:00+00:00",
+        },
+        "job_backoff": {"entities": "2026-10-14T00:00:00+00:00"},
+    }
+    coordinator.last_update_success = True
+    coordinator.data = MagicMock(results={"status": "done"})
+    entry.runtime_data = coordinator
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    rep = diag["replacement"]
+    assert rep["desired_invert_intervals"] == [["2026-10-01T00:00:00+00:00", None]]
+    assert rep["applied_invert_intervals"] == []
+    job = rep["job"]
+    assert job["type"] == "direction"
+    assert job["done_windows"] == 2
+    assert job["retry_at"] == "2026-10-13T12:00:00+00:00"
+    assert job["replacement"]["kind"] == "swap_battery"
+    assert job["replacement"]["window_start"] == "2026-10-01T00:00:00+00:00"
+    assert job["replacement"]["window_end"] == "2026-10-05T00:00:00+00:00"
+    assert job["replacement"]["reason"] == "direction"
+    assert rep["job_backoff"] == {"entities": "2026-10-14T00:00:00+00:00"}
+    assert "super-secret" not in str(rep)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_replacement_without_job(hass: HomeAssistant):
+    from custom_components.wolta.diagnostics import async_get_config_entry_diagnostics
+
+    entry = MagicMock()
+    entry.data = {CONF_TOKEN: "super-secret"}
+    coordinator = MagicMock()
+    coordinator._state = {}
+    coordinator.last_update_success = True
+    coordinator.data = MagicMock(results={})
+    entry.runtime_data = coordinator
+
+    rep = (await async_get_config_entry_diagnostics(hass, entry))["replacement"]
+    assert rep == {"desired_invert_intervals": None, "applied_invert_intervals": None,
+                   "job": None, "job_backoff": None}
