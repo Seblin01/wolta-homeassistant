@@ -47,6 +47,7 @@ def _replacement_summary(entry: ConfigEntry, state: dict[str, Any]) -> dict[str,
             "retry_at": job.get("retry_at"),
             "failures": job.get("failures"),
             "job_failures": job.get("job_failures"),
+            "server_failures": job.get("server_failures"),
             "plan_failures": job.get("plan_failures"),
         }
     backoff = state.get("job_backoff")

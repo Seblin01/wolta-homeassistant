@@ -2557,3 +2557,396 @@ async def test_upgrade_from_v044_replaces_nothing_and_uploads_as_before(
     client.put_data.assert_awaited_once()
     assert coordinator._state["last_uploaded_ts"] != bookmark
     assert "pending_invert_recompute" not in coordinator._state
+
+
+# ---------------------------------------------------------------------------
+# A persistent server error (5xx, or an unreachable server) parks the job too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_direction_failing_with_500_on_open_is_parked_after_twelve_cycles(
+    hass: HomeAssistant, mock_entry
+):
+    """A deterministic 500 on every open of the swap: eleven full cycles in a row keep
+    the job, the twelfth parks it for 24 h, and the pending sensor change runs the next
+    cycle. The upload never pauses (nothing is open)."""
+    from custom_components.wolta.coordinator import _JOB_MAX_SERVER_FAILED_CYCLES
+
+    assert _JOB_MAX_SERVER_FAILED_CYCLES == 12
+    client = _direction_client(E_SINCE)
+
+    async def open_(token, rid, **kwargs):
+        if kwargs["kind"] == "swap_battery":
+            raise WoltaApiError("server error", status=500)
+
+    client.open_replacement = AsyncMock(side_effect=open_)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client,
+        data_updates={CONF_SOLAR: ["sensor.solar_new"],
+                      CONF_INVERT_INTERVALS: [[None, None]], CONF_INVERT_BATTERY: True})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+
+    async def cycle(hours):
+        coordinator._state["last_uploaded_ts"] = E_BOOKMARK
+        await _entity_cycle(coordinator, available, now=E_NOW + timedelta(hours=hours))
+
+    for n in range(11):
+        await cycle(n)
+        job = coordinator._state["replacement_job"]
+        assert job["type"] == "direction"
+        assert job["server_failures"] == n + 1
+        assert "job_failures" not in job  # a 5xx is no refusal
+    assert "job_backoff" not in coordinator._state
+
+    await cycle(11)
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["job_backoff"] == {
+        "direction": (E_NOW + timedelta(hours=35)).isoformat()}
+    assert coordinator._state["applied_invert_intervals"] == []
+    assert client.put_data.await_count == 12  # never paused
+
+    await cycle(12)
+    kinds = [c.kwargs["kind"] for c in client.open_replacement.call_args_list]
+    assert kinds[:12] == ["swap_battery"] * 12
+    assert kinds[12:] and set(kinds[12:]) == {"rows"}
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+
+
+def _endless(coordinator) -> None:
+    """A "test" type with one window per day, without end: a commit never finishes it."""
+
+    async def next_replacement(job, now, profile):
+        start = datetime.fromisoformat(WS) + timedelta(days=len(job["done_windows"]))
+        return {**SWAP, "window_start": start.isoformat(),
+                "window_end": (start + timedelta(days=1)).isoformat()}
+
+    coordinator._replacement_types["test"] = _ReplacementType(
+        next_replacement=next_replacement, on_committed=AsyncMock(),
+        on_finished=AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_a_commit_resets_the_server_failure_count(hass: HomeAssistant, mock_entry):
+    """Six cycles of 500 on open, then one that commits a window (the next window's
+    open fails again in the same cycle): the count starts over, so eleven more failing
+    cycles keep the job and only the twelfth parks it."""
+    down = WoltaApiError("server error", status=500)
+    client = _client()
+    client.open_replacement.side_effect = [down] * 6 + [None] + [down] * 13
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    _endless(coordinator)
+
+    for n in range(6):
+        await _cycle(coordinator, NOW + timedelta(hours=n))
+    assert coordinator._state["replacement_job"]["server_failures"] == 6
+
+    await _cycle(coordinator, NOW + timedelta(hours=6))
+    job = coordinator._state["replacement_job"]
+    assert job["done_windows"] == [[WS, WE]]
+    assert "server_failures" not in job
+
+    for n in range(11):
+        await _cycle(coordinator, NOW + timedelta(hours=7 + n))
+    assert coordinator._state["replacement_job"]["server_failures"] == 11
+    assert "job_backoff" not in coordinator._state
+
+    await _cycle(coordinator, NOW + timedelta(hours=18))
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["job_backoff"] == {
+        "test": (NOW + timedelta(hours=42)).isoformat()}
+
+
+@pytest.mark.asyncio
+async def test_open_replacement_with_a_failing_commit_is_never_parked_while_held(
+    hass: HomeAssistant, mock_entry
+):
+    """A commit that keeps failing with 503 counts every full cycle, but a job that
+    holds its replacement is not parked: it is given up first (_replacement_failed)."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    job = _job(SWAP, OLD_ID)
+    job["server_failures"] = 11
+    coordinator, _ = await _coordinator(hass, mock_entry, client, job, SWAP)
+
+    await _cycle(coordinator)
+
+    job = coordinator._state["replacement_job"]
+    assert job["server_failures"] == 12
+    assert job["replacement"]["id"] == OLD_ID
+    assert "job_backoff" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_fast_poll_cycles_do_not_count_server_errors(hass: HomeAssistant, mock_entry):
+    from custom_components.wolta.coordinator import _FAST_POLL
+
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+    coordinator.update_interval = _FAST_POLL
+
+    await _cycle(coordinator)
+
+    client.commit_replacement.assert_awaited_once()
+    assert "server_failures" not in coordinator._state["replacement_job"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_server_counts_like_a_5xx(hass: HomeAssistant, mock_entry):
+    """A transport error fails the cycle as before, and is counted toward parking."""
+    import aiohttp
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    client = _client()
+    client.open_replacement.side_effect = aiohttp.ClientConnectionError("unreachable")
+    job = _job(SWAP)
+    coordinator, _ = await _coordinator(hass, mock_entry, client, job, SWAP)
+
+    with pytest.raises(UpdateFailed):
+        await _cycle(coordinator)
+
+    assert coordinator._state["replacement_job"]["server_failures"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A full archive (429 on open) is shown as a repair until the job moves on
+# ---------------------------------------------------------------------------
+
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
+from homeassistant.util import dt as dt_util  # noqa: E402
+
+from custom_components.wolta.const import DOMAIN  # noqa: E402
+
+
+def _waiting_issue(hass, mock_entry):
+    return ir.async_get(hass).async_get_issue(
+        DOMAIN, f"replacement_waiting_{mock_entry.entry_id}")
+
+
+@pytest.mark.asyncio
+async def test_archive_full_raises_the_waiting_repair_and_a_commit_clears_it(
+    hass: HomeAssistant, mock_entry
+):
+    """429 on the open of a swap: a non-fixable warning that names the retry time in
+    local time and that a direction change waits. The commit after Retry-After clears
+    it."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaRateLimitError(86400)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=D_NOW):
+        await coordinator._async_update_data()
+
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_direction"
+    assert issue.is_fixable is False
+    assert issue.severity == ir.IssueSeverity.WARNING
+    retry = dt_util.as_local(D_NOW + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+    assert issue.translation_placeholders == {"retry_at": retry}
+
+    client.open_replacement.side_effect = None
+    later = D_NOW + timedelta(days=1, minutes=1)
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=later):
+        await coordinator._async_update_data()
+
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_when_the_job_is_dropped(
+    hass: HomeAssistant, mock_entry
+):
+    """A sensor change held back by a full archive: the repair says a sensor change
+    waits, and goes away when the selection is set back and the job is dropped."""
+    client = _direction_client(E_SINCE)
+    client.open_replacement.side_effect = WoltaRateLimitError(3600)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+
+    await _entity_cycle(coordinator, available)
+
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_entities"
+
+    coordinator._entity_map["solar"] = ["sensor.solar"]  # back to the applied selection
+    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(minutes=30))
+
+    assert "replacement_job" not in coordinator._state
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_when_the_job_is_parked(
+    hass: HomeAssistant, mock_entry
+):
+    client = _client()
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    retry = NOW + timedelta(hours=1)
+    coordinator._raise_waiting_issue(coordinator._state["replacement_job"], retry)
+    assert _waiting_issue(hass, mock_entry) is not None
+
+    await coordinator._park_job(coordinator._state["replacement_job"], NOW, "test", 5)
+
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_in_view_only_mode(hass: HomeAssistant, mock_entry):
+    client = _client()
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    coordinator._raise_waiting_issue(
+        coordinator._state["replacement_job"], NOW + timedelta(hours=1))
+    coordinator._view_only = True
+
+    await _cycle(coordinator)
+
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+# ---------------------------------------------------------------------------
+# The bookmark after an energy window follows the rows actually staged
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bookmark_follows_the_rows_staged_on_a_resume(hass: HomeAssistant, mock_entry):
+    """The plan's last full quarter is 08:45. The commit fails and, before the resume, a
+    sensor is added to grid export (a stream the solar change does not judge) that has
+    stopped reporting at 07:20. The rows built again carry 08:45 as a partial row only,
+    which the server skips where it holds no row; the bookmark must land on the last
+    quarter staged with every field, not on 08:45."""
+    client = _direction_client(E_SINCE)
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    coordinator, starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+
+    await _entity_cycle(coordinator, available)
+    rep = coordinator._state["replacement_job"]["replacement"]
+    planned = "2026-10-13T08:45:00+00:00"
+    assert rep["last_full"] == planned
+    assert starts == []  # paused while it is open
+
+    coordinator._entity_map["grid_out"] = ["sensor.grid_out", "sensor.grid_out_2"]
+    coordinator._entity_rows_cache = {}  # a restart
+    client.stage_replacement_rows.reset_mock()
+    client.commit_replacement.side_effect = None
+    stop = datetime(2026, 10, 13, 7, 20, tzinfo=UTC)
+    available = {**available, "sensor.grid_out_2": [(E_OTHERS_FROM, stop)]}
+    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(hours=1))
+
+    rows = _staged(client)
+    by_ts = {r["ts"]: r for r in rows}
+    assert set(by_ts[planned]) == {"ts", "solar_kwh"}  # partial now
+    full = max(r["ts"] for r in rows if len(r) == 7)
+    assert full < planned
+    assert full == "2026-10-13T07:00:00+00:00"
+    assert starts == [datetime.fromisoformat(full)]
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_raised_again_after_a_restart(hass: HomeAssistant, mock_entry):
+    """The repair is not persistent: after a restart during the wait, the held job raises
+    it again with the same retry time."""
+    import copy
+
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaRateLimitError(86400)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=D_NOW):
+        await coordinator._async_update_data()
+    saved = copy.deepcopy(coordinator._state["replacement_job"])
+    assert saved["waiting_retry"] == (D_NOW + timedelta(days=1)).isoformat()
+
+    ir.async_delete_issue(hass, DOMAIN, f"replacement_waiting_{mock_entry.entry_id}")
+    restarted, _seen = await _direction_coordinator(
+        hass, mock_entry, _direction_client(), desired=[[None, None]], applied=[],
+        job=saved)
+    later = D_NOW + timedelta(hours=6)
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=later):
+        await restarted._async_update_data()
+
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_direction"
+    retry = dt_util.as_local(D_NOW + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+    assert issue.translation_placeholders == {"retry_at": retry}
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_follows_a_retargeted_sensor_change(
+    hass: HomeAssistant, mock_entry
+):
+    """A sensor change held back by a full archive is retargeted to another sensor: the
+    new job keeps the wait, and the repair stays with the same retry time."""
+    client = _direction_client(E_SINCE)
+    client.open_replacement.side_effect = WoltaRateLimitError(3600)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+    await _entity_cycle(coordinator, available)
+    first = coordinator._state["replacement_job"]
+
+    coordinator._entity_map["solar"] = ["sensor.solar_other"]
+    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(minutes=30))
+
+    job = coordinator._state["replacement_job"]
+    assert job is not first
+    assert job["streams"] == {"solar": ["sensor.solar_other"]}
+    assert job["retry_at"] == job["waiting_retry"] == first["retry_at"]
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_entities"
+    retry = dt_util.as_local(E_NOW + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    assert issue.translation_placeholders == {"retry_at": retry}
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_when_an_open_succeeds_after_the_wait(
+    hass: HomeAssistant, mock_entry
+):
+    """After Retry-After the open goes through but the commit fails: the past retry time
+    is no longer shown while the replacement is open."""
+    client = _client()
+    client.open_replacement.side_effect = WoltaRateLimitError(3600)
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    await _cycle(coordinator)
+    assert _waiting_issue(hass, mock_entry) is not None
+
+    client.open_replacement.side_effect = None
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    await _cycle(coordinator, NOW + timedelta(hours=1, minutes=1))
+
+    job = coordinator._state["replacement_job"]
+    assert job["replacement"] is not None
+    assert "waiting_retry" not in job
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_a_4xx_without_a_replacement_is_no_server_failure(
+    hass: HomeAssistant, mock_entry
+):
+    """A refusal raised while no replacement is in flight (here from the hook) counts as a
+    job-level failure only, never toward the server-error count."""
+    client = _client()
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    async def refuse(job, now, profile):
+        raise WoltaApiError("bad request", status=400)
+
+    coordinator._replacement_types["test"] = _ReplacementType(
+        next_replacement=refuse, on_committed=AsyncMock(), on_finished=AsyncMock())
+
+    await _cycle(coordinator)
+
+    job = coordinator._state["replacement_job"]
+    assert job["job_failures"] == 1
+    assert "server_failures" not in job

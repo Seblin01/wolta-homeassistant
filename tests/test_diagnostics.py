@@ -173,6 +173,7 @@ async def test_diagnostics_show_replacement_state_without_token(hass: HomeAssist
             },
             "done_windows": [["a", "b"], ["c", "d"]],
             "retry_at": "2026-10-13T12:00:00+00:00",
+            "server_failures": 3,
             "token": "job-secret-on-the-job",
             "energy_plan": {"windows": [], "link": "wpl_job-secret-link"},
         },
@@ -191,6 +192,7 @@ async def test_diagnostics_show_replacement_state_without_token(hass: HomeAssist
     assert job["type"] == "direction"
     assert job["done_windows"] == 2
     assert job["retry_at"] == "2026-10-13T12:00:00+00:00"
+    assert job["server_failures"] == 3
     assert job["replacement"]["kind"] == "swap_battery"
     assert job["replacement"]["window_start"] == "2026-10-01T00:00:00+00:00"
     assert job["replacement"]["window_end"] == "2026-10-05T00:00:00+00:00"
