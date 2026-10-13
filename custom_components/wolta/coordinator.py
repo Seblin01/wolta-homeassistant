@@ -1224,11 +1224,22 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     async def _replacement_status(self, rep: dict) -> dict | None:
         """The server's view of a replacement this client opened earlier: the GET body
-        when it is open or committed, None when it is gone and must start over."""
+        when it is open or committed, None when it is gone and must start over.
+
+        Only the server's own answers about the replacement count as "gone" (an unknown
+        id, 410, or a closed status). Any other refusal of the GET itself - a 403 from a
+        proxy, a 400, a 408 - says nothing about the replacement: it is raised as an
+        unreadable status, so the replacement is kept (and in the end abandoned, never
+        discarded), since it may have been committed."""
         try:
             status = await self.client.get_replacement(self.token, rep["id"])
         except WoltaReplacementGone:
             return None
+        except (WoltaAuthError, WoltaRateLimitError):
+            raise
+        except WoltaApiError as err:
+            raise WoltaApiError(
+                f"Replacement status unreadable (HTTP {err.status})") from err
         state = status.get("status") if isinstance(status, dict) else None
         if state in ("open", "committed"):
             return status

@@ -611,6 +611,67 @@ async def test_give_up_without_a_status_abandons_without_pausing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 403, 408])
+async def test_refused_status_get_keeps_a_replacement_that_may_be_committed(
+    hass: HomeAssistant, mock_entry, status
+):
+    """The commit's response is lost (a 504 after it went through), and the next status
+    GET is refused by something in between (a proxy's 403, a 400, a 408). That says
+    nothing about the replacement: it is kept as it is - never deleted, never opened
+    again under a new id - and once a GET can tell it is committed, the window is booked
+    exactly once."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("gateway", status=504)
+    coordinator, committed = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    await _cycle(coordinator)
+    rid = client.open_replacement.await_args.args[1]
+    assert coordinator._state["replacement_job"]["replacement"]["id"] == rid
+
+    client.get_replacement.side_effect = WoltaApiError("refused", status=status)
+    await _cycle(coordinator, NOW + timedelta(hours=1))
+
+    job = coordinator._state["replacement_job"]
+    assert job["replacement"]["id"] == rid
+    assert client.open_replacement.await_count == 1
+    client.delete_replacement.assert_not_called()
+
+    client.get_replacement.side_effect = None
+    client.get_replacement.return_value = {"status": "committed", "result": COMMIT_RESULT}
+    await _cycle(coordinator, NOW + timedelta(hours=2))
+
+    assert committed == [COMMIT_RESULT]
+    assert client.open_replacement.await_count == 1
+    assert client.commit_replacement.await_count == 1
+    client.delete_replacement.assert_not_called()
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_refused_status_get_at_give_up_abandons_the_replacement(
+    hass: HomeAssistant, mock_entry
+):
+    """A status GET that keeps being refused with a 4xx ends like an unreadable status:
+    the replacement is abandoned (kept, pausing nothing, never committed), not discarded."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("gateway", status=504)
+    coordinator, committed = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    await _cycle(coordinator)
+    rid = client.open_replacement.await_args.args[1]
+    client.get_replacement.side_effect = WoltaApiError("refused", status=403)
+    for n in range(1, 4):
+        await _cycle(coordinator, NOW + timedelta(hours=n))
+
+    job = coordinator._state["replacement_job"]
+    assert job["replacement"]["id"] == rid
+    assert job["replacement"]["abandoned"] is True
+    assert client.open_replacement.await_count == 1
+    assert committed == []
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_spec_for_a_committed_window_is_not_opened(hass: HomeAssistant, mock_entry):
     """A hook that asks for a window it already committed is a hook error: nothing is
     opened (for a swap that would undo the window) and nothing pauses."""
