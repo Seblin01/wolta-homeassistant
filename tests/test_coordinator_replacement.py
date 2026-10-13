@@ -2291,3 +2291,118 @@ async def test_job_with_an_abandoned_replacement_is_never_parked(
     assert job["job_failures"] >= _JOB_MAX_FAILED_CYCLES
     assert "job_backoff" not in coordinator._state
     client.open_replacement.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Lower bound: never older than one year before the integration was set up
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.const import CONF_CREATED_BY_HA  # noqa: E402
+
+# A linked plant whose web/CSV history reaches three years back, set up 30 days ago.
+OLD_SINCE = "2023-10-13T00:00:00+00:00"
+L_FLOOR = datetime(2025, 9, 13, 9, tzinfo=UTC)  # floor_hour(created_at - 365 days)
+
+
+@pytest.mark.asyncio
+async def test_direction_on_a_linked_plant_stops_one_year_before_setup(
+    hass: HomeAssistant, mock_entry
+):
+    """The integration never uploaded anything older than a year before it was set up:
+    a swap of the whole history starts there, not at the server's data_since, and the
+    web/CSV history before it is left as it is."""
+    mock_entry.created_at = D_NOW - timedelta(days=30)
+    mock_entry.data = {**mock_entry.data, CONF_CREATED_BY_HA: False}
+    client = _direction_client(OLD_SINCE)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [("swap_battery", L_FLOOR, D_END, "direction")]
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created_at", [None, datetime(2026, 9, 13, 9, 5)])
+async def test_direction_without_a_usable_created_at_starts_at_data_since(
+    hass: HomeAssistant, mock_entry, created_at
+):
+    """No created_at, or a naive one: the bound falls back to data_since."""
+    mock_entry.created_at = created_at
+    client = _direction_client(OLD_SINCE)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2023, 10, 13, tzinfo=UTC), D_END, "direction")]
+
+
+@pytest.mark.asyncio
+async def test_direction_on_a_plant_created_by_home_assistant_is_unchanged(
+    hass: HomeAssistant, mock_entry
+):
+    """A plant this integration created holds nothing older than its own backfill:
+    the window starts at data_since as before."""
+    mock_entry.created_at = D_NOW - timedelta(days=30)
+    mock_entry.data = {**mock_entry.data, CONF_CREATED_BY_HA: True}
+    client = _direction_client(D_SINCE)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2025, 10, 1, tzinfo=UTC), D_END, "direction")]
+
+
+@pytest.mark.asyncio
+async def test_sensor_change_on_a_linked_plant_stops_one_year_before_setup(
+    hass: HomeAssistant, mock_entry
+):
+    """The new sensor has statistics from long before the setup, and the server's
+    history reaches three years back: the read and the window start one year before
+    the setup, never at data_since."""
+    mock_entry.created_at = E_NOW - timedelta(days=30)
+    client = _direction_client(OLD_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client,
+        data_updates={CONF_SOLAR: ["sensor.solar_new"], CONF_CREATED_BY_HA: False})
+
+    fetch = await _entity_cycle(
+        coordinator, _others(**{"sensor.solar_new": datetime(2024, 1, 1, tzinfo=UTC)}))
+
+    assert _opened_windows(client) == [(L_FLOOR, E_END)]
+    assert min(c[1] for c in fetch.calls) == L_FLOOR - timedelta(hours=1)
+    assert _staged(client)[0]["ts"] == L_FLOOR.isoformat()
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+
+
+@pytest.mark.asyncio
+async def test_external_flag_on_a_linked_plant_stops_one_year_before_setup(
+    hass: HomeAssistant, mock_entry
+):
+    """The external-control phase reads the binary sensor's states from the same bound."""
+    mock_entry.created_at = E_NOW - timedelta(days=30)
+    client = _direction_client(OLD_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_EXTERNAL_CONTROL: EXTERNAL})
+    old_points = [(datetime(2024, 1, 1, tzinfo=UTC), "off"), *E_POINTS]
+
+    states = AsyncMock(return_value=old_points)
+    await _entity_cycle_with_states(coordinator, states)
+
+    assert states.await_args.args[2] == L_FLOOR
+    assert _opened_windows(client)[0][0] == L_FLOOR
+
+
+async def _entity_cycle_with_states(coordinator, states, now=E_NOW):
+    fetch = _fake_statistics(_others())
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=now),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+        patch("custom_components.wolta.stats.async_fetch_states", new=states),
+    ):
+        await coordinator._async_update_data()

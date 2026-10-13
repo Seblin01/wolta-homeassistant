@@ -1373,6 +1373,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return False
         return True
 
+    def _replacement_floor(self, since: datetime) -> datetime:
+        """The earliest hour any replacement of this client may touch:
+        max(floor_hour(data_since), floor_hour(entry created_at - _BACKFILL_DAYS)).
+
+        This integration never uploads older history than that (its backfill and the
+        coverage check both reach _BACKFILL_DAYS back from when it was set up), so rows
+        before it came from elsewhere - a CSV upload or the web - and are left alone: a
+        direction swap has no state-of-charge grounds there, and a sensor change would
+        mix the new sensor's hourly values into rows this client never built. An entry
+        without a readable, timezone-aware created_at falls back to data_since."""
+        floor = _floor_hour(since)
+        created = getattr(self.config_entry, "created_at", None)
+        if not isinstance(created, datetime) or created.tzinfo is None:
+            _LOGGER.debug(
+                "No usable config entry created_at (%r); replacements start at data_since",
+                created)
+            return floor
+        return max(floor, _floor_hour(created - timedelta(days=_BACKFILL_DAYS)))
+
     async def _discard_replacement(self, rid: str) -> None:
         """Best-effort DELETE of a replacement left open server-side (it expires anyway)."""
         try:
@@ -1413,12 +1432,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         _LOGGER.info("Wolta battery direction changed; swapping it in the stored history")
 
     async def _direction_next(self, job: dict, now: datetime, profile: dict | None):
-        """The next swap of the direction job (K6), in chronological order.
+        """The next swap of the direction job, in chronological order.
 
         The difference D = target Δ applied, less the windows already committed, is
-        bounded to [floor_hour(data_since), ceil_hour(bookmark + 15 min)) - outside it
-        the server holds no rows of ours, and later rows are built with the target - and
-        split into whole-hour segments. Only the last segment may reach into the hour
+        bounded to [replacement floor, ceil_hour(bookmark + 15 min)) - the floor is
+        floor_hour(data_since), but never more than _BACKFILL_DAYS before the entry was
+        set up (_replacement_floor); outside it the server holds no rows this client
+        uploaded, and later rows are built with the target - and split into whole-hour segments. Only the last segment may reach into the hour
         the bookmark lies in; its commit applies the target at once (_direction_committed),
         before any upload. An earlier one stops at the bookmark's hour, so no row is
         uploaded with the old direction into a window that is already booked."""
@@ -1442,7 +1462,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return "done"
         bookmark_end = datetime.fromisoformat(bookmark) + _QUARTER
         segments = intervals.hour_aligned(
-            intervals.clip(remaining, _floor_hour(since), _ceil_hour(bookmark_end))
+            intervals.clip(remaining, self._replacement_floor(since), _ceil_hour(bookmark_end))
         )
         for index, (start, end) in enumerate(segments):
             final = index == len(segments) - 1
@@ -1582,7 +1602,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         return "done"
 
     def _plan_since(self, profile: dict | None):
-        """floor_hour(data_since) for a new plan; MISSING to wait (a job-level failure),
+        """Where a new plan reads from: floor_hour(data_since), never before the
+        replacement floor (_replacement_floor); MISSING to wait (a job-level failure),
         None when the server holds no rows (the job is then done)."""
         since = coverage.server_since(profile)
         if since is coverage.MISSING or since is None:
@@ -1590,7 +1611,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 _LOGGER.debug("No data_since from the server; the sensor change waits")
                 self._note_job_failure("no data_since from the server")
             return since
-        return _floor_hour(since)
+        return self._replacement_floor(since)
 
     async def _energy_next(self, job: dict, now: datetime, profile: dict | None):
         """The next window of the energy phase, from the job's stored plan.
