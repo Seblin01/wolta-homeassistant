@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_left
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
@@ -168,6 +169,7 @@ def clean_quarters(
     *,
     window: tuple[int, int] | None = None,
     sun_down: Callable[[int], bool] | None = None,
+    anchor_start: int | None = None,
 ) -> set[datetime]:
     """Quarters this sensor measured completely, with no catch-up inside.
 
@@ -190,6 +192,15 @@ def clean_quarters(
       night can lack measured periods). Only for solar sensors; the caller decides by
       passing ``sun_down``. Without ``window`` the span of the measured periods is used.
 
+    A known zero is a zero, but the first measured period after a run of them carries
+    the change since the previous measured period - the run proves nothing about the
+    periods before it. That period is clean only when EVERY missing period back to the
+    previous measured one is a known zero. A gap that began in daylight (the sensor
+    unavailable from 13:00) and ran through the night ends in a dawn period holding the
+    afternoon's energy, and that period is not clean. When the run reaches back before
+    the rows, ``anchor_start`` is the start of the sensor's last measured period before
+    them (the caller reads further back); without it the run is unproven.
+
     The values are untouched: a known zero has no row, and merge_streams fills an
     absent value with 0.0, which is now correct because the quarter is complete.
 
@@ -208,10 +219,17 @@ def clean_quarters(
         key = start - start % period_s
         changes[key] = changes.get(key, 0.0) + change
     known = set(m)
-    ordered = sorted(m)
+    anchor = None
+    if anchor_start is not None:
+        anchor = anchor_start - anchor_start % period_s
+        if m and anchor >= min(m):
+            anchor = None  # the rows hold the sensor's earlier periods themselves
+    # Measured periods, with the anchor in front: the previous measured period of each.
+    ordered = sorted(m if anchor is None else m | {anchor})
     for before, after in zip(ordered, ordered[1:]):
         if after - before > period_s and changes[after] == 0:
             known.update(range(before + period_s, after, period_s))
+    lo = None
     if sun_down is not None:
         if window is not None:
             lo = window[0] - window[0] % period_s - period_s
@@ -221,14 +239,34 @@ def clean_quarters(
         else:
             lo = hi = 0
         known.update(p for p in range(lo, hi, period_s) if p not in m and sun_down(p))
+
+    def zero(p: int) -> bool:
+        """A known zero; before the (a) range (the run back to the anchor) the sun decides."""
+        return p in known or (lo is not None and p < lo and sun_down(p))
+
+    proven: dict[int, bool] = {}
+
+    def clean(p: int) -> bool:
+        if p not in known or p - period_s not in known:
+            return False
+        if p not in m or p - period_s in m:
+            return True
+        # A measured period after known zeros carries the change of the whole run since
+        # the previous measured period: clean only when every period of it is a zero.
+        if p not in proven:
+            i = bisect_left(ordered, p)
+            proven[p] = i > 0 and all(
+                zero(q) for q in range(ordered[i - 1] + period_s, p, period_s))
+        return proven[p]
+
     out: set[datetime] = set()
     if period_s == 300:
         for q in {s - s % 900 for s in known}:
-            if all(p in known for p in (q - 300, q, q + 300, q + 600)):
+            if clean(q) and clean(q + 300) and clean(q + 600):
                 out.add(datetime.fromtimestamp(q, tz=timezone.utc))
     else:
         for h in known:
-            if h - 3600 in known:
+            if clean(h):
                 out.update(datetime.fromtimestamp(h + 900 * k, tz=timezone.utc)
                            for k in range(4))
     return out

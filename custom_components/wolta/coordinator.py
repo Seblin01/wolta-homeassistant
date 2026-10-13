@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
@@ -119,11 +119,14 @@ def _short_term_start(now: datetime) -> datetime:
 @dataclass(frozen=True)
 class _Source:
     """One statistics read: rows per statistic id, the aggregation that turns them into
-    quarters, and the window [start, end) whose quarters this source decides."""
+    quarters, and the window [start, end) whose quarters this source decides.
+    ``anchors``: per solar sensor, the start of its last measured period before the
+    rows (WoltaCoordinator._anchor_solar), for clean_quarters' ``anchor_start``."""
     raw: dict
     agg_fn: Callable
     start: datetime
     end: datetime
+    anchors: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,14 +201,15 @@ def _discount_night(
     moved: set[str] = set()
     for e in solar:
         p = newest[e][0] + newest[e][1] if e in newest else first
-        daylight = night = 0
+        daylight = 0          # seconds of daylight between the sensor's newest and top
+        saw_night = False
         while p <= top and daylight < _MAX_LAG_S:
             if sun_down(p):
-                night += 1
+                saw_night = True
             else:
                 daylight += step
             p += step
-        if not night or daylight >= _MAX_LAG_S:
+        if not saw_night or daylight >= _MAX_LAG_S:
             continue
         newest[e] = (top - daylight, newest[e][1] if e in newest else step)
         moved.add(e)
@@ -229,15 +233,19 @@ def _daylight(observer: Observer, day: date) -> tuple[float, float] | None:
     (noon +/- 12 h, plus a minute so neighbouring days overlap) is daylight. Near the
     polar circle astral also raises on days on which the sun just grazes the horizon
     (at 67.85 N in early December and January); then the two horizon crossings are
-    found by bisection on the elevation.
+    found by bisection on the elevation. astral 3.x re-anchors both events to the
+    requested date instead, which can put the sunset of a short night before the
+    sunrise; such a pair is not an interval and takes the elevation path too.
 
     Sunrise and sunset refer to the upper limb with refraction (-0.833 deg), and the
     fallback uses the apparent elevation and rounds outward: all a few minutes wider
     than "elevation below 0 deg", so an error only makes fewer periods known zeros,
     never more."""
     try:
-        return (astral_sun.sunrise(observer, day).timestamp(),
-                astral_sun.sunset(observer, day).timestamp())
+        rise = astral_sun.sunrise(observer, day).timestamp()
+        set_ = astral_sun.sunset(observer, day).timestamp()
+        if rise < set_:
+            return (rise, set_)
     except ValueError:
         pass
     noon = astral_sun.noon(observer, day)
@@ -304,6 +312,11 @@ _BACKFILL_DAYS = 365
 
 # Short-term statistics window — data older than this is only in LTS
 _SHORT_TERM_DAYS = 9
+
+# How far before a window the anchor read for a solar sensor's night run looks: longer
+# than the longest Swedish night outside the polar night. A run with no measured period
+# within it stays unproven (one dawn quarter after a polar night or a longer outage).
+_ANCHOR_LOOKBACK = timedelta(hours=36)
 
 # The API's length limit for battery_sources `source` ('ha:<platform>:<entity_id>').
 _SOC_SOURCE_MAX = 200
@@ -991,7 +1004,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     newest[e] = (max(starts), period)
                 clean[e] = {q for q in clean_quarters(
                     rows, period, window=window,
-                    sun_down=sun_down[period] if e in solar else None) if in_window(q)}
+                    sun_down=sun_down[period] if e in solar else None,
+                    anchor_start=src.anchors.get(e)) if in_window(q)}
             src_candidates = {q for d in streams.values() for q in d if in_window(q)}
             candidates |= src_candidates
             if sensors:
@@ -1021,6 +1035,59 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if key != self._daylight_key:
             self._daylight_key, self._daylight_cache = key, {}
         return _make_sun_down(observer, period_s, self._daylight_cache)
+
+    async def _anchor_solar(self, now: datetime, sources: list[_Source]) -> list[_Source]:
+        """The sources with ``anchors`` for the solar sensors whose night run reaches
+        back before the rows.
+
+        The first measured period after a night run is clean only when every period
+        back to the sensor's previous measured one is a known zero (clean_quarters).
+        Every read starts one period before its window, so when a window starts at night
+        the previous measured period - the evening before - is not in the rows. For each
+        solar sensor whose rows start later than the read with nothing but night in
+        between, the anchor is taken from an earlier source of the same build, or else
+        from one extra statistics read for those sensors only, at most
+        _ANCHOR_LOOKBACK before the window (5-minute statistics within the short-term
+        window, hourly beyond it - an hour's start is the earlier, stricter anchor).
+        Nothing found: no anchor, and the dawn after the run is not clean."""
+        solar = sorted(set(self._entity_map["solar"]) & self._statistic_ids())
+        if not solar:
+            return sources
+        out: list[_Source] = []
+        for src in sources:
+            period = _PERIOD_S[src.agg_fn]
+            first = int(_read_start(src.start, period).timestamp())
+            sun_down = self._sun_down_fn(period)
+            need = []
+            for e in solar:
+                m = measured_starts(src.raw.get(e) or [], period)
+                if m and min(m) > first and all(
+                        sun_down(p) for p in range(first, min(m), period)):
+                    need.append(e)
+            anchors: dict[str, int] = {}
+            for e in need:
+                earlier = [s for prev in out
+                           for s in measured_starts(prev.raw.get(e) or [],
+                                                    _PERIOD_S[prev.agg_fn])
+                           if s < first]
+                if earlier:
+                    anchors[e] = max(earlier)
+            missing = {e for e in need if e not in anchors}
+            if missing:
+                lookback = src.start - _ANCHOR_LOOKBACK
+                five = period == 300 and lookback >= _short_term_start(now)
+                read_period = 300 if five else 3600
+                raw = await async_fetch_change(
+                    self.hass, missing, _floor(lookback, read_period),
+                    datetime.fromtimestamp(first, tz=timezone.utc),
+                    period="5minute" if five else "hour")
+                for e in missing:
+                    found = [s for s in measured_starts(raw.get(e) or [], read_period)
+                             if s < first]
+                    if found:
+                        anchors[e] = max(found)
+            out.append(replace(src, anchors=anchors) if anchors else src)
+        return out
 
     def _remember_completeness(self, built: _Built) -> None:
         """Keep the regular read's completeness for the diagnostics: the number of
@@ -1514,10 +1581,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
         # Aggregate and sum per stream; each source contributes only its own window
-        built = self._build_streams(
+        built = self._build_streams(*await self._anchor_solar(now, [
             _Source(lts_data, split_hour_to_quarters, start, short_term_start),
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
-        )
+        ]))
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
@@ -1533,7 +1600,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="hour",
         )
-        built = self._build_streams(_Source(lts_data, split_hour_to_quarters, start, now))
+        built = self._build_streams(*await self._anchor_solar(
+            now, [_Source(lts_data, split_hour_to_quarters, start, now)]))
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
@@ -1549,8 +1617,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="5minute",
         )
-        built = self._build_streams(
-            _Source(short_data, aggregate_5min_to_15min, start, now))
+        built = self._build_streams(*await self._anchor_solar(
+            now, [_Source(short_data, aggregate_5min_to_15min, start, now)]))
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
@@ -1585,7 +1653,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 period="5minute")
             sources.append(
                 _Source(short_data, aggregate_5min_to_15min, five_start, gap.end))
-        built = self._build_streams(*sources)
+        built = self._build_streams(*await self._anchor_solar(now, sources))
         return coverage.within(
             merge_streams(**built.streams, external=external, complete=built.complete),
             gap.end)

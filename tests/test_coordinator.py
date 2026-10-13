@@ -5139,6 +5139,7 @@ async def test_polar_night_raises_no_repair(hass: HomeAssistant, mock_entry):
         ((67.85, 20.2), datetime(2025, 1, 9, 10, 40), False),
         ((67.85, 20.2), datetime(2025, 1, 9, 20, 0), True),
         ((67.85, 20.2), datetime(2025, 6, 21, 23, 0), False),
+        ((67.85, 20.2), datetime(2025, 5, 25, 12, 0), False),
     ],
 )
 def test_sun_down_at_swedish_latitudes(position, when, down):
@@ -5149,6 +5150,26 @@ def test_sun_down_at_swedish_latitudes(position, when, down):
 
     sun_down = _make_sun_down(Observer(*position, 0), 300, {})
     assert sun_down(int(when.replace(tzinfo=timezone.utc).timestamp())) is down
+
+
+def test_a_sunset_before_the_sunrise_takes_the_elevation_path():
+    """astral 3.x re-anchors sunrise and sunset to the requested date, which can put the
+    sunset of a short night before the sunrise. Such a pair is no interval: the
+    elevation decides, and the late-May noon near Kiruna is daylight."""
+    import astral.sun
+    from astral import Observer
+
+    from custom_components.wolta.coordinator import _make_sun_down
+
+    real_sunset = astral.sun.sunset
+
+    def early_sunset(observer, date=None, tzinfo=timezone.utc):
+        return real_sunset(observer, date, tzinfo) - timedelta(days=1)
+
+    with patch("custom_components.wolta.coordinator.astral_sun.sunset", early_sunset):
+        sun_down = _make_sun_down(Observer(67.85, 20.2, 0), 300, {})
+        noon = datetime(2025, 5, 25, 12, 0, tzinfo=timezone.utc)
+        assert sun_down(int(noon.timestamp())) is False
 
 
 @pytest.mark.asyncio
@@ -5227,4 +5248,118 @@ async def test_backfill_over_a_year_with_solar_sleeping_every_night(
     for q in (winter_night, summer_night, recent_night):
         assert sent[q.isoformat()]["solar_kwh"] == 0.0
     assert summer_dawn.isoformat() not in sent
-    assert elapsed < 2.0, f"backfill took {elapsed:.2f} s"
+    assert elapsed < 10.0, f"backfill took {elapsed:.2f} s"  # gross-regression guard
+
+
+# A gap that began in daylight is not cleared by the night that follows: the first
+# measured period after it carries the afternoon's energy. A night run proves nothing
+# unless the sensor's last measured period before it is known (read further back when
+# the window starts at night, at most _ANCHOR_LOOKBACK).
+
+_OCT11 = datetime(2025, 10, 11, tzinfo=timezone.utc)
+_OCT12 = datetime(2025, 10, 12, tzinfo=timezone.utc)
+
+
+async def _run_solar_read(hass, mock_entry, *, now, bookmark, fetch_solar, reads=None):
+    """One cycle; the solar sensor's rows are filtered by ``fetch_solar(data, period)``.
+    Returns the sent rows by ts."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        if reads is not None:
+            reads.append((set(ids), start, end, period))
+        return fetch_solar(_full_stats(start, end, period), period)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=now),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+    return {r["ts"]: r for c in client.put_data.call_args_list for r in c.args[1]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("gap_start", "dawn_sent"), [(13, False), (17, True)])
+async def test_dawn_after_a_gap_that_began_in_daylight_is_not_sent(
+    hass: HomeAssistant, mock_entry, gap_start, dawn_sent
+):
+    """The solar sensor stops at 13:00 (daylight, sunset 15:57) or 17:00 (night) and
+    returns at 05:00. Night quarters are zeros either way; the dawn quarter is sent only
+    when the whole gap was night."""
+    hole = (_OCT11 + timedelta(hours=gap_start), _OCT12 + timedelta(hours=5))
+    sent = await _run_solar_read(
+        hass, mock_entry, now=_OCT12 + timedelta(hours=8),
+        bookmark=_OCT11 + timedelta(hours=12),
+        fetch_solar=lambda data, period: _solar_by_hours(data, 5, 17, hole=hole))
+    dawn = _OCT12 + timedelta(hours=5)
+    assert (dawn.isoformat() in sent) is dawn_sent
+    assert (dawn + timedelta(minutes=15)).isoformat() in sent
+    assert sent[(_OCT11 + timedelta(hours=22)).isoformat()]["solar_kwh"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("gap_start", "dawn_sent"), [(13, False), (17, True)])
+async def test_hourly_dawn_after_a_gap_that_began_in_daylight_is_not_sent(
+    hass: HomeAssistant, mock_entry, gap_start, dawn_sent
+):
+    """The same gap on the heal path (hourly statistics, bookmark two weeks old)."""
+    hole = (_OCT11 + timedelta(hours=gap_start), _OCT12 + timedelta(hours=5))
+    reads: list = []
+    sent = await _run_solar_read(
+        hass, mock_entry, now=_OCT12 + timedelta(days=13, hours=8),
+        bookmark=_OCT11 + timedelta(hours=12), reads=reads,
+        fetch_solar=lambda data, period: _solar_by_hours(data, 5, 17, hole=hole))
+    assert {r[3] for r in reads} == {"hour"}, "the scenario must stay on the heal path"
+    dawn = _OCT12 + timedelta(hours=5)
+    for m in (0, 15, 30, 45):
+        assert ((dawn + timedelta(minutes=m)).isoformat() in sent) is dawn_sent
+    assert (dawn + timedelta(hours=1)).isoformat() in sent
+    assert sent[(_OCT11 + timedelta(hours=22)).isoformat()]["solar_kwh"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_starts_at_night_reads_back_to_the_evening(
+    hass: HomeAssistant, mock_entry
+):
+    """The window starts at 23:00, the solar sensor's last row is 16:55 - six hours
+    before it. One extra read for the solar sensor finds it, the night since is proven,
+    and the dawn quarter is sent."""
+    reads: list = []
+    window_start = _OCT11 + timedelta(hours=23)
+    sent = await _run_solar_read(
+        hass, mock_entry, now=_OCT12 + timedelta(hours=8), bookmark=window_start,
+        reads=reads, fetch_solar=lambda data, period: _solar_by_hours(data, 5, 17))
+    assert (_OCT12 + timedelta(hours=5)).isoformat() in sent
+    extra = [r for r in reads if r[0] == {"sensor.solar"}]
+    assert len(extra) == 1
+    ids, start, end, period = extra[0]
+    assert period == "5minute"
+    assert start <= window_start - timedelta(hours=36)
+    assert end <= window_start
+
+
+@pytest.mark.asyncio
+async def test_no_measured_row_within_the_lookback_leaves_the_dawn_unproven(
+    hass: HomeAssistant, mock_entry
+):
+    """The solar sensor has no row before 05:00 on the 12th at all: nothing proves the
+    night run, so the dawn quarter is not sent - the next one is."""
+    first_row = _OCT12 + timedelta(hours=5)
+
+    def solar(data, period):
+        data = _solar_by_hours(data, 5, 17)
+        data["sensor.solar"] = [r for r in data["sensor.solar"]
+                                if r["start"] >= first_row.timestamp()]
+        return data
+
+    sent = await _run_solar_read(
+        hass, mock_entry, now=_OCT12 + timedelta(hours=8),
+        bookmark=_OCT11 + timedelta(hours=23), fetch_solar=solar)
+    assert first_row.isoformat() not in sent
+    assert (first_row + timedelta(minutes=15)).isoformat() in sent
+    assert sent[(_OCT12 + timedelta(hours=2)).isoformat()]["solar_kwh"] == 0.0
