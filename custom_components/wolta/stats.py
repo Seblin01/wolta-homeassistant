@@ -453,6 +453,32 @@ def merge_streams(
     return rows
 
 
+def replacement_rows(
+    streams: dict[str, dict[datetime, float]],
+    complete_all: set[datetime],
+    complete_replaced: set[datetime],
+    fields: list[str],
+    external: set[datetime],
+) -> list[dict[str, Any]]:
+    """Rows for a field-scoped replacement of stored flows (a sensor change).
+
+    One row per quarter in *complete_replaced* (the quarters every sensor of the
+    replaced streams measured cleanly), with merge_streams' values and field names.
+    A quarter that is also in *complete_all* carries every energy field and
+    external_control: the server inserts such a row where it holds none. Any other
+    quarter carries only *fields* (and ``ts``): the server updates those fields of a
+    stored row and never inserts a partial one.
+
+    *streams* holds merge_streams' keyword arguments (batt_in, batt_out, grid_in,
+    grid_out, solar), with the battery direction already applied."""
+    full = {q.isoformat() for q in complete_all}
+    keep = ("ts", *fields)
+    out: list[dict[str, Any]] = []
+    for row in merge_streams(**streams, external=external, complete=complete_replaced):
+        out.append(row if row["ts"] in full else {k: row[k] for k in keep})
+    return out
+
+
 def flagged_quarters(
     points: list[tuple[datetime, str]],
     end: datetime,

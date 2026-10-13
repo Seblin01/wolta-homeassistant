@@ -231,7 +231,7 @@ class SocMissingRepairFlow(_AdoptRepairFlow):
     The choice is written to entry.data and the entry reloaded: the coordinator reads the
     sensors at start and its own bookkeeping (_track_soc_selection) schedules the SoC
     backfill. Only CONF_SOC changes, so the flow sensors' fingerprint - the one that
-    triggers a full re-backfill of the energy data - is untouched. Nothing goes to the
+    replaces the changed sensors' fields in the stored energy data - is untouched. Nothing goes to the
     server from here; the entity ids are client-local."""
 
     _issue_prefix = "soc_missing"

@@ -106,7 +106,7 @@ CONF_EXTERNAL_CONTROL = "external_control_entity"
 # Ersättningssensor (spec 2026-08-28): läses månadsvis ur LTS och PATCH:as till servern
 # som flex_compensation-poster med source='sensor'. Ingår MEDVETET INTE i
 # applied_entities-fingerprintet - den påverkar inga energirader och får inte trigga
-# re-backfill (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
+# en ersättning av lagrade flöden (B8). Speglas INTE i _PROFILE_SYNC_KEYS.
 CONF_FLEX_COMPENSATION = "flex_compensation_entity"
 # Optional battery state-of-charge sensors, one per battery unit (spec 2026-10-03). The
 # entity ids are CLIENT-LOCAL configuration and never PATCHed to the server - only the

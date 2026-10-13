@@ -1345,11 +1345,13 @@ async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_e
 
 
 @pytest.mark.asyncio
-async def test_entity_change_resets_bookmark(hass: HomeAssistant, mock_entry):
-    """Ändrade sensorval (reconfigure) → bookmark nollas → full re-backfill,
-    samma självläkningsmönster som invert-togglen."""
-    import json as _json
-
+async def test_entity_change_keeps_bookmark_and_queues_a_replacement(
+    hass: HomeAssistant, mock_entry
+):
+    """Changed sensor selection (reconfigure): the bookmark stays and nothing is re-sent
+    or force-recomputed; an entity job replaces the changed fields on the server
+    (tests/test_coordinator_replacement.py). An unreadable fingerprint counts as every
+    stream changed. Without data_since from the server the job waits."""
     client = _mock_client()
     client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
@@ -1369,11 +1371,15 @@ async def test_entity_change_resets_bookmark(hass: HomeAssistant, mock_entry):
                          "applied_entities": "OLD-FINGERPRINT"})
         await coordinator._async_update_data()
 
-    assert "last_uploaded_ts" not in coordinator._state
-    assert coordinator._state["applied_entities"] == _json.dumps(
-        coordinator._entity_map, sort_keys=True)
-    # pending-flaggan sätts och konsumeras i samma tick → recompute triggad direkt
-    client.recompute.assert_awaited()
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == "OLD-FINGERPRINT"
+    assert "pending_invert_recompute" not in coordinator._state
+    job = coordinator._state["replacement_job"]
+    assert job["type"] == "entities"
+    assert job["target"] == coordinator._entities_fingerprint()
+    assert job["fields"] == [
+        "solar_kwh", "grid_import_kwh", "grid_export_kwh", "batt_charged_kwh",
+        "batt_discharged_kwh", "external_control"]
 
 
 @pytest.mark.asyncio
@@ -1445,8 +1451,9 @@ async def test_coordinator_external_control_empty_string_is_none(
 async def test_entity_fingerprint_changes_when_external_control_added(
     hass: HomeAssistant, mock_entry
 ):
-    """Selecting an external-control sensor must trigger the same self-heal
-    bookmark reset as changing any other entity selection (issue #1 pattern)."""
+    """Selecting an external-control sensor changes the fingerprint like any other
+    entity selection: an entity job replaces the external_control field, and the
+    bookmark stays."""
     import json as _json
 
     mock_entry.data = {**ENTRY_DATA, CONF_EXTERNAL_CONTROL: "binary_sensor.grid_rewards_active"}
@@ -1476,9 +1483,11 @@ async def test_entity_fingerprint_changes_when_external_control_added(
                          "applied_entities": pre_existing_fingerprint})
         await coordinator._async_update_data()
 
-    assert "last_uploaded_ts" not in coordinator._state
-    assert coordinator._state["applied_entities"] != pre_existing_fingerprint
-    client.recompute.assert_awaited()
+    assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK
+    assert coordinator._state["applied_entities"] == pre_existing_fingerprint
+    job = coordinator._state["replacement_job"]
+    assert job["target"] != pre_existing_fingerprint
+    assert job["fields"] == ["external_control"]
 
 
 @pytest.mark.asyncio

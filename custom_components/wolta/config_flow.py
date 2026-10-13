@@ -829,8 +829,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                             entry,
                             data={k: v for k, v in entry.data.items()
                                   if k != CONF_DIRECTION_ISSUE_IGNORED})
-                # Reload → coordinatorn ser nytt entity-fingerprint → bookmark-reset →
-                # full re-backfill skriver över historiken från de nya sensorerna.
+                # Reload: the coordinator sees a new entity fingerprint and an entity job
+                # replaces only the changed sensors' fields in the stored history.
                 return self.async_update_reload_and_abort(entry, data_updates=data_updates)
 
         defaults = {

@@ -18,7 +18,7 @@
     },
     "statistics_missing": {
       "title": "Wolta has stopped uploading: a selected sensor has no statistics",
-      "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period may not be sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. Either change triggers a full re-send of all complete quarters in the history. This warning clears itself once the sensor reports data again."
+      "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period may not be sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. Either change replaces that sensor's values in the history Wolta already stores; the other sensors' values are kept. This warning clears itself once the sensor reports data again."
     },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
@@ -331,7 +331,7 @@
       },
       "reconfigure": {
         "title": "Change energy sensors",
-        "description": "Pick the new sensors. Home Assistant re-uploads your full history from the new sensors and your grade is recomputed – no need to remove the integration.",
+        "description": "Pick the new sensors. Wolta replaces the changed sensors' values in the history it already stores, from the new sensors' statistics, and your grade is recomputed. Nothing else is re-sent, and there is no need to remove the integration.",
         "data": {
           "batt_in": "Battery charge energy",
           "batt_out": "Battery discharge energy",
@@ -379,7 +379,7 @@
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful",
-      "reconfigure_successful": "Sensors updated. Your history is being re-uploaded in the background.",
+      "reconfigure_successful": "Sensors updated. The changed sensors' values are being replaced in your history in the background.",
       "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again."
     }
   },

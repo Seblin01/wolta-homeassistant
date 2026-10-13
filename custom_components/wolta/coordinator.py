@@ -213,6 +213,56 @@ def direction_swap_intervals(block: dict) -> list[intervals.Interval]:
     )
 
 
+# The stored flow fields a sensor stream feeds (server spec §3). Either battery stream
+# replaces BOTH battery fields: which sensor lands in which field depends on the invert
+# intervals per quarter, so the pair is only ever replaced together.
+_STREAM_FIELDS: dict[str, tuple[str, ...]] = {
+    "solar": ("solar_kwh",),
+    "grid_in": ("grid_import_kwh",),
+    "grid_out": ("grid_export_kwh",),
+    "batt_in": ("batt_charged_kwh", "batt_discharged_kwh"),
+    "batt_out": ("batt_charged_kwh", "batt_discharged_kwh"),
+    "external_control": ("external_control",),
+}
+# The server's field order (its FIELDS); a replacement names its fields in it.
+_FIELD_ORDER = ("solar_kwh", "grid_import_kwh", "grid_export_kwh", "batt_charged_kwh",
+                "batt_discharged_kwh", "external_control")
+_ENERGY_FIELDS = _FIELD_ORDER[:5]
+
+
+def changed_streams(applied: str, desired: str) -> list[str]:
+    """The streams whose sensors differ between two entity fingerprints (JSON strings
+    of {stream: [entity ids]}, external_control only when a sensor is chosen), sorted.
+    A stream is compared as a set of sensors; a missing key is a stream without
+    sensors. An unreadable fingerprint counts as every stream changed."""
+
+    def _parse(raw: str) -> dict[str, set[str]] | None:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        out: dict[str, set[str]] = {}
+        for stream in _STREAM_FIELDS:
+            value = parsed.get(stream) or []
+            if not isinstance(value, list):
+                return None
+            out[stream] = {str(e) for e in value}
+        return out
+
+    old, new = _parse(applied), _parse(desired)
+    if old is None or new is None:
+        return sorted(_STREAM_FIELDS)
+    return sorted(s for s in _STREAM_FIELDS if old[s] != new[s])
+
+
+def replaced_fields(streams: list[str]) -> list[str]:
+    """The stored fields a change of `streams` replaces, in the server's order."""
+    fields = {f for s in streams for f in _STREAM_FIELDS.get(s, ())}
+    return [f for f in _FIELD_ORDER if f in fields]
+
+
 def _floor_hour(t: datetime) -> datetime:
     return t.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
@@ -640,7 +690,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._flex_entity: str | None = entry.data.get(CONF_FLEX_COMPENSATION) or None
         # Optional state-of-charge sensors (spec 2026-10-03). Their statistics ride along
         # with the flow rows as battery_state. Like the flex sensor they stay OUT of the
-        # entity fingerprint (a flow re-backfill would coarsen a year of quarter data);
+        # entity fingerprint (a SoC change touches no flow field);
         # adding one runs a SoC-only backfill instead, see _track_soc_selection.
         self._soc_entities: list[str] = list(entry.data.get(CONF_SOC) or [])
         # Per-entry issue id (the form _set_measured_issue already uses), NOT the
@@ -691,7 +741,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 on_committed=self._direction_committed,
                 on_finished=self._direction_finished,
             ),
+            "entities": _ReplacementType(
+                next_replacement=self._entities_next,
+                on_committed=self._entities_committed,
+                on_finished=self._entities_finished,
+                rows_for=self._entities_rows,
+            ),
         }
+        # The rows _entities_next built for the spec it returned, handed to _entities_rows
+        # right after (the runner asks for them next) so a year of statistics is not read
+        # twice in one cycle: (job target, window_start, window_end, rows).
+        self._entity_rows_cache: tuple[str, str, str, list[dict]] | None = None
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -1119,8 +1179,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """Start a direction job when the desired inversion differs from the applied one
         and no job runs. Nothing is re-sent and the bookmark stays: the server swaps the
         battery fields of the rows it holds and queues the recount at commit. A change of
-        the desired value while a job runs is picked up here once that job is done."""
-        if self._state.get("replacement_job"):
+        the desired value while a job runs is picked up here once that job is done.
+
+        A direction change goes before a sensor change: an entity job that has not
+        started on the server yet gives way, and is queued again once this one is done."""
+        job = self._state.get("replacement_job")
+        if job and not self._idle_entity_job(job):
             return
         desired = self._desired_intervals()
         if not intervals.sym_diff(desired, self._applied_intervals()):
@@ -1195,6 +1259,242 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     async def _direction_finished(self, job: dict) -> None:
         self._set_applied_intervals(intervals.parse(job["target"]))
+
+    # ------------------------------------------------------------------
+    # Entity job: replace the fields of changed sensors in stored rows (K7)
+    # ------------------------------------------------------------------
+
+    def _entities_fingerprint(self) -> str:
+        """The selected sensors per stream as a JSON string - what the stored rows are
+        built from. external_control is in it only when a sensor is chosen, so an
+        installation without one keeps the fingerprint it had before the key existed.
+
+        The SoC sensors are deliberately NOT part of it (spec §6.5, §16): SoC has its own
+        bookkeeping in _track_soc_selection, and a SoC change touches no flow field."""
+        fp_map = dict(self._entity_map)
+        if self._external_entity:
+            fp_map["external_control"] = [self._external_entity]
+        return json.dumps(fp_map, sort_keys=True)
+
+    @staticmethod
+    def _idle_entity_job(job: dict) -> bool:
+        """An entity job that has nothing on the server yet: no replacement in flight
+        and no window committed. Such a job may be replaced (a new target, or a direction
+        change going first) without leaving anything half done."""
+        return (
+            job.get("type") == "entities"
+            and job.get("replacement") is None
+            and not job.get("done_windows")
+        )
+
+    async def _queue_entity_job(self, entities_now: str) -> None:
+        """Start an entity job when the selected sensors differ from those the stored
+        rows were built with (applied_entities). Nothing is re-sent and the bookmark stays:
+        the job replaces only the changed fields on the server, from the new sensors'
+        statistics. The first recording of the fingerprint (an upgrade) just records it.
+
+        A job that has not started on the server is retargeted when the selection changes
+        again (a new sensor without statistics would otherwise hold it for good), and
+        dropped when the selection is back to the applied one."""
+        applied = self._state.get("applied_entities")
+        if applied is None:
+            self._state["applied_entities"] = entities_now
+            await self._store.async_save(self._state)
+            return
+        job = self._state.get("replacement_job")
+        if job and not self._idle_entity_job(job):
+            return
+        if job and job.get("target") == entities_now:
+            return
+        streams = changed_streams(applied, entities_now)
+        if job:
+            self._state.pop("replacement_job", None)
+        elif applied == entities_now:
+            return
+        if not streams:
+            # Same sensors, differently written down: nothing to replace.
+            self._state["applied_entities"] = entities_now
+            await self._store.async_save(self._state)
+            return
+        new_job = self._new_replacement_job("entities", entities_now)
+        new_job["streams"] = streams
+        new_job["fields"] = replaced_fields(streams)
+        self._state["replacement_job"] = new_job
+        await self._store.async_save(self._state)
+        _LOGGER.info(
+            "Wolta sensor selection changed (%s); replacing those fields in the stored "
+            "history", ", ".join(streams),
+        )
+
+    async def _entities_next(self, job: dict, now: datetime, profile: dict | None):
+        """The one replacement of the entity job (K7), or "done" once it is committed.
+
+        Nothing stored (no bookmark, or data_since null): the rows still to come are
+        built with the new sensors, so the target applies at once. Otherwise the history
+        is read from floor_hour(data_since) - hourly statistics before the short-term
+        limit, 5-minute after it, like the backfill - and the window and its rows follow
+        from the new sensors' statistics (_entities_plan). New sensors without any
+        statistics yet: wait, nothing is opened and the upload goes on."""
+        if job["done_windows"]:
+            return "done"
+        if not self._state.get("last_uploaded_ts"):
+            return "done"
+        since = coverage.server_since(profile)
+        if since is coverage.MISSING:
+            _LOGGER.debug("No data_since from the server; the sensor change waits")
+            return None
+        if since is None:
+            return "done"
+        read_from = _floor_hour(since)
+        split = _short_term_start(now)
+        plan = await self._entities_plan(job, read_from, split, now)
+        if plan is None:
+            _LOGGER.debug("No statistics from the new sensors yet; the sensor change waits")
+            return None
+        start, end, rows = plan
+        full = [datetime.fromisoformat(r["ts"]) for r in rows
+                if all(f in r for f in _ENERGY_FIELDS)]
+        spec = {
+            "kind": "rows",
+            "window_start": start.isoformat(),
+            "window_end": end.isoformat(),
+            "fields": list(job["fields"]),
+            "reason": "entities_changed",
+            # The read the rows come from, so a resume builds the same rows.
+            "read_from": read_from.isoformat(),
+            "split": split.isoformat(),
+            # The latest quarter staged with every field (the bookmark rule, K7).
+            "last_full": max(full).isoformat() if full else None,
+        }
+        self._entity_rows_cache = (
+            job["target"], spec["window_start"], spec["window_end"], rows)
+        return spec
+
+    async def _entities_rows(self, job: dict, spec: dict, now: datetime) -> list[dict]:
+        """The rows of the entity job's replacement: those _entities_next just built, or
+        on a resume the same read again. Everything the rows depend on is in the spec
+        (read start, hourly/5-minute split, window), never `now`."""
+        cached, self._entity_rows_cache = self._entity_rows_cache, None
+        if cached is not None and cached[:3] == (
+            job["target"], spec["window_start"], spec["window_end"]
+        ):
+            return cached[3]
+        start = datetime.fromisoformat(spec["window_start"])
+        end = datetime.fromisoformat(spec["window_end"])
+        read_from = datetime.fromisoformat(spec.get("read_from") or spec["window_start"])
+        split = (datetime.fromisoformat(spec["split"]) if spec.get("split")
+                 else _short_term_start(now))
+        plan = await self._entities_plan(job, read_from, split, end, window=(start, end))
+        return [] if plan is None else plan[2]
+
+    async def _entities_plan(
+        self,
+        job: dict,
+        read_from: datetime,
+        split: datetime,
+        end: datetime,
+        window: tuple[datetime, datetime] | None = None,
+    ) -> tuple[datetime, datetime, list[dict]] | None:
+        """Read the flows from `read_from` to `end` (hourly before `split`, 5-minute
+        after) and build the entity job's window and rows, or None to wait.
+
+        Completeness is judged for the replaced streams only (both battery streams when
+        either changed): a quarter is replaced when every sensor of them measured it
+        cleanly. A stream left without sensors limits nothing (it is replaced by zeros),
+        and with no such limit at all (a removed stream, or only external_control) the
+        quarters every sensor measured are taken. The window starts at the later of
+        `read_from` and the first whole hour in which a sensor of a changed stream has a
+        measured period (`read_from` itself for a changed stream without statistics of
+        its own: no sensor, or external_control), and ends at the hour after the last
+        replaced quarter. `window` given (a resume): only the rows inside it are built."""
+        sources = await self._entities_sources(read_from, split, end)
+        # `now` as the spec's split implies it, so the solar anchor reads do not move.
+        built, streams = await self._build(
+            split + timedelta(days=_SHORT_TERM_DAYS), sources, lambda _b, s: s)
+        changed = list(job.get("streams") or [])
+        replaced = {s for s in changed if s in self._entity_map}
+        if replaced & {"batt_in", "batt_out"}:
+            replaced |= {"batt_in", "batt_out"}
+        bounded = [built.complete_by_stream[s] for s in sorted(replaced)
+                   if built.complete_by_stream.get(s) is not None]
+        complete = set.intersection(*bounded) if bounded else set(built.complete)
+        if window is None:
+            starts: list[datetime] = []
+            measured: set[int] = set()
+            sensors = set()
+            for stream in changed:
+                ids = self._entity_map.get(stream)
+                if ids:
+                    sensors.update(ids)
+                else:
+                    starts.append(read_from)  # no statistics of its own to wait for
+            for src in sources:
+                for e in sensors:
+                    measured |= measured_starts(src.raw.get(e) or [], _PERIOD_S[src.agg_fn])
+            if measured:
+                first = datetime.fromtimestamp(min(measured), tz=timezone.utc)
+                starts.append(max(read_from, _floor_hour(first)))
+            if not starts:
+                return None  # the new sensors have no statistics at all yet
+            start = min(starts)
+            inside = {q for q in complete if q >= start}
+            if not inside:
+                return None
+            window = (start, _ceil_hour(max(inside) + _QUARTER))
+        start, end = window
+        inside = {q for q in complete if start <= q < end}
+        external = await self._external_quarters(read_from, end)
+        fields = list(job.get("fields") or [])
+        rows = await self.hass.async_add_executor_job(
+            stats.replacement_rows, streams, built.complete, inside, fields, external)
+        if not rows:
+            return None
+        return start, end, rows
+
+    async def _entities_sources(
+        self, read_from: datetime, split: datetime, end: datetime
+    ) -> list[_Source]:
+        """The statistics reads of the entity job, split like _backfill_rows: hourly
+        before `split`, 5-minute after it, each one period early."""
+        sources: list[_Source] = []
+        hourly_end = min(split, end)
+        if hourly_end > read_from:
+            raw = await async_fetch_change(
+                self.hass, self._statistic_ids(), _read_start(read_from, 3600), hourly_end,
+                period="hour")
+            sources.append(_Source(raw, split_hour_to_quarters, read_from, hourly_end))
+        five_start = max(read_from, split)
+        if end > five_start:
+            raw = await async_fetch_change(
+                self.hass, self._statistic_ids(), _read_start(five_start, 300), end,
+                period="5minute")
+            sources.append(_Source(raw, aggregate_5min_to_15min, five_start, end))
+        return sources
+
+    async def _entities_committed(self, job: dict, rep: dict, result: dict) -> None:
+        """After the commit: the stored rows are built from the new sensors, so applied
+        := target. The bookmark moves to the latest quarter staged with every field when
+        that is later than the bookmark (the server inserted those rows), or when the
+        bookmark lay inside the window (rows after that quarter may have been removed, and
+        the regular upload sends them again once they are complete). Nothing moves on an
+        empty result: the server replaced nothing."""
+        self._state["applied_entities"] = job["target"]
+        if not result:
+            return
+        bookmark = self._state.get("last_uploaded_ts")
+        last_full = rep.get("last_full")
+        if not bookmark or not last_full:
+            return
+        mark = datetime.fromisoformat(bookmark)
+        full = datetime.fromisoformat(last_full)
+        inside = (datetime.fromisoformat(rep["window_start"]) <= mark
+                  < datetime.fromisoformat(rep["window_end"]))
+        if full > mark or (inside and full != mark):
+            self._state["last_uploaded_ts"] = full.isoformat()
+
+    async def _entities_finished(self, job: dict) -> None:
+        self._entity_rows_cache = None
+        self._state["applied_entities"] = job["target"]
 
     # ------------------------------------------------------------------
     # Main update
@@ -1321,37 +1621,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 results = await self.client.results(self.token)
                 return self._build_data(results, last_uploaded=None)
 
-            # A changed battery direction (desired invert intervals differ from the
-            # applied ones) is no longer re-sent: a direction job swaps the stored rows on
-            # the server (_queue_direction_job, before the replacement runner below).
-
-            # Entity selections changed (reconfigure flow) → full re-backfill so the
-            # server-side history is rebuilt from the new sensors. First-time recording
-            # (upgrade) leaves the bookmark untouched.
-            # external_control-nyckeln ingår BARA när sensorn är vald: annars ändras
-            # fingerprintet för varje befintlig installation vid uppgradering → onödig
-            # full re-backfill för hela flottan.
-            _fp_map = dict(self._entity_map)
-            if self._external_entity:
-                _fp_map["external_control"] = [self._external_entity]
-            # The SoC sensors are deliberately NOT part of this fingerprint (spec §6.5, §16):
-            # a flow re-backfill rewrites day 9-365 from HOURLY statistics split over four
-            # quarters, overwriting quarter data that once came from 5-minute statistics HA
-            # has since purged - irreversible, and it recomputes the grade. SoC has its own
-            # bookkeeping in _track_soc_selection.
-            entities_now = json.dumps(_fp_map, sort_keys=True)
-            applied_entities = self._state.get("applied_entities")
-            if applied_entities is None:
-                self._state["applied_entities"] = entities_now
-                await self._store.async_save(self._state)
-            elif applied_entities != entities_now:
-                self._state.pop("last_uploaded_ts", None)
-                self._state["applied_entities"] = entities_now
-                self._state["pending_invert_recompute"] = True
-                await self._store.async_save(self._state)
+            # A changed battery direction or sensor selection is no longer re-sent: the
+            # bookmark stays and the server's stored rows are replaced in place - a
+            # direction job swaps the battery fields, an entity job replaces only the
+            # changed sensors' fields (both before the replacement runner below; one job
+            # at a time, the direction first). The server queues the recount at commit.
+            entities_now = self._entities_fingerprint()
 
             await self._track_soc_selection()
             await self._queue_direction_job()
+            await self._queue_entity_job(entities_now)
 
             # A replacement of stored flows runs before the regular upload (server spec
             # §9): while one is open on the server, neither the regular PUT /data nor the
@@ -1576,17 +1855,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         its stored neighbours. Completeness is untouched by the swap: both battery
         streams' sensors are judged for every quarter either way. ``built`` keeps the
         unswapped streams; only the rows carry the swap."""
+        return await self._build(
+            now, sources,
+            lambda built, streams: merge_streams(
+                **streams, external=external, complete=built.complete))
+
+    async def _build(self, now: datetime, sources: list[_Source], finish: Callable):
+        """_build_rows' build with the last step given: `finish(built, swapped streams)`
+        runs in the executor after the streams are built and the APPLIED invert intervals
+        swapped in, and its result is returned beside `built`."""
         sources = await self._anchor_solar(now, sources)
         ids = self._stream_ids()
         applied = self._applied_intervals()
         sun_down = ({_PERIOD_S[src.agg_fn]: self._sun_down_fn(_PERIOD_S[src.agg_fn])
                      for src in sources} if ids["solar"] else {})
 
-        def job() -> tuple[_Built, list[dict]]:
+        def job():
             built = self._build_streams(*sources, ids=ids, sun_down=sun_down)
             streams = intervals.apply_invert(built.streams, applied)
-            return built, merge_streams(
-                **streams, external=external, complete=built.complete)
+            return built, finish(built, streams)
 
         return await self.hass.async_add_executor_job(job)
 
@@ -1919,8 +2206,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         upload at all. Be clear about what that costs, though - it is NOT
         self-healing. Nothing re-reads quarters below the bookmark; the incremental
         and heal paths both start there, so quarters uploaded unflagged stay
-        unflagged until something resets the bookmark (an entity-fingerprint change,
-        i.e. the user re-picking sensors, which triggers a full re-backfill). The
+        unflagged until something rewrites them (re-picking the external-control
+        sensor, whose entity job replaces the flag in the stored history). The
         error direction is still the safe one - those quarters are graded normally
         rather than wrongly neutralised - but the flag is lost for them, not deferred.
 
@@ -2460,10 +2747,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not period_end_str:
             return
 
-        # New or rewritten history was just uploaded (a coverage fill, or a sensor change's full
-        # re-backfill) → FORCE a recompute bypassing the 7-day cadence, otherwise the grade won't show
-        # it until the nightly rewarm/next tick. A direction swap does not set it: the server queues
-        # the recount at commit. The flag is only cleared once the recompute succeeds (survives a
+        # New history was just uploaded (a coverage fill) → FORCE a recompute bypassing the 7-day
+        # cadence, otherwise the grade won't show it until the nightly rewarm/next tick. A direction
+        # swap or a sensor change's replacement does not set it: the server queues the recount at
+        # commit. The flag is only cleared once the recompute succeeds (survives a
         # failed attempt).
         force = bool(self._state.get("pending_invert_recompute"))
 

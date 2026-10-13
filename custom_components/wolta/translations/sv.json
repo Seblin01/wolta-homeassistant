@@ -18,7 +18,7 @@
     },
     "statistics_missing": {
       "title": "Wolta har slutat ladda upp: en vald sensor saknar statistik",
-      "description": "{entities} ger inte längre någon statistik som Wolta kan använda, men dina andra valda sensorer gör det. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så uppladdningen står still tills sensorn ger statistik igen. Kvartarna från tiden då uppladdningen stod still kan bli kvar osända.\n\nKontrollera att sensorn finns och är tillgänglig i Home Assistant, och kontrollera dess `state_class`: en effektsensor (W, `state_class: measurement`) får statistik utan sum-kolumnen som Wolta läser energin ur, och det räknas som ingen statistik. Har sensorn ersatts av en annan: välj den nya under Konfigurera om, eller ta bort den gamla där. Efter en sådan ändring skickas alla kompletta kvartar i historiken om. Varningen rensar sig själv när sensorn läser data igen."
+      "description": "{entities} ger inte längre någon statistik som Wolta kan använda, men dina andra valda sensorer gör det. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så uppladdningen står still tills sensorn ger statistik igen. Kvartarna från tiden då uppladdningen stod still kan bli kvar osända.\n\nKontrollera att sensorn finns och är tillgänglig i Home Assistant, och kontrollera dess `state_class`: en effektsensor (W, `state_class: measurement`) får statistik utan sum-kolumnen som Wolta läser energin ur, och det räknas som ingen statistik. Har sensorn ersatts av en annan: välj den nya under Konfigurera om, eller ta bort den gamla där. Efter en sådan ändring ersätts sensorns värden i historiken som Wolta redan har; de andra sensorernas värden står kvar. Varningen rensar sig själv när sensorn läser data igen."
     },
     "measured_capacity": {
       "title": "Wolta mätte en annan batterikapacitet",
@@ -331,7 +331,7 @@
       },
       "reconfigure": {
         "title": "Byt energisensorer",
-        "description": "Välj de nya sensorerna. Home Assistant laddar upp hela historiken på nytt från de nya sensorerna och betyget räknas om – du behöver inte ta bort integrationen.",
+        "description": "Välj de nya sensorerna. Wolta ersätter de ändrade sensorernas värden i historiken som redan finns, ur de nya sensorernas statistik, och betyget räknas om. Inget annat skickas om, och du behöver inte ta bort integrationen.",
         "data": {
           "batt_in": "Batteriets laddningsenergi",
           "batt_out": "Batteriets urladdningsenergi",
@@ -379,7 +379,7 @@
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
       "reauth_successful": "Återautentiseringen lyckades",
-      "reconfigure_successful": "Sensorerna uppdaterade. Historiken laddas upp på nytt i bakgrunden.",
+      "reconfigure_successful": "Sensorerna uppdaterade. De ändrade sensorernas värden ersätts i historiken i bakgrunden.",
       "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen."
     }
   },
