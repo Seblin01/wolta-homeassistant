@@ -4302,7 +4302,7 @@ async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip
 
 
 # ---------------------------------------------------------------------------
-# K10: the invert toggle means "the whole history" over the desired intervals
+# The invert toggle means "the whole history" over the desired intervals
 # ---------------------------------------------------------------------------
 
 

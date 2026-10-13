@@ -1576,7 +1576,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._set_applied_intervals(intervals.parse(job["target"]))
 
     # ------------------------------------------------------------------
-    # Entity job: replace the fields of changed sensors in stored rows (K7)
+    # Entity job: replace the fields of changed sensors in stored rows
     # ------------------------------------------------------------------
 
     def _entities_fingerprint(self) -> str:
@@ -1650,7 +1650,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
     async def _entities_next(self, job: dict, now: datetime, profile: dict | None):
-        """The next replacement of the entity job (K7), or "done".
+        """The next replacement of the entity job, or "done".
 
         Two phases: the energy fields of the replaced energy streams, one replacement
         per window of complete hours (_energy_next), then external_control in one

@@ -933,7 +933,8 @@ async def test_effective_stream_answers_for_now_from_the_applied_intervals(
     from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
 
     t = (NOW - timedelta(hours=1)).isoformat()
-    # Desired says "invert everything": it must not leak into the answer (K1).
+    # Desired says "invert everything": it must not leak into the answer - only the
+    # applied intervals (what the stored rows are built with) decide.
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True,
                        CONF_INVERT_INTERVALS: [[None, None]]}
     client = _mock_client()
@@ -990,8 +991,8 @@ async def _run_setup(hass, coordinator):
 async def test_setup_migrates_the_invert_flag_to_intervals(
     hass: HomeAssistant, mock_entry, flag, expected
 ):
-    """K2: an entry without intervals gets them from the boolean flag, and the Store's
-    applied intervals follow (no applied_invert either -> from the desired value)."""
+    """Migration: an entry without intervals gets them from the boolean flag, and the
+    Store's applied intervals follow (no applied_invert either -> from the desired value)."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: flag}
@@ -1028,8 +1029,8 @@ async def test_setup_migration_without_any_flag_gives_empty_intervals(
 async def test_setup_derives_applied_intervals_from_applied_invert(
     hass: HomeAssistant, mock_entry, applied_invert, expected
 ):
-    """K2: the stored rows were built with applied_invert, not with whatever the entry
-    now desires - the applied intervals come from it when present."""
+    """Migration: the stored rows were built with applied_invert, not with whatever the
+    entry now desires - the applied intervals come from it when present."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: not applied_invert,
@@ -1073,8 +1074,8 @@ def _distinct_battery_stats(start, end) -> dict:
 async def test_build_swaps_the_battery_per_quarter_from_the_applied_intervals(
     hass: HomeAssistant, mock_entry
 ):
-    """K3: with applied [[T, None]] the quarters before T carry charge/discharge as the
-    sensors say and the quarters from T carry them swapped."""
+    """Per-quarter inversion: with applied [[T, None]] the quarters before T carry
+    charge/discharge as the sensors say and the quarters from T carry them swapped."""
     from custom_components.wolta.const import CONF_INVERT_INTERVALS
 
     t = NOW - timedelta(hours=3)
@@ -1111,7 +1112,7 @@ async def test_build_swaps_the_battery_per_quarter_from_the_applied_intervals(
 
 @pytest.mark.asyncio
 async def test_build_ignores_the_desired_intervals(hass: HomeAssistant, mock_entry):
-    """K1: until a replacement makes it applied, a desired inversion swaps nothing."""
+    """Until a replacement makes it applied, a desired inversion swaps nothing."""
     from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
 
     mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True,
@@ -1176,7 +1177,7 @@ async def test_complete_by_stream_judges_each_stream_by_its_own_sensors(
 async def test_empty_stream_text_names_the_sensors_feeding_the_role_under_inversion(
     hass: HomeAssistant, mock_entry
 ):
-    """The streams are built unswapped, the repair text answers for now (K3): with the
+    """The streams are built unswapped, the repair text answers for now: with the
     discharge sensor empty and the direction inverted, the charge role is the empty one
     and the text names the sensor that is actually silent."""
     client = _mock_client()

@@ -166,9 +166,15 @@ async def test_diagnostics_show_replacement_state_without_token(hass: HomeAssist
                 "window_start": "2026-10-01T00:00:00+00:00",
                 "window_end": "2026-10-05T00:00:00+00:00",
                 "fields": None, "reason": "direction",
+                # Not something the job ever holds, but nothing outside the listed
+                # keys may reach the summary, whatever a later version stores here.
+                "token": "job-secret-in-replacement",
+                "authorization": "Bearer job-secret-bearer",
             },
             "done_windows": [["a", "b"], ["c", "d"]],
             "retry_at": "2026-10-13T12:00:00+00:00",
+            "token": "job-secret-on-the-job",
+            "energy_plan": {"windows": [], "link": "wpl_job-secret-link"},
         },
         "job_backoff": {"entities": "2026-10-14T00:00:00+00:00"},
     }
@@ -191,6 +197,8 @@ async def test_diagnostics_show_replacement_state_without_token(hass: HomeAssist
     assert job["replacement"]["reason"] == "direction"
     assert rep["job_backoff"] == {"entities": "2026-10-14T00:00:00+00:00"}
     assert "super-secret" not in str(rep)
+    assert "job-secret" not in str(rep)
+    assert "token" not in job and "token" not in job["replacement"]
 
 
 @pytest.mark.asyncio

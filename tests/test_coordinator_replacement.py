@@ -281,7 +281,7 @@ async def test_every_state_changing_call_follows_a_save(hass: HomeAssistant, moc
 
 
 # ---------------------------------------------------------------------------
-# Server refusals (K11)
+# Server refusals: start over, send again, wait or count as done
 # ---------------------------------------------------------------------------
 
 
@@ -414,7 +414,7 @@ async def test_stream_bound_refusal_keeps_the_job_without_pausing(
 
 
 # ---------------------------------------------------------------------------
-# The pause (K5)
+# The pause: no regular upload while a replacement is open
 # ---------------------------------------------------------------------------
 
 
@@ -826,7 +826,7 @@ async def test_conflict_reopens_with_a_new_id_next_cycle(hass: HomeAssistant, mo
 
 
 # ---------------------------------------------------------------------------
-# Direction job (K6): swap the battery fields of stored rows on the server
+# Direction job: swap the battery fields of stored rows on the server
 # ---------------------------------------------------------------------------
 
 from datetime import timezone  # noqa: E402
@@ -1115,7 +1115,7 @@ async def test_unchanged_direction_starts_no_job(hass: HomeAssistant, mock_entry
 
 
 # ---------------------------------------------------------------------------
-# Entity job: a sensor change replaces only the changed fields (K7)
+# Entity job: a sensor change replaces only the changed fields
 # ---------------------------------------------------------------------------
 
 from custom_components.wolta.const import (  # noqa: E402
@@ -2492,3 +2492,68 @@ async def _entity_cycle_with_states(coordinator, states, now=E_NOW):
         patch("custom_components.wolta.stats.async_fetch_states", new=states),
     ):
         await coordinator._async_update_data()
+
+
+# ---------------------------------------------------------------------------
+# Upgrade from v0.44: the first cycle replaces nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upgrade_from_v044_replaces_nothing_and_uploads_as_before(
+    hass: HomeAssistant, mock_entry
+):
+    """A v0.44 install: the entry has the boolean invert flag (on) and no intervals; the
+    Store has applied_invert, the entity fingerprint and a bookmark. Setup migrates the
+    flag to intervals on both sides, and the first full cycle makes no replacement call
+    at all - no job, the regular PUT /data from the bookmark, the rows still inverted."""
+    from custom_components.wolta.const import CONF_INVERT_BATTERY, CONF_INVERT_INTERVALS
+
+    data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    data.pop(CONF_INVERT_INTERVALS, None)
+    mock_entry.data = data
+    bookmark = (NOW - timedelta(hours=1)).isoformat()
+    client = _client()
+    client.get_profile = AsyncMock(
+        return_value={**BASE_PROFILE, "data_since": "2024-06-01T00:00:00+00:00"})
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state={
+        "applied_invert": True,
+        "applied_entities": OLD_FP,
+        "last_uploaded_ts": bookmark,
+    })
+    seen: list = []
+
+    async def rows(start, now):
+        seen.append((start, coordinator._applied_intervals()))
+        return _make_rows(NOW)
+
+    coordinator._incremental_rows = AsyncMock(side_effect=rows)
+    coordinator._reconcile_coverage = AsyncMock()
+
+    def update_entry(entry, *, data):
+        entry.data = data
+        return True
+
+    with (
+        patch.object(hass.config_entries, "async_update_entry", side_effect=update_entry),
+        patch("custom_components.wolta.coordinator.async_track_time_interval"),
+    ):
+        await coordinator._async_setup()
+        await _cycle(coordinator)
+
+    # Migration done, on both sides, with nothing to correct.
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == [[None, None]]
+    assert mock_entry.data[CONF_INVERT_BATTERY] is True
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+    assert coordinator._state["applied_entities"] == OLD_FP
+    assert "replacement_job" not in coordinator._state
+    # Not one replacement call.
+    for call in (client.open_replacement, client.stage_replacement_rows,
+                 client.commit_replacement, client.get_replacement,
+                 client.delete_replacement):
+        call.assert_not_called()
+    # The regular upload from the bookmark, built with the inversion as before.
+    assert seen == [(datetime.fromisoformat(bookmark), [(None, None)])]
+    client.put_data.assert_awaited_once()
+    assert coordinator._state["last_uploaded_ts"] != bookmark
+    assert "pending_invert_recompute" not in coordinator._state
