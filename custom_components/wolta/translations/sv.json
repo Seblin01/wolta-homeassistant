@@ -14,7 +14,11 @@
     },
     "energy_stream_no_statistics": {
       "title": "Wolta får inte in data från en av dina energisensorer",
-      "description": "En eller flera av sensorerna du valde läser helt tomt ({streams}) trots att uppladdningsfönstret borde ha innehållit data.\n\nVanligaste orsaken är sensorns `state_class`. Wolta läser energideltan ur statistiken, som bara bär dem för `state_class: total` eller `total_increasing` — en effektsensor (W, `state_class: measurement`) får också statistik, men utan sum-kolumnen som deltan läses ur, så strömmen ger ingenting alls. Inget laddas upp för den, och betyget räknas utan den strömmen.\n\nVälj motsvarande energisensor (kWh) under Konfigurera om. Varningen rensar sig själv så fort strömmen läser data igen."
+      "description": "En eller flera av sensorerna du valde har slutat leverera statistik, eller har aldrig levererat någon ({streams}), trots att uppladdningsfönstret borde ha innehållit data.\n\nVanligaste orsaken är sensorns `state_class`. Wolta läser energideltan ur statistiken, som bara bär dem för `state_class: total` eller `total_increasing` — en effektsensor (W, `state_class: measurement`) får också statistik, men utan sum-kolumnen som deltan läses ur, så strömmen ger ingenting alls. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så ingenting laddas upp förrän strömmen läser data igen.\n\nVälj motsvarande energisensor (kWh) under Konfigurera om. Varningen rensar sig själv så fort strömmen läser data igen."
+    },
+    "statistics_missing": {
+      "title": "Wolta har slutat ladda upp: en vald sensor saknar statistik",
+      "description": "{entities} ger inte längre någon statistik som Wolta kan använda, men dina andra valda sensorer gör det. Wolta skickar bara kvartar där varje vald sensor har ett eget mätvärde, så uppladdningen står still tills sensorn ger statistik igen. Kvartarna från tiden då uppladdningen stod still kan bli kvar osända.\n\nKontrollera att sensorn finns och är tillgänglig i Home Assistant, och kontrollera dess `state_class`: en effektsensor (W, `state_class: measurement`) får statistik utan sum-kolumnen som Wolta läser energin ur, och det räknas som ingen statistik. Har sensorn ersatts av en annan: välj den nya under Konfigurera om, eller ta bort den gamla där. Efter en sådan ändring skickas alla kompletta kvartar i historiken om. Varningen rensar sig själv när sensorn läser data igen."
     },
     "measured_capacity": {
       "title": "Wolta mätte en annan batterikapacitet",

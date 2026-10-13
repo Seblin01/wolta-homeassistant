@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_left
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
@@ -144,6 +146,177 @@ def sum_quarter_dicts(dicts: list[dict[datetime, float]]) -> dict[datetime, floa
     return result
 
 
+def measured_starts(rows: list[StatisticsRow], period_s: int) -> set[int]:
+    """UNIX starts (floored to ``period_s``) of the periods that carry a value.
+
+    A period is *measured* when the recorder compiled a row with a ``change`` that is
+    not None. An available sensor gets a row for every period even when its value does
+    not move (the recorder reads the state at the period start, HA 2026.8.3
+    recorder/history include_start_time_state=True), so a missing period means the
+    sensor was unavailable or not recorded - not that nothing happened."""
+    out: set[int] = set()
+    for row in rows:
+        if row.get("change") is None:
+            continue
+        start = int(row["start"])
+        out.add(start - start % period_s)
+    return out
+
+
+def _measured_changes(rows: list[StatisticsRow], period_s: int) -> dict[int, float]:
+    """The change per measured period (start floored to ``period_s``); the keys are
+    exactly measured_starts."""
+    changes: dict[int, float] = {}
+    for row in rows:
+        change = row.get("change")
+        if change is None:
+            continue
+        start = int(row["start"])
+        key = start - start % period_s
+        changes[key] = changes.get(key, 0.0) + change
+    return changes
+
+
+def _ordered_with_anchor(
+    measured: set[int], period_s: int, anchor_start: int | None
+) -> list[int]:
+    """The measured periods in order, with the anchor (the sensor's last measured
+    period before the rows) in front: the previous measured period of each."""
+    anchor = None
+    if anchor_start is not None:
+        anchor = anchor_start - anchor_start % period_s
+        if measured and anchor >= min(measured):
+            anchor = None  # the rows hold the sensor's earlier periods themselves
+    return sorted(measured if anchor is None else measured | {anchor})
+
+
+def _still_gaps(
+    ordered: list[int], changes: dict[int, float], period_s: int
+) -> list[tuple[int, int]]:
+    """Rule (b): the gaps whose first measured period after them has change 0, as
+    (start of the first missing period, start of that measured period)."""
+    return [(before + period_s, after) for before, after in zip(ordered, ordered[1:])
+            if after - before > period_s and changes[after] == 0]
+
+
+def known_zero_gaps(
+    rows: list[StatisticsRow],
+    period_s: int,
+    *,
+    anchor_start: int | None = None,
+    min_s: int = 3600,
+) -> list[tuple[int, int]]:
+    """The gaps clean_quarters accepts as known zeros by rule (b) - the counter stood
+    still across them - that last at least ``min_s`` seconds, as (start of the first
+    missing period, start of the measured period after the gap) in UNIX seconds.
+
+    For the log only: an integration that reports a stale, unchanged counter when it
+    reconnects after a long outage looks exactly like a battery that was idle, and a
+    long run is worth seeing. Same arguments as clean_quarters."""
+    changes = _measured_changes(rows, period_s)
+    ordered = _ordered_with_anchor(set(changes), period_s, anchor_start)
+    return [(first, after) for first, after in _still_gaps(ordered, changes, period_s)
+            if after - first >= min_s]
+
+
+def clean_quarters(
+    rows: list[StatisticsRow],
+    period_s: int,
+    *,
+    window: tuple[int, int] | None = None,
+    sun_down: Callable[[int], bool] | None = None,
+    anchor_start: int | None = None,
+) -> set[datetime]:
+    """Quarters this sensor measured completely, with no catch-up inside.
+
+    A period is *clean* when it and the period before it are both measured. After a
+    gap the recorder continues the sum from the last compiled row, so the first period
+    after a gap carries the whole gap's change (HA 2026.8.3 sensor/recorder.py: the sum
+    restarts from the previous row's ``state``). That period is a catch-up, not a
+    measurement of its own interval.
+
+    Known zeros: a missing period counts as measured with the value 0 when there is
+    evidence that nothing happened in it, and only then.
+
+    * (b) The counter stood still across the gap: when the first measured period after
+      a gap has ``change == 0``, the gap's energy was 0, so its periods are zeros and
+      the period after it is clean. Always applied.
+    * (a) The sun was down: ``sun_down(period_start)`` is true when the sun is below the
+      horizon in the middle of the period. Every missing period in ``window`` (start,
+      end in UNIX seconds), and the period before the window, for which it holds is a
+      zero - an inverter that sleeps at night leaves no statistics at all (a whole
+      night can lack measured periods). Only for solar sensors; the caller decides by
+      passing ``sun_down``. Without ``window`` the span of the measured periods is used.
+
+    A known zero is a zero, but the first measured period after a run of them carries
+    the change since the previous measured period - the run proves nothing about the
+    periods before it. That period is clean only when EVERY missing period back to the
+    previous measured one is a known zero. A gap that began in daylight (the sensor
+    unavailable from 13:00) and ran through the night ends in a dawn period holding the
+    afternoon's energy, and that period is not clean. When the run reaches back before
+    the rows, ``anchor_start`` is the start of the sensor's last measured period before
+    them (the caller reads further back); without it the run is unproven.
+
+    The values are untouched: a known zero has no row, and merge_streams fills an
+    absent value with 0.0, which is now correct because the quarter is complete. That
+    holds for the battery streams too: merge_streams emits every quarter of the
+    complete set, also one in which every battery sensor is a known zero and no battery
+    stream holds a value.
+
+    5-minute statistics (``period_s`` 300): a quarter is clean when its three periods
+    are clean. Hourly statistics (3600, split into quarters): the four quarters of an
+    hour are clean when the hour is clean."""
+    if period_s not in (300, 3600):
+        raise ValueError(f"unsupported statistics period: {period_s} s")
+    changes = _measured_changes(rows, period_s)
+    m = set(changes)
+    known = set(m)
+    ordered = _ordered_with_anchor(m, period_s, anchor_start)
+    for first, after in _still_gaps(ordered, changes, period_s):
+        known.update(range(first, after, period_s))
+    lo = None
+    if sun_down is not None:
+        if window is not None:
+            lo = window[0] - window[0] % period_s - period_s
+            hi = window[1]
+        elif m:
+            lo, hi = min(m), max(m) + 1
+        else:
+            lo = hi = 0
+        known.update(p for p in range(lo, hi, period_s) if p not in m and sun_down(p))
+
+    def zero(p: int) -> bool:
+        """A known zero; before the (a) range (the run back to the anchor) the sun decides."""
+        return p in known or (lo is not None and p < lo and sun_down(p))
+
+    proven: dict[int, bool] = {}
+
+    def clean(p: int) -> bool:
+        if p not in known or p - period_s not in known:
+            return False
+        if p not in m or p - period_s in m:
+            return True
+        # A measured period after known zeros carries the change of the whole run since
+        # the previous measured period: clean only when every period of it is a zero.
+        if p not in proven:
+            i = bisect_left(ordered, p)
+            proven[p] = i > 0 and all(
+                zero(q) for q in range(ordered[i - 1] + period_s, p, period_s))
+        return proven[p]
+
+    out: set[datetime] = set()
+    if period_s == 300:
+        for q in {s - s % 900 for s in known}:
+            if clean(q) and clean(q + 300) and clean(q + 600):
+                out.add(datetime.fromtimestamp(q, tz=timezone.utc))
+    else:
+        for h in known:
+            if clean(h):
+                out.update(datetime.fromtimestamp(h + 900 * k, tz=timezone.utc)
+                           for k in range(4))
+    return out
+
+
 def merge_streams(
     batt_in: dict[datetime, float] | None,
     batt_out: dict[datetime, float] | None,
@@ -151,12 +324,22 @@ def merge_streams(
     grid_out: dict[datetime, float] | None,
     solar: dict[datetime, float] | None,
     external: set[datetime] | None = None,
+    complete: set[datetime] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
-    Valid quarters are exactly the timestamps present in *batt_in* or *batt_out*.
-    *external* MARKS those rows; it can never add one. Missing values in any stream
-    default to 0.0.
+    Valid quarters are *complete* when it is given, otherwise exactly the timestamps
+    present in *batt_in* or *batt_out*. *external* MARKS those rows; it can never add
+    one. Missing values in any stream default to 0.0.
+
+    With *complete* the battery keys no longer decide. A quarter in *complete* already
+    requires every battery sensor to be measured cleanly or a proven zero in it
+    (clean_quarters), and is clipped to the window of a source that read it. When every
+    battery sensor stood still across a gap (rule (b)) the quarter has no battery key
+    at all - the zero is proven, not recorded - and keying on the battery streams
+    would drop it with its real grid and solar values, permanently once later quarters
+    move the bookmark past it. The argument below about the flag is unchanged by this:
+    *external* still adds nothing, since the valid set is *complete* either way.
 
     Why the flag cannot admit a quarter of its own – this rule has been written three
     times and the next reader should not have to rediscover it:
@@ -196,6 +379,12 @@ def merge_streams(
         external:  set[datetime] – quarters flagged by flagged_quarters() as
                    externally controlled (may be None when no sensor is
                    configured; then every row's external_control is False).
+        complete:  set[datetime] – quarters every selected sensor measured cleanly
+                   or proved to be zero (clean_quarters). When given, it IS the set of
+                   emitted quarters: a quarter outside it is never emitted (a stream
+                   missing the quarter would otherwise be filled with 0.0, and a sum
+                   over several sensors would be partial), and a quarter inside it is
+                   emitted even when no battery stream holds a value for it.
 
     Returns:
         List of row dicts with keys:
@@ -216,11 +405,15 @@ def merge_streams(
     _solar = solar or {}
     _external = external or set()
 
-    # Emit exactly the quarters the battery streams carry. The flag MARKS these rows;
-    # it can never add one. Read the docstring before widening this – the rule has
-    # been reformulated three times and each attempt to let the flag admit a quarter
-    # of its own reintroduced fabricated zeros.
-    valid_quarters = _batt_in.keys() | _batt_out.keys()
+    # Emit exactly the complete quarters, or without that set the quarters the battery
+    # streams carry. The flag MARKS these rows; it can never add one. Read the
+    # docstring before widening this – the rule has been reformulated three times and
+    # each attempt to let the flag admit a quarter of its own reintroduced fabricated
+    # zeros.
+    if complete is not None:
+        valid_quarters = set(complete)
+    else:
+        valid_quarters = _batt_in.keys() | _batt_out.keys()
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
@@ -555,8 +748,8 @@ async def async_fetch_states(
 
     What bounds the upload is therefore NOT this function and must not be reintroduced
     here as a window assumption: ``merge_streams`` emits a flagged quarter only when
-    the recorder compiled statistics for that very quarter. The bound lives where the
-    evidence lives."""
+    it is complete - every selected sensor measured it, or proved it zero, in the
+    statistics the recorder compiled. The bound lives where the evidence lives."""
     from homeassistant.components.recorder import get_instance  # noqa: PLC0415
     from homeassistant.components.recorder import history  # noqa: PLC0415
 

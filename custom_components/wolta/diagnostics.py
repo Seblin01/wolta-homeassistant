@@ -26,9 +26,12 @@ async def async_get_config_entry_diagnostics(
     coordinator = getattr(entry, "runtime_data", None)
     state: dict[str, Any] = dict(getattr(coordinator, "_state", {}) or {})
     data = getattr(coordinator, "data", None)
+    # Quarters the latest regular read dropped as incomplete, and the sensors behind it.
+    completeness = getattr(coordinator, "_last_completeness", None)
     return {
         "entry_data": async_redact_data(dict(entry.data), TO_REDACT),
         "coordinator_state": state,
         "last_update_success": getattr(coordinator, "last_update_success", None),
         "results": getattr(data, "results", None),
+        "completeness": dict(completeness) if isinstance(completeness, dict) else None,
     }

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
+from astral import Observer
+from astral import sun as astral_sun
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,6 +20,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.sun import get_astral_observer
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -72,6 +76,9 @@ from .stats import (
     async_fetch_change,
     async_fetch_measurement,
     battery_state_rows,
+    clean_quarters,
+    known_zero_gaps,
+    measured_starts,
     merge_streams,
     soc_unit_ok,
     soc_from_hourly,
@@ -81,6 +88,243 @@ from .stats import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Statistics period per aggregation function, and how far before a window the read
+# starts so the window's first period can be judged against the one before it.
+_PERIOD_S: dict[Callable, int] = {aggregate_5min_to_15min: 300, split_hour_to_quarters: 3600}
+_PERIOD: dict[int, timedelta] = {300: timedelta(minutes=5), 3600: timedelta(hours=1)}
+
+
+def _floor(t: datetime, period_s: int) -> datetime:
+    """``t`` floored to a whole statistics period (UTC)."""
+    ts = int(t.timestamp())
+    return datetime.fromtimestamp(ts - ts % period_s, tz=timezone.utc)
+
+
+def _read_start(start: datetime, period_s: int) -> datetime:
+    """Where a read for a window starting at ``start`` begins: the period holding
+    ``start`` floored, minus one period. The recorder returns rows with
+    ``start_ts >= start_time`` and does not floor (HA 2026.8.3 recorder/statistics.py),
+    so ``start - period`` alone misses the period before the window whenever ``start``
+    is not on a period boundary, and the window's first period could not be judged."""
+    return _floor(start, period_s) - _PERIOD[period_s]
+
+
+def _short_term_start(now: datetime) -> datetime:
+    """Where the flows switch from hourly to 5-minute statistics, on a whole hour.
+    Unaligned, the quarter straddling it would be judged complete from the hour while
+    its value came from the 5-minute periods after the switch - a partial quarter."""
+    return _floor(now - timedelta(days=_SHORT_TERM_DAYS), 3600)
+
+
+@dataclass(frozen=True)
+class _Source:
+    """One statistics read: rows per statistic id, the aggregation that turns them into
+    quarters, and the window [start, end) whose quarters this source decides.
+    ``anchors``: per solar sensor, the start of its last measured period before the
+    rows (WoltaCoordinator._anchor_solar), for clean_quarters' ``anchor_start``."""
+    raw: dict
+    agg_fn: Callable
+    start: datetime
+    end: datetime
+    anchors: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _Built:
+    streams: dict[str, dict]          # merge_streams' keyword arguments
+    complete: set[datetime]           # quarters every selected sensor measured cleanly
+    silent: set[str]                  # selected sensors that stopped measuring (_silent_sensors)
+    incomplete: int                   # quarters with a value somewhere but not complete
+    blame: dict[str, int]             # sensor -> quarters it made incomplete
+    asleep: set[str]                  # solar sensors not silent only because the sun was down
+
+
+def _silent_sensors(
+    sensors: set[str], newest: dict[str, tuple[int, int]], min_lag: timedelta
+) -> set[str]:
+    """Selected sensors that have stopped measuring, judged by lag.
+
+    ``newest`` maps a sensor to (start of its newest measured period anywhere in the
+    read, the period of the source it was found in). A sensor is silent when it has no
+    measured period at all, or when its newest one trails the newest of all selected
+    sensors by at least max(``min_lag``, the period of either source). Home Assistant
+    compiles the statistics of every sensor in the same run, so a healthy sensor never
+    trails the others by a whole period.
+
+    Lag, not "no measured period in the window": every read starts at the bookmark,
+    which is the last uploaded complete quarter, so the read always holds that quarter -
+    and the rows a sensor that died after it still has in it. Judged by presence such a
+    sensor would never be silent, and with complete quarters nothing after the bookmark
+    would ever be sent again, without any repair."""
+    if not newest:
+        return set(sensors)
+    top, top_period = max(newest.values())
+    silent: set[str] = set()
+    for e in sensors:
+        if e not in newest:
+            silent.add(e)
+            continue
+        start, period = newest[e]
+        limit = max(min_lag.total_seconds(), period, top_period)
+        if top - start >= limit:
+            silent.add(e)
+    return silent
+
+
+# Daylight a sensor may trail by before it is silent whatever the threshold: the
+# largest threshold _silent_sensors applies is one hour (the hourly period).
+_MAX_LAG_S = 3600
+
+
+def _discount_night(
+    newest: dict[str, tuple[int, int]],
+    solar: set[str],
+    first: int,
+    step: int,
+    sun_down: Callable[[int], bool],
+) -> set[str]:
+    """Let solar sensors trail the others only by daylight: periods after a sensor's
+    newest measured one in which the sun was down are known zeros (spec 6.2 (a)), not
+    lag. A sleeping inverter at night is therefore not silent.
+
+    For each solar sensor the periods after its newest measured one (from ``first``,
+    the read's first period, when it has none) up to the newest of all selected sensors
+    are walked in ``step``; its newest is moved forward by the night periods among them,
+    so only the daylight periods count as lag. A sensor that stopped shortly before
+    sunset trails by those few daylight minutes, below the threshold. Rule (b) cannot
+    move it: it needs a measured period after the gap. ``newest`` is updated in place
+    for the sensors the night moved; those are returned. The walk stops after
+    _MAX_LAG_S of daylight - the sensor is silent anyway."""
+    if not newest:
+        return set()
+    top = max(s for s, _ in newest.values())
+    moved: set[str] = set()
+    for e in solar:
+        p = newest[e][0] + newest[e][1] if e in newest else first
+        daylight = 0          # seconds of daylight between the sensor's newest and top
+        saw_night = False
+        while p <= top and daylight < _MAX_LAG_S:
+            if sun_down(p):
+                saw_night = True
+            else:
+                daylight += step
+            p += step
+        if not saw_night or daylight >= _MAX_LAG_S:
+            continue
+        newest[e] = (top - daylight, newest[e][1] if e in newest else step)
+        moved.add(e)
+    return moved
+
+
+def _log_known_zero_gaps(
+    entity_id: str, rows: list, period_s: int, window: tuple[int, int],
+    anchor_start: int | None,
+) -> None:
+    """Log at debug every gap of an hour or more that rule (b) accepts as known zeros
+    (stats.known_zero_gaps) and that ends inside the window. An integration that
+    reports a stale, unchanged counter when it reconnects after an outage looks exactly
+    like an idle battery; the log makes such a run visible."""
+    if not _LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    for first, after in known_zero_gaps(rows, period_s, anchor_start=anchor_start):
+        if after < window[0]:
+            continue
+        _LOGGER.debug(
+            "Known zeros: %s has no statistics from %s to %s (%s) and its counter "
+            "stood still across the gap; the gap is sent as zero",
+            entity_id,
+            datetime.fromtimestamp(first, tz=timezone.utc).isoformat(),
+            datetime.fromtimestamp(after, tz=timezone.utc).isoformat(),
+            timedelta(seconds=after - first),
+        )
+
+
+_DAY_S = 86400
+_EPOCH_DATE = date(1970, 1, 1)
+
+
+def _daylight(observer: Observer, day: date) -> tuple[float, float] | None:
+    """[sunrise, sunset) of the UTC date ``day`` in UNIX seconds, or None when the sun
+    stays below the horizon all day.
+
+    astral (2.2, Home Assistant's) computes both as solar noon of the UTC date minus /
+    plus the hour angle, so the interval is contiguous around that noon and lies within
+    the day before and the day after. On a day without sunrise and sunset it raises
+    ValueError (whatever the message, which differs between Python versions), and the
+    apparent elevation decides: below the horizon at solar noon is polar night (None);
+    above it at solar midnight (noon + 12 h) is midnight sun, and the whole solar day
+    (noon +/- 12 h, plus a minute so neighbouring days overlap) is daylight. Near the
+    polar circle astral also raises on days on which the sun just grazes the horizon
+    (at 67.85 N in early December and January); then the two horizon crossings are
+    found by bisection on the elevation. astral 3.x re-anchors both events to the
+    requested date instead, which can put the sunset of a short night before the
+    sunrise; such a pair is not an interval and takes the elevation path too.
+
+    Sunrise and sunset refer to the upper limb with refraction (-0.833 deg), and the
+    fallback uses the apparent elevation and rounds outward: all a few minutes wider
+    than "elevation below 0 deg", so an error only makes fewer periods known zeros,
+    never more."""
+    try:
+        rise = astral_sun.sunrise(observer, day).timestamp()
+        set_ = astral_sun.sunset(observer, day).timestamp()
+        if rise < set_:
+            return (rise, set_)
+    except ValueError:
+        pass
+    noon = astral_sun.noon(observer, day)
+    half = _DAY_S / 2
+
+    def up(offset: float) -> bool:
+        return astral_sun.elevation(observer, noon + timedelta(seconds=offset)) > 0
+
+    if not up(0):
+        return None
+    mid = noon.timestamp()
+    if up(half):
+        return (mid - half - 60, mid + half + 60)
+
+    def crossing(down_at: float) -> float:
+        """Offset from noon of the horizon crossing between noon (up) and ``down_at``
+        (down), to within a minute, on the side of the night."""
+        inside, outside = 0.0, down_at
+        while abs(outside - inside) > 60:
+            m = (inside + outside) / 2
+            if up(m):
+                inside = m
+            else:
+                outside = m
+        return outside
+
+    return (mid + crossing(-half), mid + crossing(half))
+
+
+def _make_sun_down(
+    observer: Observer, period_s: int, cache: dict[int, tuple[float, float] | None]
+) -> Callable[[int], bool]:
+    """``sun_down(period_start)``: whether the sun is below the horizon in the middle of
+    the period. Daylight is computed once per UTC day (``cache``, keyed by days since
+    the epoch) - a year's backfill costs a few hundred astral calls, not one per period.
+    The middle of a period can only lie in the daylight of its own UTC day or of the
+    day before or after (see _daylight)."""
+    half = period_s // 2
+
+    def daylight(d: int) -> tuple[float, float] | None:
+        if d not in cache:
+            cache[d] = _daylight(observer, _EPOCH_DATE + timedelta(days=d))
+        return cache[d]
+
+    def sun_down(start: int) -> bool:
+        t = start + half
+        day = t // _DAY_S
+        for d in (day - 1, day, day + 1):
+            span = daylight(d)
+            if span is not None and span[0] <= t < span[1]:
+                return False
+        return True
+
+    return sun_down
+
 
 # How far back to backfill on first install
 # Polling rate: slow at rest, fast while a server-side computation is in progress (so the grade
@@ -92,6 +336,11 @@ _BACKFILL_DAYS = 365
 
 # Short-term statistics window — data older than this is only in LTS
 _SHORT_TERM_DAYS = 9
+
+# How far before a window the anchor read for a solar sensor's night run looks: longer
+# than the longest Swedish night outside the polar night. A run with no measured period
+# within it stays unproven (one dawn quarter after a polar night or a longer outage).
+_ANCHOR_LOOKBACK = timedelta(hours=36)
 
 # The API's length limit for battery_sources `source` ('ha:<platform>:<entity_id>').
 _SOC_SOURCE_MAX = 200
@@ -167,6 +416,12 @@ _FLEX_EMPTY_CYCLES_BEFORE_ISSUE = 3
 # without this repair, a filled-in field in Configure plus no data at all is
 # indistinguishable from the integration working.
 _ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
+# One selected sensor is silent (stopped measuring, see _silent_sensors) while the others
+# are not. Complete quarters need every selected sensor, so that one sensor stops the
+# whole upload - and when its stream has another sensor that delivers, the stream is not
+# empty and energy_stream_no_statistics never sees it. Same threshold and minimum
+# window as energy_empty below.
+_ISSUE_STATISTICS_MISSING = "statistics_missing"
 # A graded battery plant that has no state-of-charge sensor picked. The field is optional
 # and was only added in v0.40.0, so every earlier install has it empty without ever having
 # been asked. Fixable: the repair opens the picker (or records a no).
@@ -291,6 +546,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # false all-clear on the exact condition this repair exists to report.
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
+        self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
+        # Completeness of the latest regular read (quarters dropped as incomplete and the
+        # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
+        # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
+        # older history and must not overwrite the figures of the current upload.
+        self._last_completeness: dict = {"incomplete_quarters": 0, "entities": []}
         # Serverns batteristämpel, senast lästa (spec 2026-09-14 §4). Ägs av profil-GET:en
         # i båda pollarna - se _take_battery_state.
         self._battery_status: str | None = None
@@ -316,6 +577,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self.client = WoltaApiClient(session, base_url=WOLTA_API_BASE)
         self._store: Store = Store(hass, _STORE_VERSION, f"{DOMAIN}_{entry.entry_id}")
         self._state: dict = {}
+        # Daylight per UTC day for the sun computation (_sun_down_fn), keyed by the
+        # observer it was computed for so a moved home position starts afresh.
+        self._daylight_key: tuple | None = None
+        self._daylight_cache: dict[int, tuple[float, float] | None] = {}
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -510,6 +775,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             full_backfill = bookmark is None
 
             backfill_start = now - timedelta(days=_BACKFILL_DAYS)
+            # Deliberately NOT floored like _short_term_start(): SoC has no completeness
+            # logic, and its hourly/5-minute switch may differ from the flows' by up to 59 min.
             short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
             if bookmark is None:
                 rows = await self._backfill_rows(now)
@@ -686,54 +953,277 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Row-fetching helpers
     # ------------------------------------------------------------------
 
-    def _sum_stream(
+    def _stream_ids(self) -> dict[str, list[str]]:
+        """The selected statistic ids per stream, keyed by merge_streams' parameter
+        names, with the invert flag applied (_effective_stream): a snapshot taken on the
+        event loop, so the build in the executor reads no config entry."""
+        return {name: list(self._entity_map[self._effective_stream(name)])
+                for name in self._entity_map}
+
+    async def _build_rows(
+        self, now: datetime, sources: list[_Source], external: set[datetime]
+    ) -> tuple[_Built, list[dict]]:
+        """Anchor the solar sensors (statistics reads, on the loop), then build the
+        streams, judge completeness and merge the upload rows in the executor.
+
+        The build is pure but CPU-heavy: a backfill judges a year of hourly and nine
+        days of 5-minute periods for every sensor, plus the sun's position per day. Off
+        the event loop it cannot stall Home Assistant. What reads Home Assistant - the
+        stream ids under the invert flag and the home position for the sun - is taken
+        here, on the loop, and handed in."""
+        sources = await self._anchor_solar(now, sources)
+        ids = self._stream_ids()
+        sun_down = ({_PERIOD_S[src.agg_fn]: self._sun_down_fn(_PERIOD_S[src.agg_fn])
+                     for src in sources} if ids["solar"] else {})
+
+        def job() -> tuple[_Built, list[dict]]:
+            built = self._build_streams(*sources, ids=ids, sun_down=sun_down)
+            return built, merge_streams(
+                **built.streams, external=external, complete=built.complete)
+
+        return await self.hass.async_add_executor_job(job)
+
+    def _build_streams(
         self,
-        raw_data: dict,
-        stream: str,
-        agg_fn,
-    ) -> dict:
-        """Aggregate and sum all entity rows for one stream.
+        *sources: _Source,
+        ids: dict[str, list[str]] | None = None,
+        sun_down: dict[int, Callable[[int], bool]] | None = None,
+    ) -> _Built:
+        """Build the five per-quarter streams and decide which quarters are complete.
 
-        Args:
-            raw_data: mapping of statistic_id → rows (from async_fetch_change)
-            stream:   stream name key in _entity_map (e.g. "solar")
-            agg_fn:   aggregation function — split_hour_to_quarters or aggregate_5min_to_15min
+        Values: each source contributes only the quarters inside its own window (the
+        windows do not overlap) - backfill passes hourly first and 5-minute second.
+        The streams are keyed by merge_streams' parameter names so the callers hand
+        them over with ** while _empty_streams inspects the same dicts - one
+        build, no chance of judging different data than what is uploaded.
 
-        Returns:
-            Summed per-quarter dict for the stream.
-        """
-        per_entity = [
-            agg_fn(raw_data.get(entity_id) or [])
-            for entity_id in self._entity_map[self._effective_stream(stream)]
-        ]
-        return sum_quarter_dicts(per_entity)
+        Completeness: a quarter is complete when EVERY selected sensor measured it
+        cleanly (stats.clean_quarters) in the source whose window holds the quarter.
+        A stream missing the quarter would otherwise be filled with 0.0, a sum over
+        several sensors would be partial, and the first period after a gap carries the
+        whole gap. Windows of the sources never overlap (callers split at
+        short_term_start), so each quarter is judged by exactly one source.
 
-    def _build_streams(self, *sources) -> dict[str, dict]:
-        """Build all five per-quarter stream dicts from (raw_data, agg_fn) sources.
+        Known zeros (spec 6.2): a counter that stood still across a gap counts for every
+        sensor; for the solar sensors a missing period while the sun is down counts too
+        (_sun_down_fn), and such periods are not lag either (_discount_night). The
+        values are untouched - merge_streams emits every complete quarter and fills an
+        absent value with 0.0, also when every battery sensor is a known zero.
 
-        Sources are applied in order with dict-merge precedence (later wins on
-        overlapping quarters) - backfill passes LTS first and 5-min second, exactly
-        the precedence the inlined version had. Returning the streams as a mapping
-        keyed by merge_streams' parameter names lets the callers hand them over
-        with ** while _note_stream_emptiness inspects the same dicts - one build,
-        two consumers, no chance of judging different data than what is uploaded.
-        """
+        ``ids`` (_stream_ids) and ``sun_down`` (per statistics period, _sun_down_fn)
+        are computed here when not given; _build_rows hands them in so that this runs in
+        the executor without touching Home Assistant."""
+        if ids is None:
+            ids = self._stream_ids()
         streams: dict[str, dict] = {}
-        for name in self._entity_map:
+        for name, stream_ids in ids.items():
             merged: dict = {}
-            for raw_data, agg_fn in sources:
-                merged.update(self._sum_stream(raw_data, name, agg_fn))
+            for src in sources:
+                # Only the source's own window: the early-read period before it makes a
+                # partial quarter that must not override the previous source's value.
+                summed = sum_quarter_dicts(
+                    [src.agg_fn(src.raw.get(e) or []) for e in stream_ids])
+                merged.update({q: v for q, v in summed.items() if src.start <= q < src.end})
             streams[name] = merged
-        return streams
 
-    async def _note_stream_emptiness(
-        self, streams: dict[str, dict], window: timedelta
-    ) -> None:
-        """Track configured streams that read EMPTY; raise the repair once the
-        streak holds (mirrors _note_flex_bad_cycle). Since stats.py stopped
-        fabricating 0.0 buckets, a sensor with ``state_class: measurement`` yields
-        an empty stream - and an empty stream uploads nothing, which looks exactly
-        like the integration working. This is the visibility half of that fix.
+        sensors = {e for stream_ids in ids.values() for e in stream_ids}
+        # The solar stream is not swapped by the invert flag.
+        solar = set(ids["solar"])
+        periods = {_PERIOD_S[src.agg_fn] for src in sources}
+        if sun_down is None:
+            sun_down = {p: self._sun_down_fn(p) for p in periods} if solar else {}
+        complete: set[datetime] = set()
+        blame = {e: 0 for e in sensors}
+        # Newest measured period per sensor over the whole read, with its source's period.
+        newest: dict[str, tuple[int, int]] = {}
+        candidates: set[datetime] = set()
+        for src in sources:
+            period = _PERIOD_S[src.agg_fn]
+            in_window = lambda q, s=src: s.start <= q < s.end  # noqa: E731
+            window = (int(src.start.timestamp()), int(src.end.timestamp()))
+            clean = {}
+            for e in sensors:
+                rows = src.raw.get(e) or []
+                starts = measured_starts(rows, period)
+                if starts and (e not in newest or max(starts) >= newest[e][0]):
+                    newest[e] = (max(starts), period)
+                clean[e] = {q for q in clean_quarters(
+                    rows, period, window=window,
+                    sun_down=sun_down[period] if e in solar else None,
+                    anchor_start=src.anchors.get(e)) if in_window(q)}
+                _log_known_zero_gaps(e, rows, period, window, src.anchors.get(e))
+            src_candidates = {q for d in streams.values() for q in d if in_window(q)}
+            candidates |= src_candidates
+            if sensors:
+                src_complete = set.intersection(*clean.values())
+            else:
+                src_complete = set()
+            complete |= src_complete
+            for e in sensors:
+                blame[e] += len(src_candidates - clean[e])
+        asleep: set[str] = set()
+        if solar and sources:
+            step = min(periods)
+            first = min(int(_read_start(src.start, _PERIOD_S[src.agg_fn]).timestamp())
+                        for src in sources)
+            asleep = _discount_night(newest, solar, first, step, sun_down[step])
+        silent = _silent_sensors(sensors, newest, _ENERGY_EMPTY_MIN_WINDOW)
+        incomplete = len(candidates - complete)
+        return _Built(streams, complete, silent, incomplete, blame, asleep - silent)
+
+    def _sun_down_fn(self, period_s: int) -> Callable[[int], bool]:
+        """``sun_down(period_start)`` for statistics periods of ``period_s`` at Home
+        Assistant's position (helpers.sun.get_astral_observer): true when the sun is
+        below the horizon in the middle of the period. Daylight is cached per UTC day
+        on the coordinator, so later cycles reuse the backfill's days."""
+        observer = get_astral_observer(self.hass)
+        key = (observer.latitude, observer.longitude, observer.elevation)
+        if key != self._daylight_key:
+            self._daylight_key, self._daylight_cache = key, {}
+        return _make_sun_down(observer, period_s, self._daylight_cache)
+
+    async def _anchor_solar(self, now: datetime, sources: list[_Source]) -> list[_Source]:
+        """The sources with ``anchors`` for the solar sensors whose night run reaches
+        back before the rows.
+
+        The first measured period after a night run is clean only when every period
+        back to the sensor's previous measured one is a known zero (clean_quarters).
+        Every read starts one period before its window, so when a window starts at night
+        the previous measured period - the evening before - is not in the rows. For each
+        solar sensor whose rows start later than the read with nothing but night in
+        between, the anchor is taken from an earlier source of the same build, or else
+        from one extra statistics read for those sensors only, at most
+        _ANCHOR_LOOKBACK before the window (5-minute statistics within the short-term
+        window, hourly beyond it - an hour's start is the earlier, stricter anchor).
+        Nothing found: no anchor, and the dawn after the run is not clean."""
+        solar = sorted(set(self._entity_map["solar"]) & self._statistic_ids())
+        if not solar:
+            return sources
+        out: list[_Source] = []
+        for src in sources:
+            period = _PERIOD_S[src.agg_fn]
+            first = int(_read_start(src.start, period).timestamp())
+            sun_down = self._sun_down_fn(period)
+            need = []
+            for e in solar:
+                m = measured_starts(src.raw.get(e) or [], period)
+                if m and min(m) > first and all(
+                        sun_down(p) for p in range(first, min(m), period)):
+                    need.append(e)
+            anchors: dict[str, int] = {}
+            for e in need:
+                earlier = [s for prev in out
+                           for s in measured_starts(prev.raw.get(e) or [],
+                                                    _PERIOD_S[prev.agg_fn])
+                           if s < first]
+                if earlier:
+                    anchors[e] = max(earlier)
+            missing = {e for e in need if e not in anchors}
+            if missing:
+                lookback = src.start - _ANCHOR_LOOKBACK
+                five = period == 300 and lookback >= _short_term_start(now)
+                read_period = 300 if five else 3600
+                raw = await async_fetch_change(
+                    self.hass, missing, _floor(lookback, read_period),
+                    datetime.fromtimestamp(first, tz=timezone.utc),
+                    period="5minute" if five else "hour")
+                for e in missing:
+                    found = [s for s in measured_starts(raw.get(e) or [], read_period)
+                             if s < first]
+                    if found:
+                        anchors[e] = max(found)
+            out.append(replace(src, anchors=anchors) if anchors else src)
+        return out
+
+    def _remember_completeness(self, built: _Built) -> None:
+        """Keep the regular read's completeness for the diagnostics: the number of
+        quarters dropped as incomplete and the (at most three) sensors that made the
+        most of them incomplete."""
+        ranked = sorted(built.blame.items(), key=lambda kv: (-kv[1], kv[0]))
+        self._last_completeness = {
+            "incomplete_quarters": built.incomplete,
+            "entities": [e for e, n in ranked if n > 0][:3],
+        }
+
+    def _empty_streams(self, built: _Built) -> list[str]:
+        """Configured streams that count as empty: no quarter at all, or every selected
+        sensor of the stream silent (_silent_sensors). The second leg catches a stream
+        whose only sensor died after it had worked - the bookmark quarter keeps such a
+        stream non-empty in every read. A stream without configured sensors is never
+        empty: solar-less plants are a normal configuration. Nor is a stream whose
+        sensors are all asleep (_asleep_streams)."""
+        out = []
+        for name, data in built.streams.items():
+            entities = set(self._entity_map[self._effective_stream(name)])
+            if not entities or entities <= built.asleep:
+                continue
+            if not data or entities <= built.silent:
+                out.append(name)
+        return out
+
+    def _asleep_streams(self, built: _Built) -> list[str]:
+        """Configured streams without a value in the read whose sensors are all solar
+        sensors that trail only by night (_discount_night) - an inverter that sleeps
+        from sunset, or through a polar night. Such a read says nothing about the
+        sensors: it neither counts toward energy_empty nor clears it."""
+        return [name for name, data in built.streams.items()
+                if (entities := set(self._entity_map[self._effective_stream(name)]))
+                and not data and entities <= built.asleep]
+
+    async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
+        """Track selected sensors that are silent (_silent_sensors: no measured period,
+        or trailing the others) while another selected sensor is not, and raise
+        statistics_missing after _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE cycles in a row.
+        Complete quarters need every selected sensor, so one silent sensor stops the
+        upload - the owner must learn why.
+
+        A sensor whose whole stream counts as empty is energy_empty's case (it explains
+        the state_class pitfall) and is left out here. Windows below
+        _ENERGY_EMPTY_MIN_WINDOW, and windows in which every selected sensor is silent,
+        are neither counted nor cleared. Nor is a solar sensor asleep in the read
+        (_discount_night: it trails only by night) - its streak is held, so a dead solar
+        sensor is still caught in winter, when no three windows in a row see daylight."""
+        if window < _ENERGY_EMPTY_MIN_WINDOW:
+            return
+        empty_streams = {
+            e for name in self._empty_streams(built)
+            for e in self._entity_map[self._effective_stream(name)]
+        }
+        if len(built.silent) >= len(self._statistic_ids()):
+            # Everything is silent (Home Assistant down, or the recorder idle): that says
+            # nothing about any single sensor, so neither count nor clear.
+            return
+        silent = built.silent - empty_streams
+        prev: dict = self._state.get("silent_sensor_cycles") or {}
+        held = {e: int(n) for e, n in prev.items() if e in built.asleep}
+        if not silent and not held:
+            if "silent_sensor_cycles" in self._state:
+                self._state.pop("silent_sensor_cycles")
+                await self._store.async_save(self._state)
+                ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
+            return
+        cycles = {**held, **{e: int(prev.get(e, 0)) + 1 for e in silent}}
+        self._state["silent_sensor_cycles"] = cycles
+        await self._store.async_save(self._state)
+        due = sorted(e for e, n in cycles.items() if n >= _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE)
+        if not due:
+            # A raised warning may name a sensor that reads again while another has only
+            # just gone silent - it must not stand until the new streak is due.
+            ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
+            return
+        ir.async_create_issue(
+            self.hass, DOMAIN, self._stats_issue_id, is_fixable=False,
+            severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_STATISTICS_MISSING,
+            translation_placeholders={"entities": ", ".join(due)})
+
+    async def _note_stream_emptiness(self, built: _Built, window: timedelta) -> None:
+        """Track configured streams that count as EMPTY (_empty_streams); raise the
+        repair once the streak holds (mirrors _note_flex_bad_cycle). Since stats.py
+        stopped fabricating 0.0 buckets, a sensor with ``state_class: measurement``
+        yields an empty stream - and an empty stream uploads nothing, which looks
+        exactly like the integration working. This is the visibility half of that fix.
+        A stream whose sensors all died after working counts too: complete quarters
+        stop the upload just the same.
 
         Windows below _ENERGY_EMPTY_MIN_WINDOW are not judged at all: neither
         counted (fast-poll windows legitimately hold no compiled rows and would
@@ -746,12 +1236,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if window < _ENERGY_EMPTY_MIN_WINDOW:
             return
 
-        empty = [
-            name for name, data in streams.items()
-            if self._entity_map[self._effective_stream(name)] and not data
-        ]
+        empty = self._empty_streams(built)
         if not empty:
-            await self._clear_energy_empty_streak()
+            if not self._asleep_streams(built):
+                await self._clear_energy_empty_streak()
             return
 
         streak = int(self._state.get("energy_empty_cycles", 0)) + 1
@@ -1115,35 +1603,38 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     async def _backfill_rows(self, now: datetime) -> list[dict]:
         """Backfill up to 12 months: LTS (÷4) for old data + 5-min for recent."""
         start = now - timedelta(days=_BACKFILL_DAYS)
-        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        short_term_start = _short_term_start(now)
 
         external = await self._external_quarters(start, now)
 
-        # Fetch hourly LTS for the long window (start → short_term_start)
+        # Fetch hourly LTS for the long window (start → short_term_start), one period
+        # early so the window's first hour can be judged against the one before it
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            _read_start(start, 3600),
             short_term_start,
             period="hour",
         )
 
-        # Fetch 5-min short-term for the recent window
+        # Fetch 5-min short-term for the recent window, also one period early
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            short_term_start,
+            _read_start(short_term_start, 300),
             now,
             period="5minute",
         )
 
-        # Aggregate and sum per stream (short-term takes precedence on overlap via dict merge)
-        streams = self._build_streams(
-            (lts_data, split_hour_to_quarters),
-            (short_data, aggregate_5min_to_15min),
-        )
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        # Aggregate and sum per stream; each source contributes only its own window
+        built, rows = await self._build_rows(now, [
+            _Source(lts_data, split_hour_to_quarters, start, short_term_start),
+            _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
+        ], external)
+        await self._note_stream_emptiness(built, window=now - start)
+        self._remember_completeness(built)
+        await self._note_silent_sensors(built, window=now - start)
+        return rows
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
@@ -1151,13 +1642,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         lts_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            _read_start(start, 3600),
             now,
             period="hour",
         )
-        streams = self._build_streams((lts_data, split_hour_to_quarters))
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        built, rows = await self._build_rows(
+            now, [_Source(lts_data, split_hour_to_quarters, start, now)], external)
+        await self._note_stream_emptiness(built, window=now - start)
+        self._remember_completeness(built)
+        await self._note_silent_sensors(built, window=now - start)
+        return rows
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
@@ -1165,13 +1659,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         short_data = await async_fetch_change(
             self.hass,
             self._statistic_ids(),
-            start,
+            _read_start(start, 300),
             now,
             period="5minute",
         )
-        streams = self._build_streams((short_data, aggregate_5min_to_15min))
-        await self._note_stream_emptiness(streams, window=now - start)
-        return merge_streams(**streams, external=external)
+        built, rows = await self._build_rows(
+            now, [_Source(short_data, aggregate_5min_to_15min, start, now)], external)
+        await self._note_stream_emptiness(built, window=now - start)
+        self._remember_completeness(built)
+        await self._note_silent_sensors(built, window=now - start)
+        return rows
 
     async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:
         """Flow rows for a coverage gap [gap.start, gap.end) – the history the server lacks
@@ -1182,24 +1679,28 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         filtered to intervals that END by gap.end: a gap ending mid-hour would otherwise
         send the hour's later quarters, which the server already holds.
 
-        Deliberately NO _note_stream_emptiness: an empty gap is the normal outcome on an
-        upgrade (the server already has everything HA holds) and must neither count as a
-        broken sensor nor clear a genuine streak."""
-        short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
+        Deliberately NO _note_stream_emptiness or _note_silent_sensors: an empty gap is
+        the normal outcome on an upgrade (the server already has everything HA holds) and
+        must neither count as a broken sensor nor clear a genuine streak. Nor
+        _remember_completeness: the diagnostics describe the regular read."""
+        short_term_start = _short_term_start(now)
         external = await self._external_quarters(gap.start, gap.end)
-        sources = []
+        sources: list[_Source] = []
         lts_end = min(gap.end, short_term_start)
         if lts_end > gap.start:
             lts_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), gap.start, lts_end, period="hour")
-            sources.append((lts_data, split_hour_to_quarters))
+                self.hass, self._statistic_ids(), _read_start(gap.start, 3600), lts_end,
+                period="hour")
+            sources.append(_Source(lts_data, split_hour_to_quarters, gap.start, lts_end))
         five_start = max(gap.start, short_term_start)
         if gap.end > five_start:
             short_data = await async_fetch_change(
-                self.hass, self._statistic_ids(), five_start, gap.end, period="5minute")
-            sources.append((short_data, aggregate_5min_to_15min))
-        streams = self._build_streams(*sources)
-        return coverage.within(merge_streams(**streams, external=external), gap.end)
+                self.hass, self._statistic_ids(), _read_start(five_start, 300), gap.end,
+                period="5minute")
+            sources.append(
+                _Source(short_data, aggregate_5min_to_15min, five_start, gap.end))
+        _built, rows = await self._build_rows(now, sources, external)
+        return coverage.within(rows, gap.end)
 
     async def _remember_coverage(self, token_fp: str, since: datetime | None) -> None:
         """Persist the coverage memo – only on change (one Store write per actual change,
@@ -1245,6 +1746,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not rows:
             await self._remember_coverage(token_fp, since)
             return
+        # Deliberately NOT floored like _short_term_start(): SoC has no completeness logic,
+        # and its hourly/5-minute switch may differ from the flows' by up to 59 minutes.
         short_term_start = now - timedelta(days=_SHORT_TERM_DAYS)
         soc, soc_ok = await self._soc_state(
             gap.start, gap.end,
