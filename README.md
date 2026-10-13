@@ -25,9 +25,11 @@ night), and for any sensor whose counter has not moved across the gap. If a sele
 sensor stops producing statistics altogether, uploading pauses
 and a repair names the sensor. Periods when Home Assistant itself was not running are
 still sent (Home Assistant records them as zero), and Wolta's server sets them aside.
-A reconfiguration does not re-send your history. The server fixes what it already stores
-(see [Correcting stored history](#correcting-stored-history)); quarters the server holds
-that are now incomplete keep their earlier values.
+A reconfiguration does not upload your whole history again: the integration sends only
+the changed sensors' values for the affected range, and the server corrects what it
+already stores (see [Correcting stored history](#correcting-stored-history)). Inside that
+range, gaps of up to 6 hours where the new sensor has no complete statistics are left
+empty; longer silences, and everything outside the range, keep their earlier values.
 
 ## Sensors
 
