@@ -3525,6 +3525,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     if k not in (CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)}
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
+    def direction_change_pending(self) -> bool:
+        """Whether a change of the battery direction has not reached the stored rows yet:
+        a direction job exists, or the desired intervals differ from the applied ones.
+        The direction repair refuses a second flip meanwhile - computed from a grade of
+        the old direction, it would flip the same period back."""
+        job = self._state.get("replacement_job")
+        if isinstance(job, dict) and job.get("type") == "direction":
+            return True
+        return bool(intervals.sym_diff(self._desired_intervals(), self._applied_intervals()))
+
     def _direction_flip_pending(self, block: dict) -> bool:
         """True while a flip has not reached the grade yet: a direction job still runs, or
         the owner's flip is newer than the server's direction data. A missing or

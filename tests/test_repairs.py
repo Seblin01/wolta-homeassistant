@@ -619,6 +619,7 @@ def _direction_entry(invert):
     entry.data = {CONF_INVERT_BATTERY: invert} if invert is not None else {}
     coordinator = MagicMock()
     coordinator.async_request_refresh = AsyncMock()
+    coordinator.direction_change_pending = MagicMock(return_value=False)
     entry.runtime_data = coordinator
     return entry, coordinator
 
@@ -811,3 +812,40 @@ async def test_create_fix_flow_passes_swap_intervals_not_as_a_placeholder(hass: 
     await flow.async_step_flip({})
     new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
     assert new_data[CONF_INVERT_INTERVALS] == _SWAP_SINCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_input", [None, {}])
+async def test_direction_flip_is_refused_while_a_direction_change_is_pending(
+    hass: HomeAssistant, user_input
+):
+    """A direction job exists or desired ≠ applied: the stored rows do not show the last
+    change yet, and a flip computed from a grade of the old direction would swap the
+    same period back. The flip aborts with a reason and writes nothing."""
+    entry, coordinator = _direction_entry(False)
+    entry.data = {CONF_INVERT_BATTERY: False, CONF_INVERT_INTERVALS: []}
+    coordinator.direction_change_pending.return_value = True
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = BatteryDirectionRepairFlow(entry, {}, _SWAP_SINCE)
+    flow.hass = hass
+    flow.issue_id = "battery_direction_e1"
+
+    result = await flow.async_step_flip(user_input)
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "direction_pending"
+    hass.config_entries.async_update_entry.assert_not_called()
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("lang", ["strings", "en", "sv"])
+def test_direction_pending_abort_is_translated_for_every_fixable_key(lang):
+    import json
+    from pathlib import Path
+
+    base = Path(__file__).resolve().parents[1] / "custom_components" / "wolta"
+    path = base / "strings.json" if lang == "strings" else base / "translations" / f"{lang}.json"
+    issues = json.loads(path.read_text(encoding="utf-8"))["issues"]
+    for key in ("battery_direction_all", "battery_direction_partial",
+                "battery_direction_since_flip", "battery_direction_ended_flip"):
+        assert issues[key]["fix_flow"]["abort"]["direction_pending"]

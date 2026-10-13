@@ -179,7 +179,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort.",
+          "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och Wolta har räknat om, senast nästa dag. Finns varningen kvar då kan du öppna den igen."
         }
       }
     },
@@ -201,7 +202,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort.",
+          "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och Wolta har räknat om, senast nästa dag. Finns varningen kvar då kan du öppna den igen."
         }
       }
     },
@@ -231,7 +233,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort.",
+          "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och Wolta har räknat om, senast nästa dag. Finns varningen kvar då kan du öppna den igen."
         }
       }
     },
@@ -253,7 +256,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort."
+          "entry_not_found": "Den Wolta-integration som den här reparationen hörde till har tagits bort.",
+          "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och Wolta har räknat om, senast nästa dag. Finns varningen kvar då kan du öppna den igen."
         }
       }
     },

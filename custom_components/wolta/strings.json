@@ -179,7 +179,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },
@@ -201,7 +202,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },
@@ -231,7 +233,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },
@@ -253,7 +256,8 @@
           }
         },
         "abort": {
-          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed.",
+          "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and Wolta has recalculated, by the next day at the latest. If the warning is still there then, open it again."
         }
       }
     },

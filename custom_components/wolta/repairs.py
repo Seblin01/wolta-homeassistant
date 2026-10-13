@@ -344,9 +344,19 @@ class BatteryDirectionRepairFlow(RepairsFlow):
             step_id="init", menu_options=["flip", "ignore"],
             description_placeholders=self._placeholders)
 
+    def _change_pending(self) -> bool:
+        """A direction change is still on its way to the stored rows (a direction job,
+        or desired ≠ applied). A flip now would be judged from a grade of the old
+        direction and swap the same period back."""
+        coordinator = getattr(self._entry, "runtime_data", None)
+        pending = getattr(coordinator, "direction_change_pending", None)
+        return bool(pending()) if callable(pending) else False
+
     async def async_step_flip(self, user_input=None) -> data_entry_flow.FlowResult:
         if self._entry is None:
             return self.async_abort(reason="entry_not_found")
+        if self._change_pending():
+            return self.async_abort(reason="direction_pending")
         if user_input is None:
             return self.async_show_form(
                 step_id="flip", data_schema=vol.Schema({}),

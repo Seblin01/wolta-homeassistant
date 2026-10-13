@@ -1083,6 +1083,26 @@ async def test_direction_final_commit_applies_only_when_no_row_passed_its_window
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("desired,applied,job,pending", [
+    ([[FROM, None]], [[FROM, None]], None, False),
+    ([[FROM, None]], [], None, True),
+    ([], [], {"type": "direction", "target": [], "replacement": None,
+              "done_windows": [], "retry_at": None}, True),
+    ([], [], {"type": "entities", "target": "X", "replacement": None,
+              "done_windows": [], "retry_at": None}, False),
+])
+async def test_direction_change_pending(
+    hass: HomeAssistant, mock_entry, desired, applied, job, pending
+):
+    """What the direction repair asks before it flips: a direction job, or desired
+    against applied."""
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=desired, applied=applied, job=job)
+    assert coordinator.direction_change_pending() is pending
+
+
+@pytest.mark.asyncio
 async def test_unchanged_direction_starts_no_job(hass: HomeAssistant, mock_entry):
     client = _direction_client()
     coordinator, _seen = await _direction_coordinator(
