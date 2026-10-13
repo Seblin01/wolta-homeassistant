@@ -101,8 +101,8 @@ def normalize(intervals: list[Interval]) -> list[Interval]:
     return [_out(p) for p in _internal(intervals)]
 
 
-def sym_diff(a: list[Interval], b: list[Interval]) -> list[Interval]:
-    """The instants in exactly one of the two interval sets."""
+def _sweep(a: list[Interval], b: list[Interval], keep) -> list[Interval]:
+    """The instants where keep(in_a, in_b) holds."""
     na, nb = _internal(a), _internal(b)
     points = sorted({p for pair in na + nb for p in pair})
     pieces: list[_Pair] = []
@@ -110,9 +110,19 @@ def sym_diff(a: list[Interval], b: list[Interval]) -> list[Interval]:
         # Between two consecutive boundaries each set is wholly in or wholly out.
         in_a = any(s <= lo and hi <= e for s, e in na)
         in_b = any(s <= lo and hi <= e for s, e in nb)
-        if in_a != in_b:
+        if keep(in_a, in_b):
             pieces.append((lo, hi))
     return [_out(p) for p in _merge(pieces)]
+
+
+def sym_diff(a: list[Interval], b: list[Interval]) -> list[Interval]:
+    """The instants in exactly one of the two interval sets."""
+    return _sweep(a, b, lambda in_a, in_b: in_a != in_b)
+
+
+def difference(a: list[Interval], b: list[Interval]) -> list[Interval]:
+    """The instants in a but not in b."""
+    return _sweep(a, b, lambda in_a, in_b: in_a and not in_b)
 
 
 def contains(intervals: list[Interval], ts: datetime) -> bool:

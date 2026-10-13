@@ -734,3 +734,80 @@ async def test_direction_flip_stamps_flipped_at(hass: HomeAssistant):
     stamp = dt_util.parse_datetime(new_data[CONF_DIRECTION_FLIPPED_AT])
     assert stamp is not None and stamp.tzinfo is not None
     assert abs(datetime.now(timezone.utc) - stamp) < timedelta(minutes=1)
+
+
+# ---------------------------------------------------------------------------
+# swap_intervals (server spec §10.1): the fix flips exactly the server's intervals
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta.const import CONF_INVERT_INTERVALS  # noqa: E402
+
+_SWAP_SINCE = [["2026-09-28T13:00:00+00:00", None]]
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_writes_desired_sym_diff_swap_intervals(hass: HomeAssistant):
+    """Desired [] Δ [[T, None]] = [[T, None]]: only the period is flipped, and the legacy
+    flag stays off (the whole history is not inverted)."""
+    entry, coordinator = _direction_entry(False)
+    entry.data = {CONF_INVERT_BATTERY: False, CONF_INVERT_INTERVALS: []}
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = BatteryDirectionRepairFlow(entry, {}, _SWAP_SINCE)
+    flow.hass = hass
+    flow.issue_id = "battery_direction_e1"
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_INTERVALS] == [["2026-09-28T13:00:00+00:00", None]]
+    assert new_data[CONF_INVERT_BATTERY] is False
+    coordinator.async_request_refresh.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_with_everything_inverted_keeps_the_time_before(
+    hass: HomeAssistant
+):
+    """Desired [[None, None]] Δ [[T, None]] = [[None, T]]: the period after T flips back."""
+    entry, _c = _direction_entry(True)
+    entry.data = {CONF_INVERT_BATTERY: True, CONF_INVERT_INTERVALS: [[None, None]]}
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = BatteryDirectionRepairFlow(entry, {}, _SWAP_SINCE)
+    flow.hass = hass
+    flow.issue_id = "battery_direction_e1"
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_INTERVALS] == [[None, "2026-09-28T13:00:00+00:00"]]
+    assert new_data[CONF_INVERT_BATTERY] is False
+
+
+@pytest.mark.asyncio
+async def test_direction_flip_without_swap_intervals_flips_the_whole_history(
+    hass: HomeAssistant
+):
+    """An issue raised by an older version has no swap_intervals: the v0.43 rule."""
+    entry, _c = _direction_entry(False)
+    entry.data = {CONF_INVERT_BATTERY: False, CONF_INVERT_INTERVALS: []}
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = _direction_flow(hass, entry)
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_INTERVALS] == [[None, None]]
+    assert new_data[CONF_INVERT_BATTERY] is True
+
+
+@pytest.mark.asyncio
+async def test_create_fix_flow_passes_swap_intervals_not_as_a_placeholder(hass: HomeAssistant):
+    entry, _c = _direction_entry(False)
+    entry.data = {CONF_INVERT_BATTERY: False, CONF_INVERT_INTERVALS: []}
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = await async_create_fix_flow(hass, "battery_direction_e1", {
+        "entry_id": "e1", "form": "since", "swap_intervals": _SWAP_SINCE,
+        "swap_period": "2026-09-28 15:00 → …"})
+    flow.hass = hass
+    flow.issue_id = "battery_direction_e1"
+    menu = await flow.async_step_init()
+    assert "swap_intervals" not in menu["description_placeholders"]
+    assert menu["description_placeholders"]["swap_period"] == "2026-09-28 15:00 → …"
+    await flow.async_step_flip({})
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_INVERT_INTERVALS] == _SWAP_SINCE

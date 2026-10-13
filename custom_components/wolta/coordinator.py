@@ -176,6 +176,52 @@ class _ReplacementType:
     rows_for: Callable[[dict, dict, datetime], Awaitable[list[dict] | None]] | None = None
 
 
+def desired_invert_intervals(data) -> list[intervals.Interval]:
+    """The battery inversion the owner wants, read from entry data. Before the
+    coordinator's one-time migration has run, the legacy flag stands in for it."""
+    if CONF_INVERT_INTERVALS in data:
+        return intervals.parse(data.get(CONF_INVERT_INTERVALS))
+    return [(None, None)] if data.get(CONF_INVERT_BATTERY) else []
+
+
+def with_desired_intervals(data, desired: list[intervals.Interval]) -> dict:
+    """Entry data with the desired intervals written, mirroring CONF_INVERT_BATTERY as
+    "everything inverted" so a downgrade reads the right global flag in the common case.
+    The one place that writes the pair: the coordinator, the options flow and the
+    repair flow all go through it."""
+    stored = intervals.dump(intervals.normalize(desired))
+    return {
+        **data,
+        CONF_INVERT_INTERVALS: stored,
+        CONF_INVERT_BATTERY: stored == [[None, None]],
+    }
+
+
+def direction_swap_intervals(block: dict) -> list[intervals.Interval]:
+    """The intervals the battery_direction repair flips (server spec §10.1).
+
+    A list `swap_intervals` of {"from", "to"} (ISO UTC or null for open) is taken as it
+    is. Without the key (an older backend) the v0.43 rule holds: "all" and "partial" flip
+    the whole history, the other forms nothing. Anything malformed flips nothing."""
+    if "swap_intervals" not in block:
+        return [(None, None)] if block.get("form") in _BATTERY_DIRECTION_FIXABLE else []
+    raw = block.get("swap_intervals")
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        return []
+    return intervals.normalize(
+        intervals.parse([[item.get("from"), item.get("to")] for item in raw])
+    )
+
+
+def _floor_hour(t: datetime) -> datetime:
+    return t.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _ceil_hour(t: datetime) -> datetime:
+    floor = _floor_hour(t)
+    return floor if floor == t else floor + timedelta(hours=1)
+
+
 def _silent_sensors(
     sensors: set[str], newest: dict[str, tuple[int, int]], min_lag: timedelta
 ) -> set[str]:
@@ -430,13 +476,19 @@ _ISSUE_ENERGY_BALANCE = "energy_balance"
 _ENERGY_BALANCE_CAUSES = ("solar_low", "import_low", "source_missing", "unclear")
 # Laddning och urladdning omkastade enligt batteriets laddningsnivå. Servern avgör
 # (battery_direction.state == "reversed", tre-dygnsgolvet ligger där) - vi räknar aldrig om något
-# här. Fixbar bara när en vändning av HELA historiken är rätt: formen "all" (laddningsnivån täcker
-# betygsfönstret, allt omkastat) och "partial" (allt som kunnat kontrolleras är omkastat; texten
-# säger att tiden före är okänd). "since"/"ended" har rätt data före eller efter - en vändning av
-# hela historiken hade gjort den delen fel, så de får bara text.
+# här. The repair is fixable when the block carries a non-empty `swap_intervals` (the
+# server placed the boundaries on the hour, spec §10): the fix flips exactly those
+# intervals, whatever the form. Without the key (an older backend) the v0.43 rule holds:
+# only "all" and "partial" are fixable, by flipping the whole history.
 _ISSUE_BATTERY_DIRECTION = "battery_direction"
 _BATTERY_DIRECTION_FORMS = ("all", "partial", "since", "ended")
 _BATTERY_DIRECTION_FIXABLE = ("all", "partial")
+# Forms whose own translation key carries a description, not a fix flow (hassfest allows
+# only one of the two per key): when fixable they use "<key>_flip"; "all"/"partial" use
+# _ISSUE_BATTERY_DIRECTION_NO_FIX when the server found no boundary to flip.
+_BATTERY_DIRECTION_TEXT_FORMS = ("since", "ended")
+_ISSUE_BATTERY_DIRECTION_NO_FIX = "battery_direction_no_fix"
+_QUARTER = timedelta(minutes=15)
 # Fallback for the server's detect_min_days when the profile doesn't carry it (older
 # backend). Shared by WoltaData's default and the profile read so the sensor never
 # reports a different minimum than the evaluation assumed.
@@ -633,7 +685,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._daylight_key: tuple | None = None
         self._daylight_cache: dict[int, tuple[float, float] | None] = {}
         # Replacement job types by the job's "type" (see _run_replacement_job).
-        self._replacement_types: dict[str, _ReplacementType] = {}
+        self._replacement_types: dict[str, _ReplacementType] = {
+            "direction": _ReplacementType(
+                next_replacement=self._direction_next,
+                on_committed=self._direction_committed,
+                on_finished=self._direction_finished,
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -689,14 +747,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         "everything inverted" so a downgrade reads the right global flag in the common
         case. Writes only on an actual change."""
         entry = self.config_entry
-        stored = intervals.dump(intervals.normalize(desired))
-        new_data = {
-            **entry.data,
-            CONF_INVERT_INTERVALS: stored,
-            CONF_INVERT_BATTERY: stored == [[None, None]],
-        }
+        new_data = with_desired_intervals(entry.data, desired)
         if new_data != dict(entry.data):
             self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+    def _set_applied_intervals(self, applied: list[intervals.Interval]) -> None:
+        """Record what the server's stored rows are now built with (saved by the caller).
+        The legacy applied_invert follows as "everything inverted", so a downgrade to a
+        version with the global flag does not re-send the history needlessly."""
+        stored = intervals.dump(intervals.normalize(applied))
+        self._state["applied_invert_intervals"] = stored
+        self._state["applied_invert"] = stored == [[None, None]]
 
     # ------------------------------------------------------------------
     # Replacement of stored flows (server spec 2026-10-13 §5, §9)
@@ -886,6 +947,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             "Wolta replacement failed %s cycles in a row; giving it up for now",
             job["failures"],
         )
+        booked = False
         try:
             status = await self._replacement_status(rep)
         except WoltaAuthError:
@@ -897,11 +959,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         else:
             if status is not None and status["status"] == "committed":
                 await self._replacement_committed(job, hooks, rep, status.get("result") or {})
+                booked = True
             elif status is not None:
                 await self._discard_replacement(rep["id"])
             job["replacement"] = None
         job.pop("failures", None)
-        job["retry_at"] = (now + _REPLACEMENT_GIVE_UP_RETRY).isoformat()
+        if not booked:
+            # A window that went through after all is progress: the job goes on next
+            # cycle instead of waiting a day.
+            job["retry_at"] = (now + _REPLACEMENT_GIVE_UP_RETRY).isoformat()
         await self._store.async_save(self._state)
 
     async def _replacement_status(self, rep: dict) -> dict | None:
@@ -1046,6 +1112,91 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.debug("Discarding a replacement failed; it expires server-side", exc_info=True)
 
     # ------------------------------------------------------------------
+    # Direction job: swap the battery fields of stored rows (server spec §9.3)
+    # ------------------------------------------------------------------
+
+    async def _queue_direction_job(self) -> None:
+        """Start a direction job when the desired inversion differs from the applied one
+        and no job runs. Nothing is re-sent and the bookmark stays: the server swaps the
+        battery fields of the rows it holds and queues the recount at commit. A change of
+        the desired value while a job runs is picked up here once that job is done."""
+        if self._state.get("replacement_job"):
+            return
+        desired = self._desired_intervals()
+        if not intervals.sym_diff(desired, self._applied_intervals()):
+            return
+        self._state["replacement_job"] = self._new_replacement_job(
+            "direction", intervals.dump(intervals.normalize(desired))
+        )
+        await self._store.async_save(self._state)
+        _LOGGER.info("Wolta battery direction changed; swapping it in the stored history")
+
+    async def _direction_next(self, job: dict, now: datetime, profile: dict | None):
+        """The next swap of the direction job (K6), in chronological order.
+
+        The difference D = target Δ applied, less the windows already committed, is
+        bounded to [floor_hour(data_since), ceil_hour(bookmark + 15 min)) - outside it
+        the server holds no rows of ours, and later rows are built with the target - and
+        split into whole-hour segments. Only the last segment may reach into the hour
+        the bookmark lies in; its commit applies the target at once (_direction_committed),
+        before any upload. An earlier one stops at the bookmark's hour, so no row is
+        uploaded with the old direction into a window that is already booked."""
+        target = intervals.parse(job["target"])
+        remaining = intervals.difference(
+            intervals.sym_diff(target, self._applied_intervals()),
+            intervals.parse(job["done_windows"]),
+        )
+        bookmark = self._state.get("last_uploaded_ts")
+        if not remaining or not bookmark:
+            # Nothing stored by this client: the rows still to come carry the target.
+            return "done"
+        since = coverage.server_since(profile)
+        if since is coverage.MISSING:
+            since = coverage.server_since(job)  # the last commit's data_since
+        if since is coverage.MISSING:
+            _LOGGER.debug("No data_since from the server; the direction job waits")
+            return None
+        if since is None:
+            return "done"
+        bookmark_end = datetime.fromisoformat(bookmark) + _QUARTER
+        segments = intervals.hour_aligned(
+            intervals.clip(remaining, _floor_hour(since), _ceil_hour(bookmark_end))
+        )
+        for index, (start, end) in enumerate(segments):
+            final = index == len(segments) - 1
+            if not final:
+                end = min(end, _floor_hour(bookmark_end))
+            if start < end:
+                return {
+                    "kind": "swap_battery",
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "fields": None,
+                    "reason": "direction",
+                    "final": final,
+                }
+        return "done"
+
+    async def _direction_committed(self, job: dict, rep: dict, result: dict) -> None:
+        """After a committed swap: keep the server's data_since for the next segment, and
+        apply the target right after the last one - unless rows were uploaded past its
+        window since it was chosen (a replacement given up and booked later); then the
+        next segment covers them."""
+        if isinstance(result, dict) and "data_since" in result:
+            job["data_since"] = result["data_since"]
+        if not rep.get("final"):
+            return
+        bookmark = self._state.get("last_uploaded_ts")
+        if bookmark and _ceil_hour(datetime.fromisoformat(bookmark) + _QUARTER) > (
+            datetime.fromisoformat(rep["window_end"])
+        ):
+            return
+        self._set_applied_intervals(intervals.parse(job["target"]))
+
+    async def _direction_finished(self, job: dict) -> None:
+        self._set_applied_intervals(intervals.parse(job["target"]))
+
+    # ------------------------------------------------------------------
     # Main update
     # ------------------------------------------------------------------
 
@@ -1170,30 +1321,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 results = await self.client.results(self.token)
                 return self._build_data(results, last_uploaded=None)
 
-            # Invert flag changed since last upload (issue #1) → reset the bookmark so the next step
-            # runs a FULL re-backfill: the entire history is re-read and overwritten (PUT upserts) with
-            # the corrected battery direction. applied_invert is recorded in state so this only happens
-            # on an actual change, not on every tick.
-            invert_now = bool(self.config_entry.data.get(CONF_INVERT_BATTERY))
-            applied_invert = self._state.get("applied_invert")
-            if applied_invert is None:
-                # First-time recording (e.g. an existing install upgrading): initialize without
-                # touching the bookmark – the already-uploaded data was built with the current flag.
-                self._state["applied_invert"] = invert_now
-                await self._store.async_save(self._state)
-            elif applied_invert != invert_now:
-                # Actual change → reset the bookmark for a full re-backfill with the corrected direction,
-                # and flag that the grade should be recomputed IMMEDIATELY after the upload (bypassing the
-                # 7-day cadence in _maybe_recompute) so the corrected grade shows up without a ~24h delay.
-                self._state.pop("last_uploaded_ts", None)
-                self._state["applied_invert"] = invert_now
-                self._state["pending_invert_recompute"] = True
-                await self._store.async_save(self._state)
+            # A changed battery direction (desired invert intervals differ from the
+            # applied ones) is no longer re-sent: a direction job swaps the stored rows on
+            # the server (_queue_direction_job, before the replacement runner below).
 
             # Entity selections changed (reconfigure flow) → full re-backfill so the
-            # server-side history is rebuilt from the new sensors. Same self-heal
-            # pattern as applied_invert above; first-time recording (upgrade) leaves
-            # the bookmark untouched.
+            # server-side history is rebuilt from the new sensors. First-time recording
+            # (upgrade) leaves the bookmark untouched.
             # external_control-nyckeln ingår BARA när sensorn är vald: annars ändras
             # fingerprintet för varje befintlig installation vid uppgradering → onödig
             # full re-backfill för hela flottan.
@@ -1217,6 +1351,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 await self._store.async_save(self._state)
 
             await self._track_soc_selection()
+            await self._queue_direction_job()
 
             # A replacement of stored flows runs before the regular upload (server spec
             # §9): while one is open on the server, neither the regular PUT /data nor the
@@ -2325,10 +2460,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not period_end_str:
             return
 
-        # An invert change (issue #1) just uploaded corrected data via a full re-backfill →
-        # FORCE a recompute bypassing the 7-day cadence, otherwise the corrected grade won't show until
-        # the nightly rewarm/next tick. The flag is set by the self-heal and only cleared once the recompute
-        # succeeds (survives a failed attempt).
+        # New or rewritten history was just uploaded (a coverage fill, or a sensor change's full
+        # re-backfill) → FORCE a recompute bypassing the 7-day cadence, otherwise the grade won't show
+        # it until the nightly rewarm/next tick. A direction swap does not set it: the server queues
+        # the recount at commit. The flag is only cleared once the recompute succeeds (survives a
+        # failed attempt).
         force = bool(self._state.get("pending_invert_recompute"))
 
         last_recompute_str = self._state.get("last_recompute")
@@ -2514,15 +2650,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
     def _direction_flip_pending(self, block: dict) -> bool:
-        """True while the owner's flip is newer than the server's direction data. A missing or
+        """True while a flip has not reached the grade yet: a direction job still runs, or
+        the owner's flip is newer than the server's direction data. A missing or
         unreadable as_of counts as "not recounted yet"."""
+        job = self._state.get("replacement_job")
+        if isinstance(job, dict) and job.get("type") == "direction":
+            # The stored rows are not all swapped yet: any grade still describes the old
+            # direction, however new its as_of.
+            return True
         flipped = self._parse_utc(self.config_entry.data.get(CONF_DIRECTION_FLIPPED_AT))
         if flipped is None:
             return False
-        if self._state.get("pending_invert_recompute"):
-            # The corrected history has not landed and been recounted yet: any grade still
-            # describes the old direction, however new its as_of.
-            return True
         as_of = self._parse_utc(block.get("as_of"))
         return as_of is None or as_of <= flipped
 
@@ -2536,25 +2674,29 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_util.UTC)
 
     def _evaluate_battery_direction_issue(self, betyg: dict) -> None:
-        """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixbar för all/partial
-        (vänd riktningen, historiken skickas om), annars bara text. Saknas blocket (äldre
-        backend) eller är state något annat än "reversed" tas issuen bort.
+        """Repair när servern ser omkastade laddfält ur laddningsnivån. Fixable when the
+        server gives intervals to flip (direction_swap_intervals): the fix swaps exactly
+        those in the stored rows, nothing is re-sent. Otherwise text only. Saknas blocket
+        (äldre backend) eller är state något annat än "reversed" tas issuen bort.
 
         Aldrig i visningsläget: där mappar Woltas koppling fälten, inte de här sensorerna."""
         issue_id = f"{_ISSUE_BATTERY_DIRECTION}_{self.config_entry.entry_id}"
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         form = block.get("form") if isinstance(block, dict) else None
-        # Ignoreringen gäller bara den fixbara reparationen (den har en meny att avböja ur).
-        # since/ended har ingen meny och visas alltid.
-        ignored = (form in _BATTERY_DIRECTION_FIXABLE
-                   and bool(self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED)))
         if isinstance(block, dict) and block.get("state") in ("ok", "verified"):
             self._clear_direction_flags()
-        if (not self._direction_reversed(betyg) or self._view_only or ignored
+        if (not self._direction_reversed(betyg) or self._view_only
                 or form not in _BATTERY_DIRECTION_FORMS):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
-        if form in _BATTERY_DIRECTION_FIXABLE and self._direction_flip_pending(block):
+        swap = direction_swap_intervals(block)
+        fixable = bool(swap)
+        # Ignoreringen gäller bara den fixbara reparationen (den har en meny att avböja ur);
+        # the text-only one is always shown.
+        if fixable and self.config_entry.data.get(CONF_DIRECTION_ISSUE_IGNORED):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        if fixable and self._direction_flip_pending(block):
             # Owner flipped the direction and the server has not recounted since: this grade
             # still describes the old direction. Leave the registry alone - a deleted issue
             # stays deleted, and nothing is raised to invite a second flip back.
@@ -2573,17 +2715,33 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             "since": block.get("since") or "-",
             "batt_in": _names("batt_in"),
             "batt_out": _names("batt_out"),
+            "swap_period": self._swap_period(swap),
         }
+        key = f"{_ISSUE_BATTERY_DIRECTION}_{form}"
+        if fixable and form in _BATTERY_DIRECTION_TEXT_FORMS:
+            key = f"{key}_flip"
+        elif not fixable and form not in _BATTERY_DIRECTION_TEXT_FORMS:
+            key = _ISSUE_BATTERY_DIRECTION_NO_FIX
         ir.async_create_issue(
             self.hass, DOMAIN, issue_id,
-            is_fixable=form in _BATTERY_DIRECTION_FIXABLE,
+            is_fixable=fixable,
             severity=ir.IssueSeverity.WARNING,
-            translation_key=f"{_ISSUE_BATTERY_DIRECTION}_{form}",
+            translation_key=key,
             translation_placeholders=placeholders,
             # En egen RepairsFlow ärver inte translation_placeholders: samma värden följer
-            # med på issuen så flödets texter kan fyllas i.
-            data={"entry_id": self.config_entry.entry_id, "form": form, **placeholders},
+            # med på issuen så flödets texter kan fyllas i. The flow flips swap_intervals.
+            data={"entry_id": self.config_entry.entry_id, "form": form,
+                  "swap_intervals": intervals.dump(swap), **placeholders},
         )
+
+    @staticmethod
+    def _swap_period(swap: list[intervals.Interval]) -> str:
+        """The intervals to flip in local time, for the repair texts. Language-neutral:
+        "2026-09-28 15:00 → …" (an open end shows as …)."""
+        def _fmt(t: datetime | None) -> str:
+            return "…" if t is None else dt_util.as_local(t).strftime("%Y-%m-%d %H:%M")
+
+        return ", ".join(f"{_fmt(s)} → {_fmt(e)}" for s, e in swap) or "-"
 
     def _evaluate_energy_balance_issue(self, betyg: dict) -> None:
         """Non-fixable repair when the backend has excluded the grade because the household

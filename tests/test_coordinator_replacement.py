@@ -563,9 +563,14 @@ async def test_give_up_books_a_replacement_that_was_committed_after_all(
     assert committed == [COMMIT_RESULT]
     assert job["done_windows"] == [[WS, WE]]
     assert job["replacement"] is None
+    # A booked window is progress: the job is not held back a day.
+    assert job["retry_at"] is None
     client.delete_replacement.assert_not_called()
     client.open_replacement.assert_not_called()
     client.put_data.assert_awaited_once()
+
+    await _cycle(coordinator, NOW + timedelta(hours=4))
+    assert "replacement_job" not in coordinator._state
 
 
 @pytest.mark.asyncio
@@ -756,4 +761,273 @@ async def test_conflict_reopens_with_a_new_id_next_cycle(hass: HomeAssistant, mo
     assert second != first
     client.commit_replacement.assert_awaited_with(coordinator.token, second, None)
     assert committed == [COMMIT_RESULT]
+    assert "replacement_job" not in coordinator._state
+
+
+# ---------------------------------------------------------------------------
+# Direction job (K6): swap the battery fields of stored rows on the server
+# ---------------------------------------------------------------------------
+
+from datetime import timezone  # noqa: E402
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_INVERT_BATTERY,
+    CONF_INVERT_INTERVALS,
+)
+
+UTC = timezone.utc
+D_NOW = datetime(2026, 10, 13, 9, 5, tzinfo=UTC)
+D_SINCE = "2025-10-01T00:00:00+00:00"
+D_BOOKMARK = "2026-10-13T08:30:00+00:00"
+D_END = datetime(2026, 10, 13, 9, tzinfo=UTC)  # ceil_hour(08:30 + 15 min)
+FROM = "2026-09-28T13:00:00+00:00"
+A = "2026-01-01T00:00:00+00:00"
+B = "2026-06-01T00:00:00+00:00"
+
+
+async def _direction_coordinator(
+    hass, mock_entry, client, *, desired, applied, bookmark=D_BOOKMARK, job=None
+):
+    mock_entry.data = {
+        **mock_entry.data,
+        CONF_INVERT_INTERVALS: desired,
+        CONF_INVERT_BATTERY: desired == [[None, None]],
+    }
+    state = {"applied_invert_intervals": applied}
+    if bookmark is not None:
+        state["last_uploaded_ts"] = bookmark
+    if job is not None:
+        state["replacement_job"] = job
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=state)
+    seen: list = []  # the applied intervals each regular read was built with
+
+    async def rows(*_args):
+        seen.append(coordinator._state["applied_invert_intervals"])
+        return _make_rows(D_NOW - timedelta(minutes=20))
+
+    coordinator._incremental_rows = AsyncMock(side_effect=rows)
+    coordinator._backfill_rows = AsyncMock(side_effect=rows)
+    coordinator._reconcile_coverage = AsyncMock()
+    return coordinator, seen
+
+
+def _direction_client(data_since=D_SINCE, *, with_key=True):
+    client = _client()
+    profile = dict(BASE_PROFILE)
+    if with_key:
+        profile["data_since"] = data_since
+    client.get_profile = AsyncMock(return_value=profile)
+    return client
+
+
+def _opened(client) -> list[tuple]:
+    return [
+        (c.kwargs["kind"], c.kwargs["window_start"], c.kwargs["window_end"], c.kwargs["reason"])
+        for c in client.open_replacement.call_args_list
+    ]
+
+
+@pytest.mark.asyncio
+async def test_direction_change_swaps_one_window_and_keeps_the_bookmark(
+    hass: HomeAssistant, mock_entry
+):
+    """Desired [[T, None]] over applied []: exactly one swap_battery from T to the hour
+    after the bookmark's quarter. Nothing is re-sent: no bookmark reset, no forced
+    recompute flag, the regular upload stays incremental and is built with the new
+    intervals, after the commit."""
+    client = _direction_client()
+    puts_before_commit: list = []
+
+    async def commit(token, rid, expected):
+        puts_before_commit.append(client.put_data.await_count)
+        return dict(COMMIT_RESULT)
+
+    client.commit_replacement.side_effect = commit
+    coordinator, seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2026, 9, 28, 13, tzinfo=UTC), D_END, "direction")]
+    assert client.open_replacement.call_args.kwargs["fields"] is None
+    client.commit_replacement.assert_awaited_once()
+    assert client.commit_replacement.await_args.args[2] is None
+    assert puts_before_commit == [0]
+    assert coordinator._state["applied_invert_intervals"] == [[FROM, None]]
+    assert "replacement_job" not in coordinator._state
+    assert "pending_invert_recompute" not in coordinator._state
+    coordinator._incremental_rows.assert_awaited_once()
+    coordinator._backfill_rows.assert_not_called()
+    assert seen == [[[FROM, None]]]
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direction_whole_history_window_starts_at_the_floored_data_since(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client("2025-10-01T00:20:00+00:00")
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2025, 10, 1, tzinfo=UTC), D_END, "direction")]
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+    assert coordinator._state["applied_invert"] is True
+
+
+@pytest.mark.asyncio
+async def test_direction_two_segments_are_swapped_in_order(hass: HomeAssistant, mock_entry):
+    """Applied [[None, A], [B, None]] back to []: two swaps in chronological order, each
+    committed window booked before the next; only the last may reach the bookmark."""
+    client = _direction_client()
+    at_commit: list = []
+
+    async def commit(token, rid, expected):
+        job = coordinator._state["replacement_job"]
+        at_commit.append((len(job["done_windows"]), job["replacement"]["final"]))
+        return dict(COMMIT_RESULT)
+
+    client.commit_replacement.side_effect = commit
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[[None, A], [B, None]])
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2025, 10, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC),
+         "direction"),
+        ("swap_battery", datetime(2026, 6, 1, tzinfo=UTC), D_END, "direction"),
+    ]
+    assert at_commit == [(0, False), (1, True)]
+    assert coordinator._state["applied_invert_intervals"] == []
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_direction_restart_after_the_first_commit_opens_only_the_second(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client()
+    job = {
+        "type": "direction",
+        "target": [],
+        "replacement": None,
+        "done_windows": [[D_SINCE, A]],
+        "retry_at": None,
+    }
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[[None, A], [B, None]], job=job)
+
+    await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2026, 6, 1, tzinfo=UTC), D_END, "direction")]
+    assert coordinator._state["applied_invert_intervals"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bookmark,data_since", [(None, D_SINCE), (D_BOOKMARK, None)])
+async def test_direction_with_nothing_stored_applies_at_once(
+    hass: HomeAssistant, mock_entry, bookmark, data_since
+):
+    """No bookmark, or no rows on the server: no call, applied := desired right away, and
+    the upload in the same cycle builds with it."""
+    client = _direction_client(data_since)
+    coordinator, seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[], bookmark=bookmark)
+
+    await _cycle(coordinator, D_NOW)
+
+    client.open_replacement.assert_not_called()
+    assert coordinator._state["applied_invert_intervals"] == [[FROM, None]]
+    assert "replacement_job" not in coordinator._state
+    assert seen == [[[FROM, None]]]
+
+
+@pytest.mark.asyncio
+async def test_direction_without_data_since_waits_without_pausing(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client(with_key=False)
+    coordinator, seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+
+    await _cycle(coordinator, D_NOW)
+
+    client.open_replacement.assert_not_called()
+    assert coordinator._state["replacement_job"]["type"] == "direction"
+    assert coordinator._state["applied_invert_intervals"] == []
+    assert seen == [[]]
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direction_change_during_a_job_is_taken_up_by_a_new_job(
+    hass: HomeAssistant, mock_entry
+):
+    """The running job finishes against its own target; the next cycle sees the new
+    difference and starts a fresh job."""
+    client = _direction_client()
+    job = {
+        "type": "direction",
+        "target": [[None, None]],
+        "replacement": None,
+        "done_windows": [],
+        "retry_at": None,
+    }
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[], job=job)
+
+    await _cycle(coordinator, D_NOW)
+    assert client.open_replacement.await_count == 1
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+    assert "replacement_job" not in coordinator._state
+
+    await _cycle(coordinator, D_NOW + timedelta(hours=1))
+    assert client.open_replacement.await_count == 2
+    first, second = client.open_replacement.call_args_list
+    assert first.args[1] != second.args[1]
+    assert coordinator._state["applied_invert_intervals"] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_final_commit_applies_only_when_no_row_passed_its_window(
+    hass: HomeAssistant, mock_entry
+):
+    """A final window booked late (after rows were uploaded past it) does not apply the
+    target: the next segment covers the rows uploaded with the old direction."""
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[],
+        bookmark="2026-10-13T10:00:00+00:00")
+    job = coordinator._new_replacement_job("direction", [[None, None]])
+    rep = {"kind": "swap_battery", "window_start": D_SINCE,
+           "window_end": D_END.isoformat(), "final": True}
+    job["done_windows"].append([D_SINCE, D_END.isoformat()])
+
+    await coordinator._direction_committed(job, rep, {})
+    assert coordinator._state["applied_invert_intervals"] == []
+
+    spec = await coordinator._direction_next(job, D_NOW, {"data_since": D_SINCE})
+    assert (spec["window_start"], spec["window_end"], spec["final"]) == (
+        D_END.isoformat(), "2026-10-13T11:00:00+00:00", True)
+
+    coordinator._state["last_uploaded_ts"] = D_BOOKMARK
+    await coordinator._direction_committed(job, rep, {})
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_direction_starts_no_job(hass: HomeAssistant, mock_entry):
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[[FROM, None]])
+
+    await _cycle(coordinator, D_NOW)
+
+    client.open_replacement.assert_not_called()
     assert "replacement_job" not in coordinator._state

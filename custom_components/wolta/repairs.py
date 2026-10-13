@@ -46,7 +46,6 @@ from .const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
-    CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
     CONF_POWER_ISSUE_IGNORED,
@@ -55,6 +54,8 @@ from .const import (
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
+from . import intervals
+from .coordinator import desired_invert_intervals, with_desired_intervals
 from .soc_picker import soc_candidates, soc_error
 
 
@@ -320,17 +321,20 @@ class BatteryNeedsInputRepairFlow(RepairsFlow):
 
 
 class BatteryDirectionRepairFlow(RepairsFlow):
-    """Vänd batteriets riktning när servern ser omkastade laddfält ur SoC. Slår om
-    CONF_INVERT_BATTERY - samma klientlokala transformation som options-flödet - och
-    koordinatorns applied_invert-självläkning nollställer bokmärket och skickar HELA historiken
-    om. Erbjuds bara för formerna all/partial (koordinatorn sätter is_fixable)."""
+    """Vänd batteriets riktning när servern ser omkastade laddfält ur SoC. The desired
+    invert intervals become desired Δ swap_intervals (the intervals the server placed on
+    the hour); the coordinator's direction job then swaps the battery fields of the
+    stored rows on the server. Nothing is re-sent. An issue raised by an older version
+    carries no swap_intervals: the v0.43 rule then flips the whole history."""
 
     def __init__(self, entry: ConfigEntry | None,
-                 placeholders: dict[str, Any] | None = None) -> None:
+                 placeholders: dict[str, Any] | None = None,
+                 swap_intervals: list | None = None) -> None:
         self._entry = entry
         # En egen RepairsFlow ärver inte issuens translation_placeholders: koordinatorn lägger
         # dem också i issue-datan, och de skickas in i varje steg här.
         self._placeholders = {k: str(v) for k, v in (placeholders or {}).items()}
+        self._swap = swap_intervals
 
     async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
         # Samma kapplöpning som i _AdoptRepairFlow: entryn kan vara borttagen.
@@ -347,19 +351,17 @@ class BatteryDirectionRepairFlow(RepairsFlow):
             return self.async_show_form(
                 step_id="flip", data_schema=vol.Schema({}),
                 description_placeholders=self._placeholders)
-        # Flaggans AKTUELLA värde läses här, inte när issuen restes: den kan redan vara på
-        # (då slås den av) eller ändrad under Konfigurera.
-        current = bool(self._entry.data.get(CONF_INVERT_BATTERY, False))
-        new_data = {
-            **self._entry.data,
-            CONF_INVERT_BATTERY: not current,
-            CONF_DIRECTION_FLIPPED_AT: dt_util.utcnow().isoformat(),
-        }
+        swap = [(None, None)] if self._swap is None else intervals.parse(self._swap)
+        # The CURRENT desired value is read here, not when the issue was raised: it may
+        # have changed under Configure meanwhile.
+        desired = intervals.sym_diff(desired_invert_intervals(self._entry.data), swap)
+        new_data = with_desired_intervals(self._entry.data, desired)
+        new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
         new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-        # Issuen tas bort direkt, och koordinatorn håller den nere tills serverns riktningsdata
-        # (battery_direction.as_of) är nyare än CONF_DIRECTION_FLIPPED_AT: servern räknar om
-        # riktningsdygnen nattligen, så ett betyg hämtat efter vändningen säger fortfarande
+        # Issuen tas bort direkt, och koordinatorn håller den nere medan riktningsjobbet
+        # pågår och tills serverns riktningsdata (battery_direction.as_of) är nyare än
+        # CONF_DIRECTION_FLIPPED_AT: ett betyg hämtat före omräkningen säger fortfarande
         # "reversed" och hade annars rest reparationen igen (och ett andra klick vänt tillbaka).
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         await self._entry.runtime_data.async_request_refresh()
@@ -384,7 +386,10 @@ async def async_create_fix_flow(
     days = int(data.get("days", 0))
     if issue_id.startswith("battery_direction"):
         return BatteryDirectionRepairFlow(
-            entry, {k: v for k, v in data.items() if k not in ("entry_id", "form")})
+            entry,
+            {k: v for k, v in data.items()
+             if k not in ("entry_id", "form", "swap_intervals")},
+            data.get("swap_intervals"))
     if issue_id.startswith("soc_missing"):
         return SocMissingRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):

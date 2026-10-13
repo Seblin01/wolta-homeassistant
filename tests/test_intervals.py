@@ -131,3 +131,12 @@ def test_apply_invert_missing_key_swaps_with_missing_key():
 def test_apply_invert_no_intervals_is_identity():
     streams = {"batt_in": {T: 1.0}, "batt_out": {T: 2.0}}
     assert iv.apply_invert(streams, []) == streams
+
+
+def test_difference():
+    a = [(T, T + 4 * H)]
+    assert iv.difference(a, [(T + H, T + 2 * H)]) == [(T, T + H), (T + 2 * H, T + 4 * H)]
+    assert iv.difference(a, []) == a
+    assert iv.difference(a, a) == []
+    assert iv.difference([(None, None)], [(T, T + H)]) == [(None, T), (T + H, None)]
+    assert iv.difference([], [(None, None)]) == []

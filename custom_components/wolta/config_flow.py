@@ -39,6 +39,7 @@ from . import stats
 from .soc_picker import MAX_SOC_SENSORS, soc_error as _soc_error  # noqa: F401 - MAX_SOC_SENSORS re-exported
 from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
 from .control_system_prefill import battery_platforms, suggest_control_system
+from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
     BATTERY_STATUS_NEEDS_INPUT,
@@ -1365,12 +1366,11 @@ class WoltaOptionsFlow(OptionsFlow):
                         patch_fields[key] = val
 
             # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend
-            # field → not PATCHed. On change the coordinator self-heals (bookmark reset →
-            # full re-backfill uploads corrected data).
+            # field → not PATCHed. It means "the whole history": on → [[None, None]], off →
+            # []. It shows whether any interval is inverted, so only a flip of that writes;
+            # the coordinator's direction job then swaps the stored rows on the server.
             invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
-            invert_changed = invert_new != bool(
-                entry.data.get(CONF_INVERT_BATTERY, False)
-            )
+            invert_changed = invert_new != bool(desired_invert_intervals(entry.data))
 
             if patch_fields and not errors:
                 try:
@@ -1393,7 +1393,8 @@ class WoltaOptionsFlow(OptionsFlow):
                         else:
                             new_data[key] = val
                     if invert_changed:
-                        new_data[CONF_INVERT_BATTERY] = invert_new
+                        new_data = with_desired_intervals(
+                            new_data, [(None, None)] if invert_new else [])
                         # Samma stämpel som när riktningsreparationen vänder: det gamla
                         # betyget säger fortfarande "reversed" tills servern räknat om.
                         new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
@@ -1428,7 +1429,7 @@ class WoltaOptionsFlow(OptionsFlow):
                             pass
                 elif invert_changed and coordinator is not None:
                     # Only invert changed (no PATCH): trigger a refresh so the coordinator
-                    # runs a full re-backfill with the corrected direction.
+                    # starts the direction job.
                     try:
                         await coordinator.async_request_refresh()
                     except Exception:  # pylint: disable=broad-except
@@ -1527,7 +1528,7 @@ class WoltaOptionsFlow(OptionsFlow):
             vol.Required(_SEC_TARIFFS): section(tariffs_schema, {"collapsed": True}),
             vol.Required(
                 CONF_INVERT_BATTERY,
-                default=bool(entry.data.get(CONF_INVERT_BATTERY, False)),
+                default=bool(desired_invert_intervals(entry.data)),
             ): BooleanSelector(BooleanSelectorConfig()),
         })
         return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)

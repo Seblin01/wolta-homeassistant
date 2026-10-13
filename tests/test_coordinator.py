@@ -1190,36 +1190,6 @@ async def test_empty_stream_text_names_the_sensors_feeding_the_role_under_invers
 
 
 @pytest.mark.asyncio
-async def test_invert_change_forces_full_backfill(hass: HomeAssistant, mock_entry):
-    """Flag changed since the last upload (applied_invert in state) → the bookmark is reset →
-    full re-backfill (the LTS 'hour' window is fetched) so history is overwritten with the correct direction."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
-    client = _mock_client()
-    fetch_calls: list[str] = []
-
-    async def mock_fetch(h, ids, start, end, period):
-        fetch_calls.append(period)
-        return {}
-
-    bookmark_str = (NOW - timedelta(days=1)).isoformat()  # fresh → normally incremental
-    with (
-        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
-        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
-        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=mock_fetch),
-    ):
-        coordinator = await _make_coordinator(
-            hass, mock_entry, client,
-            store_state={"last_uploaded_ts": bookmark_str, "applied_invert": False},
-        )
-        await coordinator._async_update_data()
-
-    assert "hour" in fetch_calls, "invert change should force a full backfill (the LTS window)"
-    assert coordinator._state.get("applied_invert") is True
-
-
-@pytest.mark.asyncio
 async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entry):
     """Unchanged flag (applied_invert == current) → the bookmark is kept → incremental path
     (no LTS 'hour' window is fetched)."""
@@ -1247,47 +1217,9 @@ async def test_unchanged_invert_keeps_incremental(hass: HomeAssistant, mock_entr
 
 
 @pytest.mark.asyncio
-async def test_invert_change_forces_recompute_despite_recent_last_recompute(
-    hass: HomeAssistant, mock_entry
-):
-    """After an invert change (issue #1), the grade should be recomputed IMMEDIATELY, bypassing the 7-day gate –
-    even if last_recompute is fresh. The force flag is set by the self-heal and cleared once the recompute
-    succeeds."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
-    client = _mock_client()
-    recent_last_recompute = "2025-05-29"  # 2 days before period-end 2025-05-31 → normally SKIP
-
-    with (
-        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
-        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
-        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
-        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
-        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
-        _patch_aggregator("split_hour_to_quarters", return_value={}),
-    ):
-        coordinator = await _make_coordinator(
-            hass, mock_entry, client,
-            store_state={
-                "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
-                "last_recompute": recent_last_recompute,
-                "applied_invert": False,  # differs from the entry flag → self-heal fires
-            },
-        )
-        await coordinator._async_update_data()
-
-    assert client.recompute.called, "invert change should force recompute past the 7-day gate"
-    assert coordinator._state.get("pending_invert_recompute") is None, \
-        "the force flag should be cleared once the recompute succeeds"
-
-
-@pytest.mark.asyncio
 async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, mock_entry):
-    """If the forced recompute gets a 429, the force flag should be retained (retry on the next tick)."""
-    from custom_components.wolta.const import CONF_INVERT_BATTERY
-
-    mock_entry.data = {**mock_entry.data, CONF_INVERT_BATTERY: True}
+    """If the forced recompute gets a 429, the force flag should be retained (retry on the next tick).
+    The flag is set by a coverage fill or a sensor change; a direction change no longer sets it."""
     client = _mock_client(raise_on_recompute=WoltaRateLimitError(3600))
 
     with (
@@ -1303,7 +1235,7 @@ async def test_force_recompute_flag_survives_rate_limit(hass: HomeAssistant, moc
             store_state={
                 "last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
                 "last_recompute": "2025-05-29",
-                "applied_invert": False,
+                "pending_invert_recompute": True,
             },
         )
         await coordinator._async_update_data()
@@ -5116,17 +5048,120 @@ async def test_direction_healthy_without_flags_does_not_write_entry(hass, mock_e
 
 
 @pytest.mark.asyncio
-async def test_direction_guard_holds_while_corrected_history_is_pending(hass, mock_entry):
-    """as_of efter vändningen räcker inte om den rättade historiken inte landat och räknats om
-    (pending_invert_recompute): betyget beskriver fortfarande den gamla riktningen."""
+async def test_direction_guard_holds_while_a_direction_job_runs(hass, mock_entry):
+    """as_of efter vändningen räcker inte medan riktningsjobbet pågår: de lagrade raderna är
+    inte alla vända, så betyget beskriver fortfarande den gamla riktningen."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._state["replacement_job"] = c._new_replacement_job("direction", [[None, None]])
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+    c._state.pop("replacement_job")
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_ignores_the_legacy_recompute_flag(hass, mock_entry):
+    """pending_invert_recompute no longer stands for a flip (the server queues the recount
+    at commit): with a newer as_of and no job the repair returns."""
     from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
     c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
     c._state["pending_invert_recompute"] = True
     c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
-    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
-    c._state.pop("pending_invert_recompute")
-    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_holds_for_a_direction_job_without_a_flip_stamp(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._state["replacement_job"] = c._new_replacement_job("direction", [[None, None]])
+    c._evaluate_measured_params(_dir_results("all", as_of="2026-10-13T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+
+
+def _swap_results(form, swap, **kw):
+    results = _dir_results(form, **kw)
+    results["betyg"]["battery_direction"]["swap_intervals"] = swap
+    return results
+
+
+_SWAP_FROM = {"from": "2026-09-28T13:00:00+00:00", "to": None,
+              "gap_hours_from": 1, "gap_hours_to": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["since", "ended", "all", "partial"])
+async def test_direction_issue_fixable_for_every_form_with_swap_intervals(
+    hass, mock_entry, form
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, [_SWAP_FROM]))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    expected = (f"battery_direction_{form}_flip" if form in ("since", "ended")
+                else f"battery_direction_{form}")
+    assert issue.translation_key == expected
+    assert issue.data["swap_intervals"] == [["2026-09-28T13:00:00+00:00", None]]
+    assert issue.translation_placeholders["swap_period"].endswith("→ …")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form,key", [
+    ("since", "battery_direction_since"), ("ended", "battery_direction_ended"),
+    ("all", "battery_direction_no_fix"), ("partial", "battery_direction_no_fix")])
+async def test_direction_issue_with_empty_swap_intervals_is_text_only(
+    hass, mock_entry, form, key
+):
+    """No boundary the server could place with evidence: the text without a fix."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, []))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is False
+    assert issue.translation_key == key
+    assert issue.data["swap_intervals"] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_without_the_key_keeps_the_v043_rule(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_dir_results("all"))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    assert issue.data["swap_intervals"] == [[None, None]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["x", [1], [{"from": "not-a-date", "to": None}]])
+async def test_direction_issue_with_malformed_swap_intervals_is_not_fixable(
+    hass, mock_entry, swap
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results("since", swap))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID).is_fixable is False
+
+
+@pytest.mark.asyncio
+async def test_direction_ignore_applies_to_a_fixable_since_issue(hass, mock_entry):
+    from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})
+    c._evaluate_measured_params(_swap_results("since", [_SWAP_FROM]))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
+    c._evaluate_measured_params(_swap_results("since", []))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_direction_guard_holds_for_a_flipped_since_issue(hass, mock_entry):
+    """After a flip, with a direction job in Store, the fixable issue is not raised again
+    however new as_of is."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_FLIPPED_AT: _FLIPPED})
+    c._state["replacement_job"] = c._new_replacement_job(
+        "direction", [["2026-09-28T13:00:00+00:00", None]])
+    c._evaluate_measured_params(_swap_results("since", [_SWAP_FROM],
+                                              as_of="2026-10-14T04:00:00Z"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
