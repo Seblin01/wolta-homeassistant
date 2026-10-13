@@ -1913,3 +1913,23 @@ class TestReplacementRows:
             self._streams(), complete_all=set(), complete_replaced={self.Q1},
             fields=["external_control"], external={self.Q1})
         assert rows == [{"ts": self.Q1.isoformat(), "external_control": True}]
+
+    def test_partial_row_ignores_a_spike_in_a_field_it_does_not_carry(self):
+        """Only the carried fields are judged against the 500 kWh cap: a spike in a
+        stream that is not replaced must not drop the replaced value."""
+        streams = self._streams()
+        streams["grid_in"][self.Q1] = 900.0
+        rows = stats.replacement_rows(
+            streams, complete_all=set(), complete_replaced={self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert rows == [{"ts": self.Q1.isoformat(), "solar_kwh": 2.1}]
+        # A spike in the carried field still drops the row.
+        streams["solar"][self.Q1] = 700.0
+        assert stats.replacement_rows(
+            streams, complete_all=set(), complete_replaced={self.Q1},
+            fields=["solar_kwh"], external=set()) == []
+        # A full row is judged on every field, as merge_streams does.
+        streams["solar"][self.Q1] = 2.1
+        assert stats.replacement_rows(
+            streams, complete_all={self.Q1}, complete_replaced={self.Q1},
+            fields=["solar_kwh"], external=set()) == []

@@ -811,9 +811,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # collecting SoC.
                     CONF_SOC: list(user_input.get(CONF_SOC) or []),
                 }
-                # Bytta batterisensorer skickar också om historiken (applied_entities), så en
-                # öppen riktningsreparation bygger på det gamla betyget: stämpla som vid en
-                # vändning så att den inte reses igen förrän servern räknat om.
+                # Changed battery sensors replace the stored battery fields (an entity job),
+                # so an open direction repair rests on the old grade: stamp as for a flip
+                # so it is not raised again until the server has recounted.
                 # Order-independent and normalised like the coordinator (a v0.1.0 entry
                 # stores a plain string), so only a real change of sensors stamps.
                 if (sorted(_as_list(user_input[CONF_BATT_IN]))

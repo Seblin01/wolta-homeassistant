@@ -1039,6 +1039,7 @@ async def test_unchanged_direction_starts_no_job(hass: HomeAssistant, mock_entry
 
 from custom_components.wolta.const import (  # noqa: E402
     CONF_BATT_IN,
+    CONF_EXTERNAL_CONTROL,
     CONF_GRID_IN,
     CONF_SOLAR,
 )
@@ -1051,8 +1052,19 @@ E_NOW = datetime(2026, 10, 13, 9, 5, tzinfo=UTC)
 E_SINCE = "2025-10-01T00:00:00+00:00"
 E_BOOKMARK = "2026-10-13T08:30:00+00:00"
 E_NEW_FROM = datetime(2026, 6, 1, 10, tzinfo=UTC)   # the new sensor's first statistics
+# Its first period cannot be judged (no period before it), so the first hour whose four
+# quarters are all complete - the window start - is the one after.
+E_START = datetime(2026, 6, 1, 11, tzinfo=UTC)
 E_OTHERS_FROM = datetime(2026, 10, 12, tzinfo=UTC)  # the other sensors' (5-minute only)
 E_END = datetime(2026, 10, 13, 9, tzinfo=UTC)       # hour after the last complete quarter
+EXTERNAL = "binary_sensor.flex_active"
+# The binary sensor's recorded states: first one on 2026-10-10 07:20, 'on' 10:05-11:00
+# on 2026-10-12.
+E_POINTS = [
+    (datetime(2026, 10, 10, 7, 20, tzinfo=UTC), "off"),
+    (datetime(2026, 10, 12, 10, 5, tzinfo=UTC), "on"),
+    (datetime(2026, 10, 12, 11, 0, tzinfo=UTC), "off"),
+]
 OLD_FP = json.dumps({
     "batt_in": ["sensor.batt_in"], "batt_out": ["sensor.batt_out"],
     "grid_in": ["sensor.grid_in"], "grid_out": ["sensor.grid_out"],
@@ -1066,7 +1078,7 @@ def _fake_statistics(available: dict[str, datetime]):
     calls: list = []
 
     async def fetch(hass, ids, start, end, period="hour"):
-        calls.append((period, start, end))
+        calls.append((period, start, end, set(ids)))
         step = timedelta(hours=1) if period == "hour" else timedelta(minutes=5)
         change = 0.4 if period == "hour" else 0.1
         out = {}
@@ -1116,18 +1128,23 @@ async def _entity_coordinator(
     return coordinator, starts
 
 
-async def _entity_cycle(coordinator, available, now=E_NOW):
+async def _entity_cycle(coordinator, available, now=E_NOW, points=None):
     fetch = _fake_statistics(available)
     with (
         patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=now),
         patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+        patch("custom_components.wolta.stats.async_fetch_states",
+              new=AsyncMock(return_value=list(points or []))),
     ):
         await coordinator._async_update_data()
     return fetch
 
 
-def _staged(client) -> list[dict]:
-    return [row for c in client.stage_replacement_rows.call_args_list for row in c.args[2]]
+def _staged(client, index=None) -> list[dict]:
+    calls = client.stage_replacement_rows.call_args_list
+    if index is not None:
+        calls = [calls[index]]
+    return [row for c in calls for row in c.args[2]]
 
 
 def test_changed_streams_and_fields():
@@ -1150,11 +1167,13 @@ def test_changed_streams_and_fields():
 @pytest.mark.asyncio
 async def test_entity_change_replaces_only_the_solar_field(hass: HomeAssistant, mock_entry):
     """sensor.solar -> sensor.solar_new with statistics from 2026-06-01 10:00, data_since
-    2025-10-01: one "rows" replacement of solar_kwh from 10:00 that day to the hour after
-    the last complete quarter. Quarters complete for every sensor carry every field; the
-    others only solar_kwh. After the commit the new fingerprint is applied, the bookmark
-    follows the last full quarter, nothing forces a recompute and the regular upload goes
-    on incrementally."""
+    2025-10-01: one "rows" replacement of solar_kwh from 11:00 that day (the first whole
+    hour with every quarter complete: the 10:00 period has no period before it and is
+    never clean, and a window from 10:00 would remove that hour's stored rows) to the
+    hour after the last complete quarter. Quarters complete for every sensor carry every
+    field; the others only solar_kwh. After the commit the new fingerprint is applied,
+    the bookmark follows the last full quarter, nothing forces a recompute and the
+    regular upload goes on incrementally."""
     client = _direction_client(E_SINCE)
     coordinator, starts = await _entity_coordinator(
         hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
@@ -1162,26 +1181,28 @@ async def test_entity_change_replaces_only_the_solar_field(hass: HomeAssistant, 
     fetch = await _entity_cycle(
         coordinator, _others(**{"sensor.solar_new": E_NEW_FROM}))
 
+    client.open_replacement.assert_awaited_once()
     open_call = client.open_replacement.call_args
     assert open_call.kwargs["kind"] == "rows"
     assert open_call.kwargs["fields"] == ["solar_kwh"]
     assert open_call.kwargs["reason"] == "entities_changed"
-    assert open_call.kwargs["window_start"] == E_NEW_FROM
+    assert open_call.kwargs["window_start"] == E_START
     assert open_call.kwargs["window_end"] == E_END
     rows = _staged(client)
-    assert rows, "no rows staged"
     assert all("solar_kwh" in row for row in rows)
     partial = [r for r in rows if len(r) == 2]
     full = [r for r in rows if len(r) == 7]
     assert len(partial) + len(full) == len(rows)
-    # The new sensor's first hour cannot be judged (no period before it).
     assert rows[0]["ts"] == "2026-06-01T11:00:00+00:00"
     assert partial[-1]["ts"] < "2026-10-12T00:15:00+00:00" <= full[0]["ts"]
     assert full[-1]["ts"] == "2026-10-13T08:45:00+00:00"
     assert client.commit_replacement.await_args.args[2] == len(rows)
-    # The read starts at the floored data_since: hourly, then 5-minute statistics.
-    assert fetch.calls[0][0] == "hour"
-    assert fetch.calls[0][1] == datetime(2025, 9, 30, 23, tzinfo=UTC)
+    # A cheap probe of the new sensor first, then the read from the floored data_since:
+    # hourly, then 5-minute statistics.
+    assert fetch.calls[0] == (
+        "hour", datetime(2025, 9, 30, 23, tzinfo=UTC), E_NOW, {"sensor.solar_new"})
+    assert fetch.calls[1][:2] == ("hour", datetime(2025, 9, 30, 23, tzinfo=UTC))
+    assert len(fetch.calls[1][3]) == 5
 
     new_fp = coordinator._entities_fingerprint()
     assert coordinator._state["applied_entities"] == new_fp
@@ -1210,10 +1231,91 @@ async def test_entity_change_of_one_battery_stream_replaces_both_fields(
 
     kwargs = client.open_replacement.call_args.kwargs
     assert kwargs["fields"] == ["batt_charged_kwh", "batt_discharged_kwh"]
-    assert kwargs["window_start"] == E_NEW_FROM
+    assert kwargs["window_start"] == E_START
     rows = _staged(client)
     assert rows
     assert all({"batt_charged_kwh", "batt_discharged_kwh"} <= row.keys() for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_solar_swap_with_an_added_external_sensor(hass: HomeAssistant, mock_entry):
+    """Solar swapped and an external-control sensor added in one reconfigure. The new
+    binary sensor never pulls the energy window back to data_since (that would remove
+    every stored row between data_since and the new solar sensor's start): the energy
+    window still starts at the solar sensor's first complete hour. The flag follows in a
+    replacement of its own over the span the binary sensor's states cover, with rows
+    carrying only external_control."""
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client,
+        data_updates={CONF_SOLAR: ["sensor.solar_new"], CONF_EXTERNAL_CONTROL: EXTERNAL})
+
+    await _entity_cycle(
+        coordinator, _others(**{"sensor.solar_new": E_NEW_FROM}), points=E_POINTS)
+
+    opened = [(c.kwargs["fields"], c.kwargs["window_start"], c.kwargs["window_end"])
+              for c in client.open_replacement.call_args_list]
+    assert opened == [
+        (["solar_kwh"], E_START, E_END),
+        (["external_control"], datetime(2026, 10, 10, 7, tzinfo=UTC), E_END),
+    ]
+    energy_rows = _staged(client, 0)
+    assert energy_rows[0]["ts"] == E_START.isoformat()
+    flag_rows = _staged(client, 1)
+    assert all(set(r) == {"ts", "external_control"} for r in flag_rows)
+    assert flag_rows[0]["ts"] == "2026-10-10T07:00:00+00:00"
+    assert flag_rows[-1]["ts"] == "2026-10-13T08:45:00+00:00"
+    assert len(flag_rows) == (3 * 24 + 2) * 4  # every quarter: no stored row unstaged
+    flagged = [r["ts"] for r in flag_rows if r["external_control"]]
+    assert flagged == [f"2026-10-12T10:{m:02d}:00+00:00" for m in (0, 15, 30, 45)]
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_external_only_change_replaces_the_flag_from_the_first_state(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client(E_SINCE)
+    coordinator, starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_EXTERNAL_CONTROL: EXTERNAL})
+
+    fetch = await _entity_cycle(coordinator, _others(**{"sensor.solar": E_NEW_FROM}),
+                                points=E_POINTS)
+
+    kwargs = client.open_replacement.call_args.kwargs
+    assert kwargs["fields"] == ["external_control"]
+    assert kwargs["window_start"] == datetime(2026, 10, 10, 7, tzinfo=UTC)
+    assert kwargs["window_end"] == E_END
+    assert all(set(r) == {"ts", "external_control"} for r in _staged(client))
+    assert fetch.calls == []  # no statistics read: the flag comes from states
+    # No full row was staged: the bookmark stays.
+    assert starts == [datetime.fromisoformat(E_BOOKMARK)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "old,updates",
+    [
+        # The external-control sensor removed: the stored flags stay.
+        (json.dumps({**json.loads(OLD_FP), "external_control": [EXTERNAL]},
+                    sort_keys=True), {}),
+        # Every solar sensor removed: the stored solar history stays.
+        (OLD_FP, {CONF_SOLAR: []}),
+    ],
+)
+async def test_removed_sensor_replaces_nothing(
+    hass: HomeAssistant, mock_entry, old, updates
+):
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates=updates, applied=old)
+
+    await _entity_cycle(coordinator, _others(**{"sensor.solar": E_NEW_FROM}))
+
+    client.open_replacement.assert_not_called()
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
 
 
 @pytest.mark.asyncio
@@ -1221,16 +1323,18 @@ async def test_entity_change_without_statistics_waits_and_uploads(
     hass: HomeAssistant, mock_entry
 ):
     """A new sensor with no statistics yet: nothing is opened, the regular upload goes
-    on, and the job stays to try again next cycle."""
+    on, and the job stays to try again next cycle. Only the cheap probe of the new
+    sensor is read, not the whole history."""
     client = _direction_client(E_SINCE)
     coordinator, starts = await _entity_coordinator(
         hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
 
-    await _entity_cycle(coordinator, _others())
+    fetch = await _entity_cycle(coordinator, _others())
 
     client.open_replacement.assert_not_called()
     client.put_data.assert_awaited()
     assert starts == [datetime.fromisoformat(E_BOOKMARK)]
+    assert [c[3] for c in fetch.calls] == [{"sensor.solar_new"}]
     job = coordinator._state["replacement_job"]
     assert job["type"] == "entities"
     assert job["fields"] == ["solar_kwh"]
@@ -1292,7 +1396,8 @@ async def test_entity_change_without_data_since_key_waits(hass: HomeAssistant, m
 @pytest.mark.asyncio
 async def test_entity_job_resumed_builds_the_same_rows(hass: HomeAssistant, mock_entry):
     """A replacement left open (the commit failed) is staged again after a restart with
-    the very same rows, read from the spec and not from the new `now`."""
+    the very same rows, read over the range fixed in the spec and not up to the new
+    `now` (more statistics have arrived by then)."""
     client = _direction_client(E_SINCE)
     client.commit_replacement.side_effect = WoltaApiError("down", status=503)
     coordinator, _starts = await _entity_coordinator(
@@ -1302,19 +1407,39 @@ async def test_entity_job_resumed_builds_the_same_rows(hass: HomeAssistant, mock
     await _entity_cycle(coordinator, available)
     first = _staged(client)
     assert first
+    rep = coordinator._state["replacement_job"]["replacement"]
     rid = client.open_replacement.call_args.args[1]
-    assert coordinator._state["replacement_job"]["replacement"]["id"] == rid
+    assert rep["id"] == rid
+    assert rep["read_end"] == E_NOW.isoformat()
     client.put_data.assert_not_called()  # paused while it is open
 
     client.stage_replacement_rows.reset_mock()
     client.commit_replacement.side_effect = None
     coordinator._entity_rows_cache = None  # a restart
-    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(hours=1))
+    fetch = await _entity_cycle(coordinator, available, now=E_NOW + timedelta(hours=1))
 
     client.open_replacement.assert_awaited_once()
     assert _staged(client) == first
+    assert max(c[2] for c in fetch.calls[:2]) == E_NOW
     assert client.commit_replacement.await_args.args[1] == rid
     assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+
+
+@pytest.mark.asyncio
+async def test_entity_rows_that_cannot_be_rebuilt_wait(hass: HomeAssistant, mock_entry):
+    """Hook contract: None when the rows cannot be built now (the statistics are gone)."""
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    job = coordinator._new_replacement_job("entities", "NEW")
+    job["streams"], job["fields"] = ["solar"], ["solar_kwh"]
+    spec = {"kind": "rows", "phase": "energy", "fields": ["solar_kwh"],
+            "window_start": E_START.isoformat(), "window_end": E_END.isoformat(),
+            "read_from": "2025-10-01T00:00:00+00:00", "read_end": E_NOW.isoformat(),
+            "split": "2026-10-04T09:00:00+00:00"}
+    with patch("custom_components.wolta.coordinator.async_fetch_change",
+               side_effect=_fake_statistics(_others())):
+        assert await coordinator._entities_rows(job, spec, E_NOW) is None
 
 
 @pytest.mark.asyncio
@@ -1343,25 +1468,47 @@ async def test_direction_goes_before_a_pending_sensor_change(
 
 
 @pytest.mark.asyncio
-async def test_waiting_entity_job_follows_a_new_selection(hass: HomeAssistant, mock_entry):
-    """A job that has opened nothing takes the latest selection as its target, and goes
-    away when the selection is back to the applied one."""
+async def test_direction_change_preempts_a_waiting_entity_job(
+    hass: HomeAssistant, mock_entry
+):
     client = _direction_client(E_SINCE)
+    waiting = {
+        "type": "entities", "target": "WAITING", "replacement": None,
+        "done_windows": [], "retry_at": None, "phases_done": [],
+        "streams": ["solar"], "fields": ["solar_kwh"],
+    }
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client,
+        data_updates={CONF_INVERT_INTERVALS: [[None, None]], CONF_INVERT_BATTERY: True},
+        job=waiting)
+
+    await coordinator._queue_direction_job()
+
+    assert coordinator._state["replacement_job"]["type"] == "direction"
+
+
+@pytest.mark.asyncio
+async def test_waiting_entity_job_follows_a_new_selection(hass: HomeAssistant, mock_entry):
+    """A job that has opened nothing takes the latest selection as its target (keeping a
+    429's retry_at), and goes away when the selection is back to the applied one."""
+    client = _direction_client(E_SINCE)
+    retry_at = (E_NOW + timedelta(hours=3)).isoformat()
     stale = {
         "type": "entities", "target": "STALE", "replacement": None,
-        "done_windows": [], "retry_at": None,
+        "done_windows": [], "retry_at": retry_at, "phases_done": [],
         "streams": ["solar"], "fields": ["solar_kwh"],
     }
     coordinator, _starts = await _entity_coordinator(
         hass, mock_entry, client, data_updates={CONF_GRID_IN: ["sensor.grid_in_new"]},
         job=stale)
 
-    await _entity_cycle(coordinator, _others())  # no statistics for the new sensor
+    await _entity_cycle(coordinator, _others())
 
     job = coordinator._state["replacement_job"]
     assert job["target"] == coordinator._entities_fingerprint()
     assert job["streams"] == ["grid_in"]
     assert job["fields"] == ["grid_import_kwh"]
+    assert job["retry_at"] == retry_at
     client.open_replacement.assert_not_called()
 
     coordinator._entity_map["grid_in"] = ["sensor.grid_in"]
@@ -1397,10 +1544,11 @@ async def test_entity_commit_moves_the_bookmark_per_k7(
     coordinator, _starts = await _entity_coordinator(
         hass, mock_entry, client, data_updates={}, bookmark=bookmark)
     job = coordinator._new_replacement_job("entities", "NEW")
-    rep = {"kind": "rows", "window_start": "2026-06-01T10:00:00+00:00",
+    rep = {"kind": "rows", "phase": "energy", "fields": ["solar_kwh"],
+           "window_start": "2026-06-01T10:00:00+00:00",
            "window_end": "2026-10-13T09:00:00+00:00", "last_full": last_full}
 
     await coordinator._entities_committed(job, rep, dict(result))
 
     assert coordinator._state["last_uploaded_ts"] == expected
-    assert coordinator._state["applied_entities"] == "NEW"
+    assert job["phases_done"] == ["energy"]

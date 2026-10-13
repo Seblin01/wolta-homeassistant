@@ -470,12 +470,43 @@ def replacement_rows(
     stored row and never inserts a partial one.
 
     *streams* holds merge_streams' keyword arguments (batt_in, batt_out, grid_in,
-    grid_out, solar), with the battery direction already applied."""
-    full = {q.isoformat() for q in complete_all}
-    keep = ("ts", *fields)
-    out: list[dict[str, Any]] = []
-    for row in merge_streams(**streams, external=external, complete=complete_replaced):
-        out.append(row if row["ts"] in full else {k: row[k] for k in keep})
+    grid_out, solar), with the battery direction already applied.
+
+    The per-quarter cap judges what a row carries: a full row is dropped as
+    merge_streams drops it, a partial row only when one of *its* fields exceeds the cap
+    - a spike in a sensor that is not replaced must not cost the replaced value."""
+    full_quarters = set(complete_all) & set(complete_replaced)
+    out: list[dict[str, Any]] = merge_streams(
+        **streams, external=external, complete=full_quarters)
+    partial = sorted(set(complete_replaced) - full_quarters)
+    if not partial:
+        return out
+    source = {
+        "batt_charged_kwh": streams.get("batt_in") or {},
+        "batt_discharged_kwh": streams.get("batt_out") or {},
+        "solar_kwh": streams.get("solar") or {},
+        "grid_import_kwh": streams.get("grid_in") or {},
+        "grid_export_kwh": streams.get("grid_out") or {},
+    }
+    dropped = 0
+    for qt in partial:
+        row: dict[str, Any] = {"ts": qt.isoformat()}
+        for f in fields:
+            if f == "external_control":
+                row[f] = qt in external
+            else:
+                value = source[f].get(qt, 0.0)
+                row[f] = value if value > 0.0 else 0.0  # as merge_streams floors it
+        if any(v > _BACKEND_MAX_KWH for k, v in row.items()
+               if k not in ("ts", "external_control")):
+            dropped += 1
+            continue
+        out.append(row)
+    if dropped:
+        _LOGGER.warning(
+            "Dropped %d replacement row(s) exceeding %.0f kWh per 15 min",
+            dropped, _BACKEND_MAX_KWH)
+    out.sort(key=lambda r: r["ts"])
     return out
 
 

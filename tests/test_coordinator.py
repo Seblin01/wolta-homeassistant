@@ -1351,7 +1351,8 @@ async def test_entity_change_keeps_bookmark_and_queues_a_replacement(
     """Changed sensor selection (reconfigure): the bookmark stays and nothing is re-sent
     or force-recomputed; an entity job replaces the changed fields on the server
     (tests/test_coordinator_replacement.py). An unreadable fingerprint counts as every
-    stream changed. Without data_since from the server the job waits."""
+    stream changed (those with a sensor now are replaced). Without data_since from the
+    server the job waits."""
     client = _mock_client()
     client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
@@ -1377,9 +1378,11 @@ async def test_entity_change_keeps_bookmark_and_queues_a_replacement(
     job = coordinator._state["replacement_job"]
     assert job["type"] == "entities"
     assert job["target"] == coordinator._entities_fingerprint()
+    # external_control has no sensor chosen: a removed (or never chosen) one is not
+    # replaced.
     assert job["fields"] == [
         "solar_kwh", "grid_import_kwh", "grid_export_kwh", "batt_charged_kwh",
-        "batt_discharged_kwh", "external_control"]
+        "batt_discharged_kwh"]
 
 
 @pytest.mark.asyncio
