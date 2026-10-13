@@ -1768,3 +1768,67 @@ def test_hourly_dawn_after_a_gap_is_clean_only_when_the_whole_gap_was_night(
     assert (_NEXT + timedelta(hours=5) in got) is dawn_clean
     assert _NEXT + timedelta(hours=6) in got
     assert _D + timedelta(hours=20) in got
+
+
+# --- rule (b) on every battery sensor: the quarter has no battery value at all -----
+
+
+def _rows_upload(rows_by_sensor: dict[str, list], period_s: int) -> list[dict]:
+    """The coordinator's pipeline for one source: clean quarters per sensor, their
+    intersection, the aggregated streams and merge_streams."""
+    agg = stats.aggregate_5min_to_15min if period_s == 300 else stats.split_hour_to_quarters
+    complete = set.intersection(
+        *(stats.clean_quarters(r, period_s) for r in rows_by_sensor.values()))
+    streams = {name: agg(rows_by_sensor[name])
+               for name in ("batt_in", "batt_out", "grid_in", "grid_out")}
+    return stats.merge_streams(**streams, solar=None, external=None, complete=complete)
+
+
+def test_both_battery_sensors_known_zero_quarters_are_sent():
+    """Both battery counters stand still across 10:00-10:25 (no rows, change 0 at
+    10:30) while the grid is measured: 10:00 and 10:15 are complete, so they are sent
+    with battery 0.0 and the grid's real values - not dropped for lacking a battery
+    key."""
+    gap = set(range(0, 30, 5))
+    batt = [r for r in _r5(*range(-5, 30, 5)) if (r["start"] - T.timestamp()) / 60
+            not in gap] + _r5(30, change=0.0) + _r5(35, 40)
+    grid = _r5(*range(-5, 45, 5), change=0.2)
+    rows = _rows_upload({"batt_in": batt, "batt_out": list(batt),
+                         "grid_in": grid, "grid_out": list(grid)}, 300)
+    by_ts = {r["ts"]: r for r in rows}
+    for q in (T, T + timedelta(minutes=15)):
+        row = by_ts[q.isoformat()]
+        assert row["batt_charged_kwh"] == 0.0
+        assert row["batt_discharged_kwh"] == 0.0
+        assert row["grid_import_kwh"] == pytest.approx(0.6)
+        assert row["grid_export_kwh"] == pytest.approx(0.6)
+    assert (T + timedelta(minutes=30)).isoformat() in by_ts
+
+
+def test_both_battery_sensors_known_zero_hours_are_sent():
+    """Hourly: both battery counters miss the hours 02:00 and 03:00 and show change 0
+    at 04:00; the grid is measured. The quarters of 02:00 and 03:00 are sent with
+    battery 0.0 and a quarter of the grid's hour."""
+    batt = _hours(0, 1) + _hours(4, change=0.0) + _hours(5)
+    grid = _hours(*range(6), change=2.0)
+    rows = _rows_upload({"batt_in": batt, "batt_out": list(batt),
+                         "grid_in": grid, "grid_out": list(grid)}, 3600)
+    by_ts = {r["ts"]: r for r in rows}
+    for q in _quarters_of(2, 3):
+        row = by_ts[q.isoformat()]
+        assert row["batt_charged_kwh"] == 0.0
+        assert row["batt_discharged_kwh"] == 0.0
+        assert row["grid_import_kwh"] == pytest.approx(0.5)
+    assert set(by_ts) == {q.isoformat() for q in _quarters_of(1, 2, 3, 4, 5)}
+
+
+def test_merge_streams_with_complete_emits_a_quarter_without_battery_keys():
+    """With ``complete`` the complete set decides: every quarter in it already needs
+    each battery sensor measured or a proven zero."""
+    q = T
+    rows = stats.merge_streams(batt_in={}, batt_out={}, grid_in={q: 0.3}, grid_out={},
+                               solar={}, external={q}, complete={q})
+    assert rows == [{"ts": q.isoformat(), "batt_charged_kwh": 0.0,
+                     "batt_discharged_kwh": 0.0, "solar_kwh": 0.0,
+                     "grid_import_kwh": 0.3, "grid_export_kwh": 0.0,
+                     "external_control": True}]

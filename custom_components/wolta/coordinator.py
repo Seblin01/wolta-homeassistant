@@ -970,7 +970,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         Known zeros (spec 6.2): a counter that stood still across a gap counts for every
         sensor; for the solar sensors a missing period while the sun is down counts too
         (_sun_down_fn), and such periods are not lag either (_discount_night). The
-        values are untouched - merge_streams fills the absent solar value with 0.0."""
+        values are untouched - merge_streams emits every complete quarter and fills an
+        absent value with 0.0, also when every battery sensor is a known zero."""
         streams: dict[str, dict] = {}
         for name in self._entity_map:
             merged: dict = {}

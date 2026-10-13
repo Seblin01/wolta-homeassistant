@@ -202,7 +202,10 @@ def clean_quarters(
     them (the caller reads further back); without it the run is unproven.
 
     The values are untouched: a known zero has no row, and merge_streams fills an
-    absent value with 0.0, which is now correct because the quarter is complete.
+    absent value with 0.0, which is now correct because the quarter is complete. That
+    holds for the battery streams too: merge_streams emits every quarter of the
+    complete set, also one in which every battery sensor is a known zero and no battery
+    stream holds a value.
 
     5-minute statistics (``period_s`` 300): a quarter is clean when its three periods
     are clean. Hourly statistics (3600, split into quarters): the four quarters of an
@@ -283,9 +286,18 @@ def merge_streams(
 ) -> list[dict[str, Any]]:
     """Merge per-stream quarter dicts into Wolta PUT row dicts.
 
-    Valid quarters are exactly the timestamps present in *batt_in* or *batt_out*.
-    *external* MARKS those rows; it can never add one. Missing values in any stream
-    default to 0.0.
+    Valid quarters are *complete* when it is given, otherwise exactly the timestamps
+    present in *batt_in* or *batt_out*. *external* MARKS those rows; it can never add
+    one. Missing values in any stream default to 0.0.
+
+    With *complete* the battery keys no longer decide. A quarter in *complete* already
+    requires every battery sensor to be measured cleanly or a proven zero in it
+    (clean_quarters), and is clipped to the window of a source that read it. When every
+    battery sensor stood still across a gap (rule (b)) the quarter has no battery key
+    at all - the zero is proven, not recorded - and keying on the battery streams
+    would drop it with its real grid and solar values, permanently once later quarters
+    move the bookmark past it. The argument below about the flag is unchanged by this:
+    *external* still adds nothing, since the valid set is *complete* either way.
 
     Why the flag cannot admit a quarter of its own – this rule has been written three
     times and the next reader should not have to rediscover it:
@@ -326,9 +338,11 @@ def merge_streams(
                    externally controlled (may be None when no sensor is
                    configured; then every row's external_control is False).
         complete:  set[datetime] – quarters every selected sensor measured cleanly
-                   (clean_quarters). When given, a quarter outside it is never emitted
-                   - a stream missing the quarter would otherwise be filled with 0.0,
-                   and a sum over several sensors would be partial.
+                   or proved to be zero (clean_quarters). When given, it IS the set of
+                   emitted quarters: a quarter outside it is never emitted (a stream
+                   missing the quarter would otherwise be filled with 0.0, and a sum
+                   over several sensors would be partial), and a quarter inside it is
+                   emitted even when no battery stream holds a value for it.
 
     Returns:
         List of row dicts with keys:
@@ -349,13 +363,15 @@ def merge_streams(
     _solar = solar or {}
     _external = external or set()
 
-    # Emit exactly the quarters the battery streams carry. The flag MARKS these rows;
-    # it can never add one. Read the docstring before widening this – the rule has
-    # been reformulated three times and each attempt to let the flag admit a quarter
-    # of its own reintroduced fabricated zeros.
-    valid_quarters = _batt_in.keys() | _batt_out.keys()
+    # Emit exactly the complete quarters, or without that set the quarters the battery
+    # streams carry. The flag MARKS these rows; it can never add one. Read the
+    # docstring before widening this – the rule has been reformulated three times and
+    # each attempt to let the flag admit a quarter of its own reintroduced fabricated
+    # zeros.
     if complete is not None:
-        valid_quarters &= complete
+        valid_quarters = set(complete)
+    else:
+        valid_quarters = _batt_in.keys() | _batt_out.keys()
 
     def _nn(v: float) -> float:
         # The recorder's `change` on an energy counter can go slightly negative (float noise
@@ -690,8 +706,8 @@ async def async_fetch_states(
 
     What bounds the upload is therefore NOT this function and must not be reintroduced
     here as a window assumption: ``merge_streams`` emits a flagged quarter only when
-    the recorder compiled statistics for that very quarter. The bound lives where the
-    evidence lives."""
+    it is complete - every selected sensor measured it, or proved it zero, in the
+    statistics the recorder compiled. The bound lives where the evidence lives."""
     from homeassistant.components.recorder import get_instance  # noqa: PLC0415
     from homeassistant.components.recorder import history  # noqa: PLC0415
 

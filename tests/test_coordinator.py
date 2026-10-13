@@ -5027,6 +5027,82 @@ async def test_battery_gap_followed_by_zero_change_is_sent(hass: HomeAssistant, 
     assert sent[(q + timedelta(minutes=15)).isoformat()]["batt_charged_kwh"] == pytest.approx(0.2)
 
 
+def _batteries_stand_still(data: dict, gap: tuple[datetime, datetime]) -> dict:
+    """Both battery sensors have no rows in [gap[0], gap[1]) and change 0 in the first
+    period after it: a counter that stood still across the gap (rule (b))."""
+    for sid in ("sensor.batt_in", "sensor.batt_out"):
+        data[sid] = [
+            {**r, "change": 0.0} if r["start"] == gap[1].timestamp() else r
+            for r in data[sid]
+            if not gap[0].timestamp() <= r["start"] < gap[1].timestamp()]
+    return data
+
+
+@pytest.mark.asyncio
+async def test_both_battery_sensors_standing_still_are_sent(hass: HomeAssistant, mock_entry):
+    """Both battery counters miss 10:00-10:25 and show change 0 at 10:30 while the grid
+    is measured: the quarters 10:00 and 10:15 have no battery value anywhere, yet they
+    are complete, so they are sent with battery 0.0 and the real grid values."""
+    q = NOW - timedelta(hours=2)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        return _batteries_stand_still(_energy_stats(start, end),
+                                      (q, q + timedelta(minutes=30)))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = {r["ts"]: r for c in client.put_data.call_args_list for r in c.args[1]}
+    for ts in (q, q + timedelta(minutes=15)):
+        row = sent[ts.isoformat()]
+        assert row["batt_charged_kwh"] == 0.0
+        assert row["batt_discharged_kwh"] == 0.0
+        assert row["grid_import_kwh"] == pytest.approx(0.3)
+        assert row["grid_export_kwh"] == pytest.approx(0.3)
+    assert (q + timedelta(minutes=30)).isoformat() in sent
+
+
+@pytest.mark.asyncio
+async def test_both_battery_sensors_standing_still_hourly_are_sent(
+    hass: HomeAssistant, mock_entry
+):
+    """Hourly (heal): both battery counters miss two hours and show change 0 in the
+    hour after; the grid is measured. The quarters of the two hours are sent with
+    battery 0.0 and a quarter of the grid's hour."""
+    h = (NOW - timedelta(days=12)).replace(minute=0, second=0, microsecond=0)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(hs, ids, start, end, period):
+        assert period == "hour"
+        return _batteries_stand_still(_full_stats(start, end, period),
+                                      (h, h + timedelta(hours=2)))
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        rows = await coordinator._heal_rows(NOW - timedelta(days=15), NOW)
+
+    sent = {r["ts"]: r for r in rows}
+    for k in range(8):
+        row = sent[(h + timedelta(minutes=15 * k)).isoformat()]
+        assert row["batt_charged_kwh"] == 0.0
+        assert row["batt_discharged_kwh"] == 0.0
+        assert row["grid_import_kwh"] == pytest.approx(0.025)
+    assert (h + timedelta(hours=2)).isoformat() in sent
+
+
 async def _run_solar_cycles(
     hass, mock_entry, client, *, now: datetime, cycles: int, hours: tuple[float, float],
     dead: tuple[str, ...] = (), advance: timedelta = timedelta(hours=6),
