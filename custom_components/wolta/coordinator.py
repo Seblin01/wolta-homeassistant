@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -205,15 +206,20 @@ def direction_swap_intervals(block: dict) -> list[intervals.Interval]:
 
     A list `swap_intervals` of {"from", "to"} (ISO UTC or null for open) is taken as it
     is. Without the key (an older backend) the v0.43 rule holds: "all" and "partial" flip
-    the whole history, the other forms nothing. Anything malformed flips nothing."""
+    the whole history, the other forms nothing. Anything malformed flips nothing, and so
+    does a bound that is not on a whole UTC hour: the direction job swaps whole hours,
+    and a bound inside an hour could overlap a window it has already swapped."""
     if "swap_intervals" not in block:
         return [(None, None)] if block.get("form") in _BATTERY_DIRECTION_FIXABLE else []
     raw = block.get("swap_intervals")
     if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
         return []
-    return intervals.normalize(
+    swap = intervals.normalize(
         intervals.parse([[item.get("from"), item.get("to")] for item in raw])
     )
+    if any(t is not None and t != _floor_hour(t) for interval in swap for t in interval):
+        return []
+    return swap
 
 
 # The stored flow fields a sensor stream feeds (server spec §3). Either battery stream
@@ -326,6 +332,77 @@ def _runs(
         merged[i][1] = merged[i + 1][1]
         del merged[i + 1]
     return [(start, end) for start, end in merged]
+
+
+def _energy_windows(
+    built: _Built,
+    streams: dict[str, dict],
+    sources: list[_Source],
+    streams_by: dict[str, list[str]],
+    external: set[datetime],
+    read_from: datetime,
+    split: datetime,
+    done: list[tuple[datetime, datetime]],
+    window: tuple[datetime, datetime] | None,
+) -> tuple[list[list], list[list[dict]]] | None:
+    """The per-quarter part of WoltaCoordinator._energy_build, pure and run in the
+    executor: from the built streams (`streams` with the applied inversion swapped in),
+    the windows of the energy phase ([start, end, last_full] in ISO) and the rows of
+    each, or None when the added sensors (`streams_by`: replaced stream -> sensors
+    added to it) have measured nothing yet. See _energy_build for the rules."""
+    energy = sorted(s for s in streams_by if s != "external_control")
+    judged = set(energy)
+    if judged & {"batt_in", "batt_out"}:
+        judged |= {"batt_in", "batt_out"}
+    bounded = [built.complete_by_stream[s] for s in sorted(judged)
+               if built.complete_by_stream.get(s) is not None]
+    if not bounded:
+        return None
+    begun: int | None = None
+    for e in sorted({e for s in energy for e in streams_by[s]}):
+        measured: set[int] = set()
+        for src in sources:
+            measured |= measured_starts(src.raw.get(e) or [], _PERIOD_S[src.agg_fn])
+        if not measured:
+            return None
+        begun = min(measured) if begun is None else max(begun, min(measured))
+    complete = set.intersection(*bounded)
+    if begun is not None:
+        first_measured = datetime.fromtimestamp(begun, tz=timezone.utc)
+        complete = {q for q in complete if q >= first_measured}
+    if window is not None:
+        spans = [window]
+    else:
+        hours = sorted(
+            h for h in {_floor_hour(q) for q in complete}
+            if h >= read_from
+            and all(h + _QUARTER * k in complete for k in range(4))
+            and not any(ws <= h < we for ws, we in done))
+        spans = _runs(hours, done, split)
+    # Spans are sorted and disjoint: a quarter's span is found by bisection.
+    starts = [ws for ws, _we in spans]
+
+    def span_of(q: datetime) -> int | None:
+        i = bisect_right(starts, q) - 1
+        return i if i >= 0 and q < spans[i][1] else None
+
+    inside = {q for q in complete if span_of(q) is not None}
+    rows = stats.replacement_rows(
+        streams, built.complete, inside, replaced_fields(energy), external)
+    grouped: list[list[dict]] = [[] for _ in spans]
+    for row in rows:
+        i = span_of(datetime.fromisoformat(row["ts"]))
+        if i is not None:
+            grouped[i].append(row)
+    windows: list[list] = []
+    rows_by_window: list[list[dict]] = []
+    for (ws, we), mine in zip(spans, grouped):
+        if not mine:
+            continue
+        full = [r["ts"] for r in mine if all(f in r for f in _ENERGY_FIELDS)]
+        windows.append([ws.isoformat(), we.isoformat(), max(full) if full else None])
+        rows_by_window.append(mine)
+    return windows, rows_by_window
 
 
 def _floor_hour(t: datetime) -> datetime:
@@ -1883,57 +1960,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         its stored rows. More than _ENTITY_MAX_WINDOWS runs: the smallest gaps are merged
         first. `window` given (a resume): only that window's rows."""
         streams_by = job.get("streams") or {}
-        energy = sorted(s for s in streams_by if s != "external_control")
-        fields = replaced_fields(energy)
         sources = await self._entities_sources(read_from, split, read_end)
-        # `now` as the split implies it, so the solar anchor reads do not move.
-        built, streams = await self._build(
-            split + timedelta(days=_SHORT_TERM_DAYS), sources, lambda _b, s: s)
-        judged = set(energy)
-        if judged & {"batt_in", "batt_out"}:
-            judged |= {"batt_in", "batt_out"}
-        bounded = [built.complete_by_stream[s] for s in sorted(judged)
-                   if built.complete_by_stream.get(s) is not None]
-        if not bounded:
-            return None
-        begun: int | None = None
-        for e in sorted({e for s in energy for e in streams_by[s]}):
-            measured: set[int] = set()
-            for src in sources:
-                measured |= measured_starts(src.raw.get(e) or [], _PERIOD_S[src.agg_fn])
-            if not measured:
-                return None
-            begun = min(measured) if begun is None else max(begun, min(measured))
-        complete = set.intersection(*bounded)
-        if begun is not None:
-            first_measured = datetime.fromtimestamp(begun, tz=timezone.utc)
-            complete = {q for q in complete if q >= first_measured}
-        if window is not None:
-            spans = [window]
-        else:
-            done = [(datetime.fromisoformat(k[0]), datetime.fromisoformat(k[1]))
-                    for k in job.get("done_windows") or [] if len(k) == 3 and k[2] == "energy"]
-            hours = sorted(
-                h for h in {_floor_hour(q) for q in complete}
-                if h >= read_from
-                and all(h + _QUARTER * k in complete for k in range(4))
-                and not any(ws <= h < we for ws, we in done))
-            spans = _runs(hours, done, split)
-        inside = {q for q in complete if any(ws <= q < we for ws, we in spans)}
         external = await self._external_quarters(read_from, read_end)
-        rows = await self.hass.async_add_executor_job(
-            stats.replacement_rows, streams, built.complete, inside, fields, external)
-        windows: list[list] = []
-        rows_by_window: list[list[dict]] = []
-        for ws, we in spans:
-            lo, hi = ws.isoformat(), we.isoformat()
-            mine = [r for r in rows if lo <= r["ts"] < hi]
-            if not mine:
-                continue
-            full = [r["ts"] for r in mine if all(f in r for f in _ENERGY_FIELDS)]
-            windows.append([lo, hi, max(full) if full else None])
-            rows_by_window.append(mine)
-        return windows, rows_by_window
+        done = [(datetime.fromisoformat(k[0]), datetime.fromisoformat(k[1]))
+                for k in job.get("done_windows") or [] if len(k) == 3 and k[2] == "energy"]
+        # `now` as the split implies it, so the solar anchor reads do not move. The
+        # judging, the windows and the rows are per quarter over up to a year: they run
+        # in the executor with the build (_energy_windows).
+        _built, planned = await self._build(
+            split + timedelta(days=_SHORT_TERM_DAYS), sources,
+            lambda built, streams: _energy_windows(
+                built, streams, sources, streams_by, external, read_from, split, done,
+                window))
+        return planned
 
     async def _external_rows(
         self,
@@ -1999,8 +2038,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         rows), or when the bookmark lay inside the window (rows after that quarter may
         have been removed). After the last window, a bookmark past it steps back too: the
         quarters after the window still hold the old sensors' values, and the regular
-        upload sends them again once they are complete. Nothing moves on an empty result:
-        the server replaced nothing. The external phase is done with its one window. The
+        upload sends them again once they are complete. A step back stops at the
+        5-minute boundary of the plan (_ENTITY_SHORT_TERM_DAYS). Nothing moves on an
+        empty result: the server replaced nothing. The external phase is done with its one window. The
         applied fingerprint follows once every phase is done (_entities_finished)."""
         phase = rep.get("phase", "energy")
         if phase == "external":
@@ -2029,6 +2069,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             new = full
         elif rep.get("final") and mark >= end:
             new = full if full is not None else end - _QUARTER
+        if new is not None and new < mark:
+            # A step back never passes the 5-minute boundary (with the plan's margin):
+            # from further back the regular upload would heal from hourly statistics and
+            # overwrite the recent quarters with hour/4 values. What lies before it is
+            # older than the 5-minute statistics anyway, and the window covered it. A
+            # bookmark already behind the boundary heals from hourly statistics anyway.
+            floor = _floor(dt_util.utcnow() - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600)
+            if mark > floor:
+                new = max(new, floor)
         if new is not None and new != mark:
             self._state["last_uploaded_ts"] = new.isoformat()
 

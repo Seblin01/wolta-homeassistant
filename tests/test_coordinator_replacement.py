@@ -1623,7 +1623,7 @@ async def test_waiting_entity_job_follows_a_new_selection(hass: HomeAssistant, m
     ],
 )
 @pytest.mark.parametrize("final", [False, True])
-async def test_entity_commit_moves_the_bookmark_per_k7(
+async def test_entity_commit_moves_the_bookmark(
     hass: HomeAssistant, mock_entry, bookmark, last_full, result, expected, final
 ):
     client = _direction_client(E_SINCE)
@@ -1635,7 +1635,8 @@ async def test_entity_commit_moves_the_bookmark_per_k7(
            "window_end": "2026-10-13T09:00:00+00:00", "last_full": last_full,
            "final": final}
 
-    await coordinator._entities_committed(job, rep, dict(result))
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=E_NOW):
+        await coordinator._entities_committed(job, rep, dict(result))
 
     if final and result and bookmark == "2026-10-13T09:15:00+00:00":
         # Past the last window: steps back, so the tail is uploaded again.
@@ -1655,9 +1656,46 @@ async def test_entity_commit_after_the_last_window_without_a_full_quarter(
            "window_start": "2026-06-01T10:00:00+00:00",
            "window_end": "2026-10-13T07:00:00+00:00", "last_full": None, "final": True}
 
-    await coordinator._entities_committed(job, rep, dict(COMMIT_RESULT))
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=E_NOW):
+        await coordinator._entities_committed(job, rep, dict(COMMIT_RESULT))
 
     assert coordinator._state["last_uploaded_ts"] == "2026-10-13T06:45:00+00:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bookmark,window_end,last_full,expected",
+    [
+        # The last window ended long before the 5-minute boundary: the step back stops
+        # at the boundary (E_NOW - 8 days, on the hour), not at the window's end.
+        ("2026-10-13T08:30:00+00:00", "2026-09-01T00:00:00+00:00",
+         "2026-08-31T23:45:00+00:00", "2026-10-05T09:00:00+00:00"),
+        # The bookmark inside a window, the last full quarter far back: the same stop.
+        ("2026-10-13T08:30:00+00:00", "2026-10-13T09:00:00+00:00",
+         "2026-09-20T12:00:00+00:00", "2026-10-05T09:00:00+00:00"),
+        # A bookmark already behind the boundary heals from hourly statistics anyway:
+        # the step back is not limited.
+        ("2026-10-01T00:00:00+00:00", "2026-10-13T09:00:00+00:00",
+         "2026-09-20T12:00:00+00:00", "2026-09-20T12:00:00+00:00"),
+    ],
+)
+async def test_entity_commit_never_steps_the_bookmark_back_past_the_5_minute_boundary(
+    hass: HomeAssistant, mock_entry, bookmark, window_end, last_full, expected
+):
+    """Stepping back further would make the next upload heal from hourly statistics
+    and overwrite the recent quarters with hour/4 values."""
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={}, bookmark=bookmark)
+    job = coordinator._new_replacement_job("entities", "NEW")
+    rep = {"kind": "rows", "phase": "energy", "fields": ["solar_kwh"],
+           "window_start": "2026-06-01T10:00:00+00:00", "window_end": window_end,
+           "last_full": last_full, "final": True}
+
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=E_NOW):
+        await coordinator._entities_committed(job, rep, dict(COMMIT_RESULT))
+
+    assert coordinator._state["last_uploaded_ts"] == expected
 
 
 # --- Round 2: windows of complete hours, removal-only changes, the external phase ---
@@ -1706,6 +1744,34 @@ async def test_short_gap_of_the_new_sensor_stays_inside_one_window(
     staged = {r["ts"] for r in _staged(client)}
     assert "2026-06-10T12:00:00+00:00" not in staged
     assert "2026-06-10T15:00:00+00:00" in staged
+
+
+@pytest.mark.asyncio
+async def test_energy_windows_and_rows_are_planned_off_the_event_loop(
+    hass: HomeAssistant, mock_entry
+):
+    """The per-quarter judging, the windows and the rows (a year of quarters) run in the
+    executor, never on the event loop."""
+    import threading
+
+    from custom_components.wolta import coordinator as coordinator_module
+
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_GRID_IN: [G_NEW]})
+    loop_thread = threading.current_thread()
+    threads: list = []
+    real = coordinator_module._energy_windows
+
+    def spy(*args, **kwargs):
+        threads.append(threading.current_thread())
+        return real(*args, **kwargs)
+
+    with patch.object(coordinator_module, "_energy_windows", side_effect=spy):
+        await _entity_cycle(coordinator, _others(**{G_NEW: E_NEW_FROM}))
+
+    assert threads and all(t is not loop_thread for t in threads)
+    assert _opened_windows(client) == [(E_START, E_END)]
 
 
 @pytest.mark.asyncio

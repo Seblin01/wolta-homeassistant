@@ -472,13 +472,17 @@ def replacement_rows(
     *streams* holds merge_streams' keyword arguments (batt_in, batt_out, grid_in,
     grid_out, solar), with the battery direction already applied.
 
-    The per-quarter cap judges what a row carries: a full row is dropped as
-    merge_streams drops it, a partial row only when one of *its* fields exceeds the cap
-    - a spike in a sensor that is not replaced must not cost the replaced value."""
+    The per-quarter cap judges what a row carries: a partial row is dropped only when
+    one of *its* fields exceeds the cap - a spike in a sensor that is not replaced must
+    not cost the replaced value. For the same reason a full row that merge_streams drops
+    over the cap falls back to a partial row with only the replaced fields: dropped
+    whole, the quarter would have no staged row and the server would remove it."""
     full_quarters = set(complete_all) & set(complete_replaced)
     out: list[dict[str, Any]] = merge_streams(
         **streams, external=external, complete=full_quarters)
-    partial = sorted(set(complete_replaced) - full_quarters)
+    emitted = {row["ts"] for row in out}
+    over_cap = {qt for qt in full_quarters if qt.isoformat() not in emitted}
+    partial = sorted((set(complete_replaced) - full_quarters) | over_cap)
     if not partial:
         return out
     source = {

@@ -5154,6 +5154,41 @@ async def test_direction_issue_with_malformed_swap_intervals_is_not_fixable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("form,key", [
+    ("since", "battery_direction_since"), ("ended", "battery_direction_ended"),
+    ("all", "battery_direction_no_fix")])
+@pytest.mark.parametrize("swap", [
+    [{"from": "2026-09-28T13:30:00+00:00", "to": None}],
+    [{"from": None, "to": "2026-09-28T13:00:05+00:00"}],
+    # Judged in UTC: 14:30 at UTC+01:00 is 13:30 UTC.
+    [{"from": "2026-09-28T13:00:00+00:00", "to": "2026-09-30T14:30:00+01:00"}],
+])
+async def test_direction_issue_with_swap_bounds_off_the_hour_is_text_only(
+    hass, mock_entry, form, key, swap
+):
+    """The direction job swaps whole UTC hours: a bound inside an hour is not offered as
+    a fix (it could overlap a window already swapped); the issue only explains."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(form, swap))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is False
+    assert issue.translation_key == key
+    assert issue.data["swap_intervals"] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_issue_with_swap_bounds_on_the_hour_in_another_offset_is_fixable(
+    hass, mock_entry
+):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_measured_params(_swap_results(
+        "since", [{"from": "2026-09-28T15:00:00+02:00", "to": None}]))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID)
+    assert issue.is_fixable is True
+    assert issue.data["swap_intervals"] == [["2026-09-28T13:00:00+00:00", None]]
+
+
+@pytest.mark.asyncio
 async def test_direction_ignore_applies_to_a_fixable_since_issue(hass, mock_entry):
     from custom_components.wolta.const import CONF_DIRECTION_ISSUE_IGNORED
     c = await _cap_coordinator(hass, mock_entry, **{CONF_DIRECTION_ISSUE_IGNORED: True})

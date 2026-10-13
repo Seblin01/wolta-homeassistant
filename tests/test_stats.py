@@ -1928,8 +1928,23 @@ class TestReplacementRows:
         assert stats.replacement_rows(
             streams, complete_all=set(), complete_replaced={self.Q1},
             fields=["solar_kwh"], external=set()) == []
-        # A full row is judged on every field, as merge_streams does.
-        streams["solar"][self.Q1] = 2.1
-        assert stats.replacement_rows(
-            streams, complete_all={self.Q1}, complete_replaced={self.Q1},
-            fields=["solar_kwh"], external=set()) == []
+
+    def test_full_row_over_the_cap_falls_back_to_the_replaced_fields(self):
+        """merge_streams drops a full row with a spike in any field. Dropped whole, the
+        quarter would have no staged row and the server would remove the stored one, so
+        a spike in a field that is not replaced leaves a partial row with the replaced
+        fields; a spike in a replaced field still drops the quarter."""
+        streams = self._streams()
+        streams["grid_in"][self.Q1] = 900.0
+        rows = stats.replacement_rows(
+            streams, complete_all={self.Q0, self.Q1}, complete_replaced={self.Q0, self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert [r["ts"] for r in rows] == [self.Q0.isoformat(), self.Q1.isoformat()]
+        assert len(rows[0]) == 7
+        assert rows[1] == {"ts": self.Q1.isoformat(), "solar_kwh": 2.1}
+
+        streams["solar"][self.Q1] = 700.0
+        rows = stats.replacement_rows(
+            streams, complete_all={self.Q0, self.Q1}, complete_replaced={self.Q0, self.Q1},
+            fields=["solar_kwh"], external=set())
+        assert [r["ts"] for r in rows] == [self.Q0.isoformat()]
