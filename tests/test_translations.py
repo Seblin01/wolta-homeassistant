@@ -142,3 +142,31 @@ def test_energy_empty_no_longer_promises_a_grade_without_the_stream(
     assert needle in text
     assert "without that stream" not in text
     assert "utan den strömmen" not in text
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+@pytest.mark.parametrize("key", ["replacement_waiting_direction", "replacement_waiting_entities"])
+def test_replacement_waiting_names_the_retry_time(path: Path, key: str) -> None:
+    """The repair for a full archive has one placeholder, {retry_at}: when the correction
+    is tried again. The title carries none."""
+    issue = _load(path)["issues"][key]
+    assert "{retry_at}" in issue["description"]
+    assert "{" not in issue["title"]
+    assert "fix_flow" not in issue
+
+
+@pytest.mark.parametrize("path, needles", [
+    (_STRINGS, ("temporarily stopped accepting corrections", "automatically",
+                "don't need to do anything")),
+    (_TRANSLATIONS / "en.json", ("temporarily stopped accepting corrections",
+                                 "automatically", "don't need to do anything")),
+    (_TRANSLATIONS / "sv.json", ("tillfälligt", "automatiskt",
+                                 "behöver inte göra något")),
+], ids=lambda v: v.name if isinstance(v, Path) else "")
+def test_replacement_waiting_says_nothing_needs_to_be_done(
+    path: Path, needles: tuple[str, ...]
+) -> None:
+    for key in ("replacement_waiting_direction", "replacement_waiting_entities"):
+        text = _load(path)["issues"][key]["description"]
+        for needle in needles:
+            assert needle in text, (key, needle)

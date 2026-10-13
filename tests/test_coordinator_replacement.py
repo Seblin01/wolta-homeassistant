@@ -2707,3 +2707,103 @@ async def test_an_unreachable_server_counts_like_a_5xx(hass: HomeAssistant, mock
         await _cycle(coordinator)
 
     assert coordinator._state["replacement_job"]["server_failures"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A full archive (429 on open) is shown as a repair until the job moves on
+# ---------------------------------------------------------------------------
+
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
+from homeassistant.util import dt as dt_util  # noqa: E402
+
+from custom_components.wolta.const import DOMAIN  # noqa: E402
+
+
+def _waiting_issue(hass, mock_entry):
+    return ir.async_get(hass).async_get_issue(
+        DOMAIN, f"replacement_waiting_{mock_entry.entry_id}")
+
+
+@pytest.mark.asyncio
+async def test_archive_full_raises_the_waiting_repair_and_a_commit_clears_it(
+    hass: HomeAssistant, mock_entry
+):
+    """429 on the open of a swap: a non-fixable warning that names the retry time in
+    local time and that a direction change waits. The commit after Retry-After clears
+    it."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaRateLimitError(86400)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=D_NOW):
+        await coordinator._async_update_data()
+
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_direction"
+    assert issue.is_fixable is False
+    assert issue.severity == ir.IssueSeverity.WARNING
+    retry = dt_util.as_local(D_NOW + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+    assert issue.translation_placeholders == {"retry_at": retry}
+
+    client.open_replacement.side_effect = None
+    later = D_NOW + timedelta(days=1, minutes=1)
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=later):
+        await coordinator._async_update_data()
+
+    assert coordinator._state["applied_invert_intervals"] == [[None, None]]
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_when_the_job_is_dropped(
+    hass: HomeAssistant, mock_entry
+):
+    """A sensor change held back by a full archive: the repair says a sensor change
+    waits, and goes away when the selection is set back and the job is dropped."""
+    client = _direction_client(E_SINCE)
+    client.open_replacement.side_effect = WoltaRateLimitError(3600)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+
+    await _entity_cycle(coordinator, available)
+
+    issue = _waiting_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.translation_key == "replacement_waiting_entities"
+
+    coordinator._entity_map["solar"] = ["sensor.solar"]  # back to the applied selection
+    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(minutes=30))
+
+    assert "replacement_job" not in coordinator._state
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_when_the_job_is_parked(
+    hass: HomeAssistant, mock_entry
+):
+    client = _client()
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    retry = NOW + timedelta(hours=1)
+    coordinator._raise_waiting_issue(coordinator._state["replacement_job"], retry)
+    assert _waiting_issue(hass, mock_entry) is not None
+
+    await coordinator._park_job(coordinator._state["replacement_job"], NOW, "test", 5)
+
+    assert _waiting_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_is_cleared_in_view_only_mode(hass: HomeAssistant, mock_entry):
+    client = _client()
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+    coordinator._raise_waiting_issue(
+        coordinator._state["replacement_job"], NOW + timedelta(hours=1))
+    coordinator._view_only = True
+
+    await _cycle(coordinator)
+
+    assert _waiting_issue(hass, mock_entry) is None

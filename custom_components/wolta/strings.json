@@ -20,6 +20,14 @@
       "title": "Wolta has stopped uploading: a selected sensor has no statistics",
       "description": "{entities} has stopped producing statistics that Wolta can use, while your other selected sensors still do. Wolta only sends quarters in which every selected sensor has a value of its own, so uploading is paused until the sensor reports statistics again. The quarters from the paused period may not be sent afterwards.\n\nCheck that the sensor exists and is available in Home Assistant, and check its `state_class`: a power sensor (W, `state_class: measurement`) produces statistics without the sum column Wolta reads energy from, which counts as no statistics. If the sensor has been replaced by another one, select the new one under Reconfigure, or remove the old one there. If you pick a replacement, Wolta replaces the values of that sensor's energy stream (for example solar) in the history it already stores, from the statistics of the sensors now selected for the stream. The other streams' values are kept, except in short stretches (up to six hours) where the new sensors have no data: those quarters are removed. If you only remove the sensor, the stored history is left as it is. This warning clears itself once the sensor reports data again."
     },
+    "replacement_waiting_direction": {
+      "title": "Wolta: the battery direction change is waiting",
+      "description": "Wolta's server has temporarily stopped accepting corrections of the stored history for this plant, so the changed battery direction has not been applied to the stored history yet. The correction is retried automatically at {retry_at}. You don't need to do anything: new data is uploaded as usual, and this warning clears itself once the correction has gone through."
+    },
+    "replacement_waiting_entities": {
+      "title": "Wolta: the sensor change is waiting",
+      "description": "Wolta's server has temporarily stopped accepting corrections of the stored history for this plant, so the values from the sensors you changed have not replaced the stored ones yet. The correction is retried automatically at {retry_at}. You don't need to do anything: new data is uploaded as usual, and this warning clears itself once the correction has gone through."
+    },
     "measured_capacity": {
       "title": "Wolta measured a different battery capacity",
       "fix_flow": {

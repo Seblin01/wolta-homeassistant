@@ -754,6 +754,10 @@ _ISSUE_STATISTICS_MISSING = "statistics_missing"
 # and was only added in v0.40.0, so every earlier install has it empty without ever having
 # been asked. Fixable: the repair opens the picker (or records a no).
 _ISSUE_SOC_MISSING = "soc_missing"
+# The server's archive of replaced rows is full (429 on open): a correction of the stored
+# history waits until Retry-After. Non-fixable, one per entry; the translation key says
+# which correction waits (_direction / _entities), the placeholder when it is retried.
+_ISSUE_REPLACEMENT_WAITING = "replacement_waiting"
 
 # Consecutive bad read cycles before the repair is raised. Same threshold and
 # rationale as the flex twin above: at the 6 h slow poll this is roughly a day,
@@ -875,6 +879,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._flex_issue_id: str = f"{_ISSUE_FLEX_NO_STATS}_{entry.entry_id}"
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
         self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
+        self._waiting_issue_id: str = f"{_ISSUE_REPLACEMENT_WAITING}_{entry.entry_id}"
         # Completeness of the latest regular read (quarters dropped as incomplete and the
         # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
         # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
@@ -1039,6 +1044,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # the regular upload back for good. An open replacement expires server-side.
             _LOGGER.warning("Dropping a Wolta replacement job of unknown type %r", job.get("type"))
             self._state.pop("replacement_job", None)
+            self._clear_waiting_issue()
             await self._store.async_save(self._state)
             return False
         retry_at = job.get("retry_at")
@@ -1109,6 +1115,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     if spec == "done":
                         await hooks.on_finished(job)
                         self._state.pop("replacement_job", None)
+                        self._clear_waiting_issue()
                         await self._store.async_save(self._state)
                         _LOGGER.info("Wolta replacement job (%s) finished", job["type"])
                         return False
@@ -1245,6 +1252,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 self._applied_intervals(), intervals.parse(job["done_windows"])))
         self._state.pop("replacement_job", None)
         self._entity_rows_cache = {}
+        self._clear_waiting_issue()
         until = now + _JOB_PARK_BACKOFF
         self._state.setdefault("job_backoff", {})[job_type] = until.isoformat()
         await self._store.async_save(self._state)
@@ -1388,6 +1396,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.debug("on_committed failure detail", exc_info=True)
         job["replacement"] = None
         job.pop("failures", None)
+        self._clear_waiting_issue()
         await self._store.async_save(self._state)
         _LOGGER.info(
             "Wolta replacement committed (%s, %s, %s..%s)",
@@ -1472,8 +1481,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # 429 archive_full: the plant's archive of replaced rows is full until its
             # oldest entries age out (Retry-After).
             job["replacement"] = None
-            job["retry_at"] = (now + timedelta(seconds=err.retry_after)).isoformat()
+            retry = now + timedelta(seconds=err.retry_after)
+            job["retry_at"] = retry.isoformat()
             await self._store.async_save(self._state)
+            self._raise_waiting_issue(job, retry)
             _LOGGER.warning(
                 "Wolta cannot open a replacement now (archive full or rate limited); "
                 "retrying in %s s",
@@ -1525,6 +1536,23 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         except (WoltaApiError, aiohttp.ClientError, TimeoutError):
             _LOGGER.debug("Discarding a replacement failed; it expires server-side", exc_info=True)
 
+    def _raise_waiting_issue(self, job: dict, retry: datetime) -> None:
+        """Tell the owner that a correction waits for the server's archive (429 on open):
+        what waits, and when it is tried again (local time). Nothing to do for them; it
+        clears when a replacement of the job commits or the job is gone
+        (_clear_waiting_issue)."""
+        kind = "direction" if job.get("type") == "direction" else "entities"
+        ir.async_create_issue(
+            self.hass, DOMAIN, self._waiting_issue_id, is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=f"{_ISSUE_REPLACEMENT_WAITING}_{kind}",
+            translation_placeholders={
+                "retry_at": dt_util.as_local(retry).strftime("%Y-%m-%d %H:%M")},
+        )
+
+    def _clear_waiting_issue(self) -> None:
+        ir.async_delete_issue(self.hass, DOMAIN, self._waiting_issue_id)
+
     # ------------------------------------------------------------------
     # Direction job: swap the battery fields of stored rows (server spec §9.3)
     # ------------------------------------------------------------------
@@ -1549,6 +1577,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if job:
             _LOGGER.info(
                 "Wolta sensor change postponed: the battery direction is swapped first")
+            self._clear_waiting_issue()
         self._state["replacement_job"] = self._new_replacement_job(
             "direction", intervals.dump(intervals.normalize(desired))
         )
@@ -1676,6 +1705,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if self._job_backed_off("entities", now or dt_util.utcnow()):
             return
         retry_at = job.get("retry_at") if job else None
+        if job:
+            self._clear_waiting_issue()
         self._state.pop("replacement_job", None)
         self._entity_rows_cache = {}
         streams = replaced_streams(applied, entities_now)
@@ -2254,6 +2285,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # den av anläggningens bindning (Sonnen-webhook/Reduxi), och servern 409:ar
             # dessutom varje skrivförsök.
             if self._view_only:
+                self._clear_waiting_issue()  # this entry corrects nothing
                 results = await self.client.results(self.token)
                 return self._build_data(results, last_uploaded=None)
 
