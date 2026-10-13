@@ -5143,6 +5143,50 @@ async def test_a_long_still_run_is_logged_at_debug(
         assert "2:00:00" in line
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["backfill", "heal", "incremental", "gap"])
+async def test_the_build_runs_off_the_event_loop(hass: HomeAssistant, mock_entry, mode):
+    """The completeness judgement (clean_quarters) and the merge run in the executor,
+    never on the event-loop thread, and the rows are the same as before."""
+    import threading
+
+    from custom_components.wolta import coverage
+    from custom_components.wolta import coordinator as coord_mod
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    loop_thread = threading.get_ident()
+    threads: set[int] = set()
+    real_clean, real_merge = coord_mod.clean_quarters, coord_mod.merge_streams
+
+    def clean(*args, **kwargs):
+        threads.add(threading.get_ident())
+        return real_clean(*args, **kwargs)
+
+    def merge(*args, **kwargs):
+        threads.add(threading.get_ident())
+        return real_merge(*args, **kwargs)
+
+    async def fetch(h, ids, start, end, period):
+        return _full_stats(start, end, period)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+        patch("custom_components.wolta.coordinator.clean_quarters", side_effect=clean),
+        patch("custom_components.wolta.coordinator.merge_streams", side_effect=merge),
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        if mode == "gap":
+            rows = await coordinator._gap_rows(
+                coverage.Gap(NOW - timedelta(days=12), NOW - timedelta(days=1)), NOW)
+        else:
+            rows = await _run_fetch_mode(coordinator, mode)
+
+    assert rows
+    assert threads and loop_thread not in threads
+
+
 async def _run_solar_cycles(
     hass, mock_entry, client, *, now: datetime, cycles: int, hours: tuple[float, float],
     dead: tuple[str, ...] = (), advance: timedelta = timedelta(hours=6),

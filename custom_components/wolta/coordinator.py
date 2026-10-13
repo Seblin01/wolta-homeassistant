@@ -953,29 +953,42 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Row-fetching helpers
     # ------------------------------------------------------------------
 
-    def _sum_stream(
+    def _stream_ids(self) -> dict[str, list[str]]:
+        """The selected statistic ids per stream, keyed by merge_streams' parameter
+        names, with the invert flag applied (_effective_stream): a snapshot taken on the
+        event loop, so the build in the executor reads no config entry."""
+        return {name: list(self._entity_map[self._effective_stream(name)])
+                for name in self._entity_map}
+
+    async def _build_rows(
+        self, now: datetime, sources: list[_Source], external: set[datetime]
+    ) -> tuple[_Built, list[dict]]:
+        """Anchor the solar sensors (statistics reads, on the loop), then build the
+        streams, judge completeness and merge the upload rows in the executor.
+
+        The build is pure but CPU-heavy: a backfill judges a year of hourly and nine
+        days of 5-minute periods for every sensor, plus the sun's position per day. Off
+        the event loop it cannot stall Home Assistant. What reads Home Assistant - the
+        stream ids under the invert flag and the home position for the sun - is taken
+        here, on the loop, and handed in."""
+        sources = await self._anchor_solar(now, sources)
+        ids = self._stream_ids()
+        sun_down = ({_PERIOD_S[src.agg_fn]: self._sun_down_fn(_PERIOD_S[src.agg_fn])
+                     for src in sources} if ids["solar"] else {})
+
+        def job() -> tuple[_Built, list[dict]]:
+            built = self._build_streams(*sources, ids=ids, sun_down=sun_down)
+            return built, merge_streams(
+                **built.streams, external=external, complete=built.complete)
+
+        return await self.hass.async_add_executor_job(job)
+
+    def _build_streams(
         self,
-        raw_data: dict,
-        stream: str,
-        agg_fn,
-    ) -> dict:
-        """Aggregate and sum all entity rows for one stream.
-
-        Args:
-            raw_data: mapping of statistic_id → rows (from async_fetch_change)
-            stream:   stream name key in _entity_map (e.g. "solar")
-            agg_fn:   aggregation function — split_hour_to_quarters or aggregate_5min_to_15min
-
-        Returns:
-            Summed per-quarter dict for the stream.
-        """
-        per_entity = [
-            agg_fn(raw_data.get(entity_id) or [])
-            for entity_id in self._entity_map[self._effective_stream(stream)]
-        ]
-        return sum_quarter_dicts(per_entity)
-
-    def _build_streams(self, *sources: _Source) -> _Built:
+        *sources: _Source,
+        ids: dict[str, list[str]] | None = None,
+        sun_down: dict[int, Callable[[int], bool]] | None = None,
+    ) -> _Built:
         """Build the five per-quarter streams and decide which quarters are complete.
 
         Values: each source contributes only the quarters inside its own window (the
@@ -995,23 +1008,30 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         sensor; for the solar sensors a missing period while the sun is down counts too
         (_sun_down_fn), and such periods are not lag either (_discount_night). The
         values are untouched - merge_streams emits every complete quarter and fills an
-        absent value with 0.0, also when every battery sensor is a known zero."""
+        absent value with 0.0, also when every battery sensor is a known zero.
+
+        ``ids`` (_stream_ids) and ``sun_down`` (per statistics period, _sun_down_fn)
+        are computed here when not given; _build_rows hands them in so that this runs in
+        the executor without touching Home Assistant."""
+        if ids is None:
+            ids = self._stream_ids()
         streams: dict[str, dict] = {}
-        for name in self._entity_map:
+        for name, stream_ids in ids.items():
             merged: dict = {}
             for src in sources:
                 # Only the source's own window: the early-read period before it makes a
                 # partial quarter that must not override the previous source's value.
-                merged.update({
-                    q: v for q, v in self._sum_stream(src.raw, name, src.agg_fn).items()
-                    if src.start <= q < src.end})
+                summed = sum_quarter_dicts(
+                    [src.agg_fn(src.raw.get(e) or []) for e in stream_ids])
+                merged.update({q: v for q, v in summed.items() if src.start <= q < src.end})
             streams[name] = merged
 
-        sensors = self._statistic_ids()
-        # The solar stream is not swapped by the invert flag, so the map is read directly.
-        solar = set(self._entity_map["solar"]) & sensors
+        sensors = {e for stream_ids in ids.values() for e in stream_ids}
+        # The solar stream is not swapped by the invert flag.
+        solar = set(ids["solar"])
         periods = {_PERIOD_S[src.agg_fn] for src in sources}
-        sun_down = {p: self._sun_down_fn(p) for p in periods} if solar else {}
+        if sun_down is None:
+            sun_down = {p: self._sun_down_fn(p) for p in periods} if solar else {}
         complete: set[datetime] = set()
         blame = {e: 0 for e in sensors}
         # Newest measured period per sensor over the whole read, with its source's period.
@@ -1607,14 +1627,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
         # Aggregate and sum per stream; each source contributes only its own window
-        built = self._build_streams(*await self._anchor_solar(now, [
+        built, rows = await self._build_rows(now, [
             _Source(lts_data, split_hour_to_quarters, start, short_term_start),
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
-        ]))
+        ], external)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
-        return merge_streams(**built.streams, external=external, complete=built.complete)
+        return rows
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Heal a gap from LTS (÷4) when the short-term window was missed."""
@@ -1626,12 +1646,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="hour",
         )
-        built = self._build_streams(*await self._anchor_solar(
-            now, [_Source(lts_data, split_hour_to_quarters, start, now)]))
+        built, rows = await self._build_rows(
+            now, [_Source(lts_data, split_hour_to_quarters, start, now)], external)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
-        return merge_streams(**built.streams, external=external, complete=built.complete)
+        return rows
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
         """Fetch short-term 5-min data since bookmark and aggregate to 15-min."""
@@ -1643,12 +1663,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             now,
             period="5minute",
         )
-        built = self._build_streams(*await self._anchor_solar(
-            now, [_Source(short_data, aggregate_5min_to_15min, start, now)]))
+        built, rows = await self._build_rows(
+            now, [_Source(short_data, aggregate_5min_to_15min, start, now)], external)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
         await self._note_silent_sensors(built, window=now - start)
-        return merge_streams(**built.streams, external=external, complete=built.complete)
+        return rows
 
     async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:
         """Flow rows for a coverage gap [gap.start, gap.end) – the history the server lacks
@@ -1679,10 +1699,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 period="5minute")
             sources.append(
                 _Source(short_data, aggregate_5min_to_15min, five_start, gap.end))
-        built = self._build_streams(*await self._anchor_solar(now, sources))
-        return coverage.within(
-            merge_streams(**built.streams, external=external, complete=built.complete),
-            gap.end)
+        _built, rows = await self._build_rows(now, sources, external)
+        return coverage.within(rows, gap.end)
 
     async def _remember_coverage(self, token_fp: str, since: datetime | None) -> None:
         """Persist the coverage memo – only on change (one Store write per actual change,
