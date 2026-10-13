@@ -176,7 +176,9 @@ class _ReplacementType:
     # (job) once next_replacement says "done": apply the job's target to the applied state.
     on_finished: Callable[[dict], Awaitable[None]]
     # (job, spec, now) -> the rows of a "rows" replacement, or None when they cannot be
-    # built now (the job waits). Not needed by a type that only swaps.
+    # built now (the job waits). Not needed by a type that only swaps. It may note what
+    # it built on `spec`: the runner keeps the spec as the replacement (saved before the
+    # rows are staged), so on_committed sees it.
     rows_for: Callable[[dict, dict, datetime], Awaitable[list[dict] | None]] | None = None
 
 
@@ -1983,23 +1985,29 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             job.pop("energy_plan", None)
             return None
         key = (job["target"], phase, spec["window_start"], spec["window_end"])
-        cached = self._entity_rows_cache.pop(key, None)
-        if cached is not None:
-            return cached
-        window = (datetime.fromisoformat(spec["window_start"]),
-                  datetime.fromisoformat(spec["window_end"]))
-        read_from = datetime.fromisoformat(spec.get("read_from") or spec["window_start"])
-        read_end = datetime.fromisoformat(spec.get("read_end") or spec["window_end"])
-        if phase == "external":
-            plan = await self._external_rows(read_from, read_end, window=window)
-            return None if plan is None else plan[2]
-        split = (datetime.fromisoformat(spec["split"]) if spec.get("split")
-                 else _floor(read_end - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600))
-        built = await self._energy_build(job, read_from, split, read_end, window=window)
-        if not built or not built[1] or not built[1][0]:
-            job.pop("energy_plan", None)
-            return None
-        return built[1][0]
+        rows = self._entity_rows_cache.pop(key, None)
+        if rows is None:
+            window = (datetime.fromisoformat(spec["window_start"]),
+                      datetime.fromisoformat(spec["window_end"]))
+            read_from = datetime.fromisoformat(spec.get("read_from") or spec["window_start"])
+            read_end = datetime.fromisoformat(spec.get("read_end") or spec["window_end"])
+            if phase == "external":
+                plan = await self._external_rows(read_from, read_end, window=window)
+                return None if plan is None else plan[2]
+            split = (datetime.fromisoformat(spec["split"]) if spec.get("split")
+                     else _floor(read_end - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600))
+            built = await self._energy_build(job, read_from, split, read_end, window=window)
+            if not built or not built[1] or not built[1][0]:
+                job.pop("energy_plan", None)
+                return None
+            rows = built[1][0]
+        if phase == "energy":
+            # What the bookmark rule needs (_entities_committed), from the rows staged
+            # now: a resume builds them again, and a sensor added meanwhile to a stream
+            # the phase does not judge can turn the plan's last full quarter partial.
+            full = [r["ts"] for r in rows if all(f in r for f in _ENERGY_FIELDS)]
+            spec["staged_last_full"] = max(full) if full else None
+        return rows
 
     async def _entities_probe(
         self, sensors: list[str], read_from: datetime, read_end: datetime
@@ -2114,7 +2122,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         The energy phase moves the bookmark to the latest quarter of the window staged
         with every field when that is later than the bookmark (the server inserted those
         rows), or when the bookmark lay inside the window (rows after that quarter may
-        have been removed). After the last window, a bookmark past it steps back too: the
+        have been removed). That quarter is taken from the rows actually staged
+        (`staged_last_full`, noted by _entities_rows), falling back to the plan's
+        `last_full` for a replacement staged before the note existed. After the last window, a bookmark past it steps back too: the
         quarters after the window still hold the old sensors' values, and the regular
         upload sends them again once they are complete. A step back stops at the
         5-minute boundary of the plan (_ENTITY_SHORT_TERM_DAYS). Nothing moves on an
@@ -2141,7 +2151,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         mark = datetime.fromisoformat(bookmark)
         start = datetime.fromisoformat(rep["window_start"])
         end = datetime.fromisoformat(rep["window_end"])
-        full = datetime.fromisoformat(rep["last_full"]) if rep.get("last_full") else None
+        last_full = (rep["staged_last_full"] if "staged_last_full" in rep
+                     else rep.get("last_full"))
+        full = datetime.fromisoformat(last_full) if last_full else None
         new = None
         if full is not None and (full > mark or start <= mark < end):
             new = full

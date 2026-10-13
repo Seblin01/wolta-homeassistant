@@ -2807,3 +2807,44 @@ async def test_waiting_repair_is_cleared_in_view_only_mode(hass: HomeAssistant, 
     await _cycle(coordinator)
 
     assert _waiting_issue(hass, mock_entry) is None
+
+
+# ---------------------------------------------------------------------------
+# The bookmark after an energy window follows the rows actually staged
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bookmark_follows_the_rows_staged_on_a_resume(hass: HomeAssistant, mock_entry):
+    """The plan's last full quarter is 08:45. The commit fails and, before the resume, a
+    sensor is added to grid export (a stream the solar change does not judge) that has
+    stopped reporting at 07:20. The rows built again carry 08:45 as a partial row only,
+    which the server skips where it holds no row; the bookmark must land on the last
+    quarter staged with every field, not on 08:45."""
+    client = _direction_client(E_SINCE)
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    coordinator, starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_SOLAR: ["sensor.solar_new"]})
+    available = _others(**{"sensor.solar_new": E_NEW_FROM})
+
+    await _entity_cycle(coordinator, available)
+    rep = coordinator._state["replacement_job"]["replacement"]
+    planned = "2026-10-13T08:45:00+00:00"
+    assert rep["last_full"] == planned
+    assert starts == []  # paused while it is open
+
+    coordinator._entity_map["grid_out"] = ["sensor.grid_out", "sensor.grid_out_2"]
+    coordinator._entity_rows_cache = {}  # a restart
+    client.stage_replacement_rows.reset_mock()
+    client.commit_replacement.side_effect = None
+    stop = datetime(2026, 10, 13, 7, 20, tzinfo=UTC)
+    available = {**available, "sensor.grid_out_2": [(E_OTHERS_FROM, stop)]}
+    await _entity_cycle(coordinator, available, now=E_NOW + timedelta(hours=1))
+
+    rows = _staged(client)
+    by_ts = {r["ts"]: r for r in rows}
+    assert set(by_ts[planned]) == {"ts", "solar_kwh"}  # partial now
+    full = max(r["ts"] for r in rows if len(r) == 7)
+    assert full < planned
+    assert full == "2026-10-13T07:00:00+00:00"
+    assert starts == [datetime.fromisoformat(full)]
