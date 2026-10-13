@@ -160,8 +160,11 @@ class _ReplacementType:
     runner saves it. `rows_for` must give the same rows for the same spec, since it runs
     again on every resume of an open replacement. Hooks should not raise: the runner
     tolerates it (logged, retried next cycle, and a replacement that keeps failing is
-    given up), but a hook that raises never makes progress. A hook that wants the job
-    held back sets `job["retry_at"]` (ISO) rather than returning None every cycle."""
+    given up, and a job that keeps failing is parked), but a hook that raises never makes
+    progress. A hook that wants the job held back sets `job["retry_at"]` (ISO) rather
+    than returning None every cycle; one that waits for a reason that may never pass (no
+    data_since from the server) calls _note_job_failure, so the job is parked after
+    _JOB_MAX_FAILED_CYCLES cycles in a row."""
 
     # (job, now, profile) -> the next spec; None to wait (nothing is opened and the regular
     # upload goes on), or "done" when the job has nothing left to replace.
@@ -574,6 +577,14 @@ _REPLACEMENT_FULL_RETRY = timedelta(days=1)
 _REPLACEMENT_MAX_FAILURES = 3
 _REPLACEMENT_GIVE_UP_RETRY = timedelta(days=1)
 
+# A job that fails at the job level this many cycles in a row - the server refuses it
+# with a 4xx it gives no handled code for, a plan cannot be built, the server gives no
+# data_since, or it conflicts or closes the replacement again and again - is parked: taken
+# out of the slot, and no job of its type is queued for _JOB_PARK_BACKOFF. Otherwise one
+# deterministic error would hold every later direction and sensor change for good.
+_JOB_MAX_FAILED_CYCLES = 5
+_JOB_PARK_BACKOFF = timedelta(hours=24)
+
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
 
@@ -835,6 +846,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # statistics is not read again for every window. Taken once; lost on a restart,
         # when the same read is made again.
         self._entity_rows_cache: dict[tuple[str, str, str, str], list[dict]] = {}
+        # What the replacement job did in the current cycle (_run_replacement_job): a
+        # commit, an open with its rows staged, and the first job-level failure.
+        self._job_cycle: dict = {"committed": False, "staged": False, "failure": None}
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -949,6 +963,18 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 return self._replacement_held(job)
             job["retry_at"] = None
             await self._store.async_save(self._state)
+        self._job_cycle = {"committed": False, "staged": False, "failure": None}
+        held = await self._advance_replacement_job(job, hooks, now, profile)
+        if await self._count_job_cycle(job, now):
+            return False  # parked: nothing of it is held open
+        return held
+
+    async def _advance_replacement_job(
+        self, job: dict, hooks: _ReplacementType, now: datetime, profile: dict | None
+    ) -> bool:
+        """One cycle of the job: up to _REPLACEMENTS_PER_CYCLE replacements, each resumed
+        or opened, staged and committed. Returns whether the regular upload must pause
+        (_run_replacement_job)."""
         try:
             for _ in range(_REPLACEMENTS_PER_CYCLE):
                 rep = job.get("replacement")
@@ -1027,6 +1053,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             )
         except WoltaApiError as err:
             rep = job.get("replacement")
+            if err.status is not None and 400 <= err.status < 500:
+                self._note_job_failure(f"HTTP {err.status}")
             if rep is not None and err.status is not None and 400 <= err.status < 500:
                 # A refusal that repeating the same requests would not change (413: the
                 # result would exceed the profile's row limit; 409 without a code: a
@@ -1052,8 +1080,73 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 "Wolta replacement job failed (%s); retrying next cycle", type(err).__name__
             )
             _LOGGER.debug("Replacement job failure detail", exc_info=True)
+            self._note_job_failure(type(err).__name__)
             await self._replacement_failed(job, hooks, now)
         return self._replacement_held(job)
+
+    def _note_job_failure(self, why: str) -> None:
+        """Record a job-level failure in this cycle (see _JOB_MAX_FAILED_CYCLES): one
+        that repeating the same cycle would most likely meet again."""
+        if self._job_cycle.get("failure") is None:
+            self._job_cycle["failure"] = why
+
+    async def _count_job_cycle(self, job: dict, now: datetime) -> bool:
+        """Count the cycle the job just ran. Progress - a commit, or an open with its
+        rows staged and no job-level failure after it - resets the count; a cycle with a
+        job-level failure adds one; a cycle that only waited changes nothing. At
+        _JOB_MAX_FAILED_CYCLES in a row the job is parked (_park_job) - unless it still
+        holds a replacement: an open one is given up by _replacement_failed first, and
+        an abandoned one is never parked, since it may have been committed. Returns
+        True when the job was parked."""
+        if self._state.get("replacement_job") is not job:
+            return False  # finished, or dropped
+        cycle = self._job_cycle
+        if cycle["committed"] or (cycle["staged"] and cycle["failure"] is None):
+            if job.pop("job_failures", None) is not None:
+                await self._store.async_save(self._state)
+            return False
+        if cycle["failure"] is None:
+            return False
+        job["job_failures"] = job.get("job_failures", 0) + 1
+        if job["job_failures"] < _JOB_MAX_FAILED_CYCLES or job.get("replacement") is not None:
+            await self._store.async_save(self._state)
+            return False
+        await self._park_job(job, now, cycle["failure"])
+        return True
+
+    async def _park_job(self, job: dict, now: datetime, why: str) -> None:
+        """Take a job that keeps failing out of the slot, and queue none of its type
+        for _JOB_PARK_BACKOFF, so the other type can run meanwhile. What it committed
+        stays: the windows a direction job swapped are folded into the applied
+        intervals, so the job queued after the backoff does not swap them back. A
+        sensor change keeps its applied fingerprint; its next job replaces the same
+        values again where it already did."""
+        job_type = job.get("type")
+        if job_type == "direction" and job.get("done_windows"):
+            self._set_applied_intervals(intervals.sym_diff(
+                self._applied_intervals(), intervals.parse(job["done_windows"])))
+        self._state.pop("replacement_job", None)
+        self._entity_rows_cache = {}
+        until = now + _JOB_PARK_BACKOFF
+        self._state.setdefault("job_backoff", {})[job_type] = until.isoformat()
+        await self._store.async_save(self._state)
+        _LOGGER.warning(
+            "Wolta replacement job (%s) failed %s cycles in a row (last: %s); parking it "
+            "until %s", job_type, job.get("job_failures"), why, until.isoformat(),
+        )
+
+    def _job_backed_off(self, job_type: str, now: datetime) -> bool:
+        """Whether a job of `job_type` was parked and its backoff has not passed."""
+        backoff = self._state.get("job_backoff") or {}
+        raw = backoff.get(job_type)
+        if raw is None:
+            return False
+        if now < self._parse_retry_at(raw):
+            return True
+        backoff.pop(job_type, None)
+        if not backoff:
+            self._state.pop("job_backoff", None)
+        return False
 
     @staticmethod
     def _window_key(spec: dict) -> list[str]:
@@ -1149,6 +1242,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     ) -> None:
         """Book a committed window: done_windows, the type's hook, and no replacement in
         flight - saved together, so a restart neither repeats nor loses the window."""
+        self._job_cycle["committed"] = True
         window = self._window_key(rep)
         if window not in job["done_windows"]:
             job["done_windows"].append(window)
@@ -1191,6 +1285,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             if rows is not None:
                 await self._store.async_save(self._state)
                 await self.client.stage_replacement_rows(self.token, rid, rows)
+            self._job_cycle["staged"] = True
             for attempt in (1, 2):
                 await self._store.async_save(self._state)
                 try:
@@ -1209,12 +1304,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         return {}
                     raise
         except WoltaReplacementConflict as err:
+            self._note_job_failure(f"409 {err.code}")
             if err.code != "conflict":  # conflict: the server already aborted it
                 await self._discard_replacement(rid)
             _LOGGER.warning(
                 "Wolta replacement refused (%s); starting over with a new id", err.code
             )
         except WoltaReplacementGone as err:
+            self._note_job_failure(f"gone ({err.code or err.status})")
             _LOGGER.warning(
                 "Wolta replacement closed by the server (%s); starting over with a new id",
                 err.code or err.status,
@@ -1252,6 +1349,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             )
             return False
         except WoltaApiError as err:
+            if err.status is not None and 400 <= err.status < 500:
+                # A refusal (422, a stream-bound 409, a conflict or a gone id): counted,
+                # so one that never passes parks the job instead of holding the slot.
+                self._note_job_failure(f"open refused (HTTP {err.status})")
             job["replacement"] = None
             await self._store.async_save(self._state)
             _LOGGER.warning(
@@ -1274,16 +1375,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Direction job: swap the battery fields of stored rows (server spec §9.3)
     # ------------------------------------------------------------------
 
-    async def _queue_direction_job(self) -> None:
+    async def _queue_direction_job(self, now: datetime | None = None) -> None:
         """Start a direction job when the desired inversion differs from the applied one
         and no job runs. Nothing is re-sent and the bookmark stays: the server swaps the
         battery fields of the rows it holds and queues the recount at commit. A change of
         the desired value while a job runs is picked up here once that job is done.
 
         A direction change goes before a sensor change: an entity job that has not
-        started on the server yet gives way, and is queued again once this one is done."""
+        started on the server yet gives way, and is queued again once this one is done.
+        None is queued while a parked direction job's backoff lasts (_park_job)."""
         job = self._state.get("replacement_job")
         if job and not self._idle_entity_job(job):
+            return
+        if self._job_backed_off("direction", now or dt_util.utcnow()):
             return
         desired = self._desired_intervals()
         if not intervals.sym_diff(desired, self._applied_intervals()):
@@ -1321,6 +1425,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             since = coverage.server_since(job)  # the last commit's data_since
         if since is coverage.MISSING:
             _LOGGER.debug("No data_since from the server; the direction job waits")
+            self._note_job_failure("no data_since from the server")
             return None
         if since is None:
             return "done"
@@ -1389,7 +1494,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             and not job.get("done_windows")
         )
 
-    async def _queue_entity_job(self, entities_now: str) -> None:
+    async def _queue_entity_job(self, entities_now: str, now: datetime | None = None) -> None:
         """Start an entity job when the selected sensors differ from those the stored
         rows were built with (applied_entities). Nothing is re-sent and the bookmark stays:
         the job replaces only the fields of the streams a sensor was added to or swapped
@@ -1399,7 +1504,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         A job that has not started on the server is retargeted when the selection changes
         again (a new sensor without statistics would otherwise hold it for good), and
-        dropped when the selection is back to the applied one."""
+        dropped when the selection is back to the applied one. None is queued while a
+        parked entity job's backoff lasts (_park_job)."""
         applied = self._state.get("applied_entities")
         if applied is None:
             self._state["applied_entities"] = entities_now
@@ -1412,6 +1518,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         if not job and applied == entities_now:
             return
+        if self._job_backed_off("entities", now or dt_util.utcnow()):
+            return
         retry_at = job.get("retry_at") if job else None
         self._state.pop("replacement_job", None)
         self._entity_rows_cache = {}
@@ -1423,6 +1531,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         new_job = self._new_replacement_job("entities", entities_now)
         new_job["streams"] = streams
         new_job["fields"] = replaced_fields(list(streams))
+        new_job["judged"] = self._judged_selection(streams, entities_now)
         new_job["phases_done"] = []
         new_job["retry_at"] = retry_at  # a 429 still holds for the plant's archive
         self._state["replacement_job"] = new_job
@@ -1461,14 +1570,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return result
         return "done"
 
-    @staticmethod
-    def _plan_since(profile: dict | None):
-        """floor_hour(data_since) for a new plan; MISSING to wait, None when the server
-        holds no rows (the job is then done)."""
+    def _plan_since(self, profile: dict | None):
+        """floor_hour(data_since) for a new plan; MISSING to wait (a job-level failure),
+        None when the server holds no rows (the job is then done)."""
         since = coverage.server_since(profile)
         if since is coverage.MISSING or since is None:
             if since is coverage.MISSING:
                 _LOGGER.debug("No data_since from the server; the sensor change waits")
+                self._note_job_failure("no data_since from the server")
             return since
         return _floor_hour(since)
 
@@ -1482,7 +1591,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         5-minute statistics can be purged. Returns a spec, None to wait (no statistics
         from the added sensors yet), "phase_done", or "done" (no rows on the server)."""
         if self._selection_left(job, "energy"):
-            return self._end_phase(job, "energy", "the added sensors are no longer selected")
+            return self._left_selection_step(
+                job, "energy", "the sensors it was planned for are no longer selected")
         plan = job.get("energy_plan")
         if plan is not None and now - datetime.fromisoformat(plan["planned_at"]) > (
             _ENTITY_PLAN_MAX_AGE
@@ -1552,19 +1662,56 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         selection or direction change can replace it - only finishing it can."""
         return bool(job.get("done_windows"))
 
+    @staticmethod
+    def _judged_selection(streams: dict, target: str) -> dict[str, list[str]] | None:
+        """The sensors of every stream the energy phase judges - the replaced energy
+        streams, plus the other battery stream when either is replaced - as the job's
+        target selects them. The phase's rows are built from the CURRENT selection
+        (_build reads _stream_ids/_statistic_ids), so these are what its windows and rows
+        stay valid for. None when the target cannot be read."""
+        selected = _parse_fingerprint(target)
+        if selected is None:
+            return None
+        judged = {s for s in streams if s != "external_control"}
+        if judged & {"batt_in", "batt_out"}:
+            judged |= {"batt_in", "batt_out"}
+        return {s: sorted(selected[s]) for s in sorted(judged)}
+
     def _selection_left(self, job: dict, phase: str) -> bool:
-        """Whether a sensor the job adds in `phase` is no longer selected (the owner
-        reconfigured while the job ran). A job that has committed nothing is retargeted
-        before it runs (_queue_entity_job), so this only ends a started one."""
+        """Whether the current selection is no longer the one `phase` was planned for
+        (the owner reconfigured while the job ran).
+
+        Energy phase: any difference in the sensors of a judged stream (_judged_selection)
+        - an added, removed or swapped sensor alike - since every row of the phase is
+        built from the current selection: a sensor added alongside would change which
+        quarters are complete, and the server removes every stored row in the window
+        that has no staged row. External phase: the chosen binary sensor differs.
+
+        It holds whether or not the job has started: a started job ends the phase
+        (_end_phase); one that has committed nothing waits, its replacement in flight is
+        dropped (_entities_rows gives None), and the next cycle retargets it
+        (_queue_entity_job)."""
         streams = job.get("streams") or {}
-        if not self._started(job):
-            return False
         if phase == "external":
             return set(streams.get("external_control") or []) != (
                 {self._external_entity} if self._external_entity else set())
+        judged = job.get("judged")
+        if judged is None:
+            judged = self._judged_selection(streams, job.get("target"))
+        if judged is None:
+            return True  # an unreadable target: nothing to build its rows against
         return any(
-            not set(added) <= set(self._entity_map.get(stream) or [])
-            for stream, added in streams.items() if stream != "external_control")
+            set(sensors) != set(self._entity_map.get(stream) or [])
+            for stream, sensors in judged.items())
+
+    def _left_selection_step(self, job: dict, phase: str, why: str) -> str | None:
+        """The phase's answer once its selection has left: a started job ends the phase;
+        one that has committed nothing waits for the next cycle's retarget."""
+        if self._started(job):
+            return self._end_phase(job, phase, why)
+        _LOGGER.debug("Wolta sensor selection changed again; the sensor change is retargeted")
+        job.pop("energy_plan", None)
+        return None
 
     @staticmethod
     def _end_phase(job: dict, phase: str, why: str) -> str:
@@ -1595,7 +1742,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         row the phase is given up, so it never holds the job (and with it every later
         direction or sensor change) for good."""
         if self._selection_left(job, "external"):
-            return self._end_phase(job, "external", "the sensor is no longer selected")
+            return self._left_selection_step(job, "external", "the sensor is no longer selected")
         read_from = self._plan_since(profile)
         if read_from is coverage.MISSING:
             return None
@@ -1643,7 +1790,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         made anew."""
         phase = spec.get("phase", "energy")
         if self._selection_left(job, phase):
-            # Reconfigured meanwhile: dropped by the runner, and the phase then ends.
+            # Reconfigured meanwhile: rows built now would have another composition than
+            # the plan. The runner drops the replacement; then a started job ends the
+            # phase and one that has committed nothing waits to be retargeted.
+            job.pop("energy_plan", None)
             return None
         key = (job["target"], phase, spec["window_start"], spec["window_end"])
         cached = self._entity_rows_cache.pop(key, None)
@@ -1987,8 +2137,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             entities_now = self._entities_fingerprint()
 
             await self._track_soc_selection()
-            await self._queue_direction_job()
-            await self._queue_entity_job(entities_now)
+            await self._queue_direction_job(now)
+            await self._queue_entity_job(entities_now, now)
 
             # A replacement of stored flows runs before the regular upload (server spec
             # §9): while one is open on the server, neither the regular PUT /data nor the
