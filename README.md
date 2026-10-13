@@ -147,7 +147,7 @@ Changing the battery direction or the energy sensors does not make the integrati
 - **Older history.** A correction never touches stored history older than one year before the integration was set up. History from before that, for example a file uploaded on wolta.se, stays as it is.
 - **Replaced values are kept.** The server keeps the replaced values for 90 days.
 
-While a correction is running, regular uploads and the history check wait until it finishes. The progress is shown in the integration's diagnostics (**desired** against **applied** direction, and the running job).
+While a correction is running, regular uploads and the history check wait until it finishes. The progress is shown in the integration's diagnostics (**desired** against **applied** direction, and the running job). If the server has temporarily stopped accepting corrections for your plant, a repair says which correction is waiting and when it is retried automatically; nothing needs to be done.
 
 ## External control (Grid Rewards and similar flex-market services)
 
