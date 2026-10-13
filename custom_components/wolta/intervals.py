@@ -66,7 +66,10 @@ def _parse_bound(raw: Any) -> tuple[bool, datetime | None]:
         return False, None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return False, None  # a naive time is not an instant
-    return True, parsed.astimezone(_UTC)
+    try:
+        return True, parsed.astimezone(_UTC)
+    except OverflowError:  # e.g. year 1 at +02:00 has no UTC representation
+        return False, None
 
 
 def parse(raw: Any) -> list[Interval]:
@@ -113,13 +116,15 @@ def sym_diff(a: list[Interval], b: list[Interval]) -> list[Interval]:
 
 
 def contains(intervals: list[Interval], ts: datetime) -> bool:
+    """Whether ts lies in any interval. ts must be timezone-aware."""
     return any(_lo(s) <= ts < _hi(e) for s, e in intervals)
 
 
 def clip(
     intervals: list[Interval], lo: datetime, hi: datetime
 ) -> list[tuple[datetime, datetime]]:
-    """Intersect with [lo, hi); the result has no open ends."""
+    """Intersect with [lo, hi); the result has no open ends. lo and hi must be
+    timezone-aware."""
     return _merge(
         [(max(s, lo), min(e, hi)) for s, e in _internal(intervals)]
     )

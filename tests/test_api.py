@@ -854,7 +854,7 @@ async def test_open_replacement_puts_body_with_bearer(aioclient_mock: AiohttpCli
         "window_end": "2026-09-28T15:00:00+00:00",
         "fields": ["solar_kwh", "grid_import_kwh"],
         "reason": "entities_changed",
-        "client": f"wolta-homeassistant/{_integration_version()}",
+        "client": f"wolta-hacs/{_integration_version()}",
     }
     assert headers["Authorization"] == f"Bearer {TOKEN}"
 
@@ -1027,6 +1027,25 @@ async def test_replacement_409_without_error_detail_is_generic_api_error(
         await client.commit_replacement(TOKEN, RID, 5)
     assert not isinstance(exc_info.value, WoltaReplacementConflict)
     assert exc_info.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_replacement_409_with_string_detail_is_plain_api_error(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """The stream-bound refusal has a string detail: a plain WoltaApiError(409), never a
+    WoltaReplacementConflict."""
+    aioclient_mock.put(REP_URL, status=409, json={"detail": "stream-bound plant"})
+    client = _client(aioclient_mock)
+    from datetime import datetime, timezone
+
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    with pytest.raises(WoltaApiError) as exc_info:
+        await client.open_replacement(
+            TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+            fields=None, reason="direction",
+        )
+    assert type(exc_info.value) is WoltaApiError and exc_info.value.status == 409
 
 
 @pytest.mark.asyncio

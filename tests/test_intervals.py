@@ -31,6 +31,12 @@ def test_parse_rejects_non_string_and_malformed_items():
     assert iv.parse({"a": 1}) == []
 
 
+def test_parse_extreme_value_is_empty_not_an_error():
+    # Year 1 at +02:00 cannot be expressed in UTC (OverflowError on conversion).
+    assert iv.parse([["0001-01-01T00:00:00+02:00", None]]) == []
+    assert iv.parse([[None, "9999-12-31T23:59:59-02:00"]]) == []
+
+
 def test_parse_converts_offsets_to_utc():
     out = iv.parse([["2026-09-28T15:00:00+02:00", None]])
     assert out == [(T, None)]

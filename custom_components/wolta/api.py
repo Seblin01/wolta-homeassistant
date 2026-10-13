@@ -91,8 +91,9 @@ PREFILL_TIMEOUT = aiohttp.ClientTimeout(total=8)
 MAX_ROWS_PER_PUT = 5_000
 
 # Identifies this client in the `client` field of a replacement (server spec
-# 2026-10-13 §5.1). A product token only; the server stores it as a short label.
-REPLACEMENT_CLIENT = f"wolta-homeassistant/{_integration_version()}"
+# 2026-10-13 §5.1). The product token of USER_AGENT (wolta-hacs/<version>), so the
+# server sees the same client name in both places.
+REPLACEMENT_CLIENT = USER_AGENT.split(" ", 1)[0]
 
 
 def _utc_iso(value: datetime) -> str:
@@ -140,8 +141,10 @@ class WoltaReplacementGone(WoltaApiError):
 
 
 class WoltaReplacementConflict(WoltaApiError):
-    """409 with an `error` detail: `conflict`, `count_mismatch`, `empty`, or a refusal
-    such as a stream-bound plant. `code` is the server error code."""
+    """409 with a dict `detail` carrying an `error` code: `conflict`, `count_mismatch`,
+    `empty`, `no_rows_for_swap`, ... `code` is the server error code. A 409 with a
+    string detail (the stream-bound refusal) is not this: it arrives as a plain
+    WoltaApiError with status 409."""
 
     def __init__(self, code: str, message: str = "", status: int | None = 409) -> None:
         super().__init__(message or f"Replacement conflict: {code}", status=status)
