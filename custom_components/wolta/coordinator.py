@@ -661,6 +661,11 @@ _REPLACEMENT_GIVE_UP_RETRY = timedelta(days=1)
 # deterministic error would hold every later direction and sensor change for good.
 _JOB_MAX_FAILED_CYCLES = 5
 _JOB_PARK_BACKOFF = timedelta(hours=24)
+# A job whose full cycles fail with a server error (5xx) or an unreachable server this
+# many times in a row - about three days at the 6 h cadence; fast-poll cycles are not
+# counted - is parked the same way. Such an error may pass, so the bar is higher than for
+# a refusal, but a deterministic 500 would otherwise hold the single slot for good.
+_JOB_MAX_SERVER_FAILED_CYCLES = 12
 
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
@@ -924,8 +929,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # when the same read is made again.
         self._entity_rows_cache: dict[tuple[str, str, str, str], list[dict]] = {}
         # What the replacement job did in the current cycle (_run_replacement_job): a
-        # commit, an open with its rows staged, and the first job-level failure.
-        self._job_cycle: dict = {"committed": False, "staged": False, "failure": None}
+        # commit, an open with its rows staged, the first job-level failure and the
+        # first server error (5xx or unreachable).
+        self._job_cycle: dict = {
+            "committed": False, "staged": False, "failure": None, "server_failure": None}
 
     # ------------------------------------------------------------------
     # Setup – load persisted state (bookmark, last_recompute, failure counter)
@@ -1040,8 +1047,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 return self._replacement_held(job)
             job["retry_at"] = None
             await self._store.async_save(self._state)
-        self._job_cycle = {"committed": False, "staged": False, "failure": None}
-        held = await self._advance_replacement_job(job, hooks, now, profile)
+        self._job_cycle = {
+            "committed": False, "staged": False, "failure": None, "server_failure": None}
+        try:
+            held = await self._advance_replacement_job(job, hooks, now, profile)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            # The server could not be reached: counted like a 5xx, and the cycle fails
+            # as before.
+            self._note_server_failure(type(err).__name__)
+            await self._count_job_cycle(job, now)
+            raise
         if await self._count_job_cycle(job, now):
             return False  # parked: nothing of it is held open
         return held
@@ -1146,6 +1161,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     "Wolta replacement refused (HTTP %s); retrying later", err.status
                 )
             else:
+                self._note_server_failure(f"HTTP {err.status}")
                 _LOGGER.warning(
                     "Wolta replacement failed (HTTP %s); retrying next cycle", err.status
                 )
@@ -1167,31 +1183,56 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if self._job_cycle.get("failure") is None:
             self._job_cycle["failure"] = why
 
+    def _note_server_failure(self, why: str) -> None:
+        """Record a server error (5xx) or an unreachable server in this cycle (see
+        _JOB_MAX_SERVER_FAILED_CYCLES): one that may pass, but need not."""
+        if self._job_cycle.get("server_failure") is None:
+            self._job_cycle["server_failure"] = why
+
     async def _count_job_cycle(self, job: dict, now: datetime) -> bool:
-        """Count the cycle the job just ran. Progress - a commit, or an open with its
-        rows staged and no job-level failure after it - resets the count; a cycle with a
-        job-level failure adds one; a cycle that only waited changes nothing. At
-        _JOB_MAX_FAILED_CYCLES in a row the job is parked (_park_job) - unless it still
-        holds a replacement: an open one is given up by _replacement_failed first, and
-        an abandoned one is never parked, since it may have been committed. Returns
+        """Count the cycle the job just ran, in two counts.
+
+        Job-level failures (job_failures): progress - a commit, or an open with its rows
+        staged and no job-level failure after it - resets the count; a cycle with a
+        job-level failure adds one. Server errors (server_failures): a commit resets the
+        count; a full cycle with a server error adds one (a fast-poll cycle never does);
+        otherwise progress as above resets it. A cycle that only waited changes neither.
+
+        At _JOB_MAX_FAILED_CYCLES job-level, or _JOB_MAX_SERVER_FAILED_CYCLES server
+        failures in a row, counted in this cycle, the job is parked (_park_job) - unless it
+        still holds a replacement: an open one is given up by _replacement_failed first,
+        and an abandoned one is never parked, since it may have been committed. Returns
         True when the job was parked."""
         if self._state.get("replacement_job") is not job:
             return False  # finished, or dropped
         cycle = self._job_cycle
-        if cycle["committed"] or (cycle["staged"] and cycle["failure"] is None):
-            if job.pop("job_failures", None) is not None:
+        failure = cycle.get("failure")
+        server_failure = cycle.get("server_failure")
+        progress = cycle.get("committed") or (cycle.get("staged") and failure is None)
+        changed = False
+        park: tuple[str, int] | None = None
+        if progress:
+            changed |= job.pop("job_failures", None) is not None
+        elif failure is not None:
+            job["job_failures"] = job.get("job_failures", 0) + 1
+            changed = True
+            if job["job_failures"] >= _JOB_MAX_FAILED_CYCLES:
+                park = (failure, job["job_failures"])
+        if cycle.get("committed") or (progress and server_failure is None):
+            changed |= job.pop("server_failures", None) is not None
+        elif server_failure is not None and self.update_interval != _FAST_POLL:
+            job["server_failures"] = job.get("server_failures", 0) + 1
+            changed = True
+            if park is None and job["server_failures"] >= _JOB_MAX_SERVER_FAILED_CYCLES:
+                park = (server_failure, job["server_failures"])
+        if park is None or job.get("replacement") is not None:
+            if changed:
                 await self._store.async_save(self._state)
             return False
-        if cycle["failure"] is None:
-            return False
-        job["job_failures"] = job.get("job_failures", 0) + 1
-        if job["job_failures"] < _JOB_MAX_FAILED_CYCLES or job.get("replacement") is not None:
-            await self._store.async_save(self._state)
-            return False
-        await self._park_job(job, now, cycle["failure"])
+        await self._park_job(job, now, *park)
         return True
 
-    async def _park_job(self, job: dict, now: datetime, why: str) -> None:
+    async def _park_job(self, job: dict, now: datetime, why: str, cycles: int) -> None:
         """Take a job that keeps failing out of the slot, and queue none of its type
         for _JOB_PARK_BACKOFF, so the other type can run meanwhile. What it committed
         stays: the windows a direction job swapped are folded into the applied
@@ -1209,7 +1250,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         await self._store.async_save(self._state)
         _LOGGER.warning(
             "Wolta replacement job (%s) failed %s cycles in a row (last: %s); parking it "
-            "until %s", job_type, job.get("job_failures"), why, until.isoformat(),
+            "until %s", job_type, cycles, why, until.isoformat(),
         )
 
     def _job_backed_off(self, job_type: str, now: datetime) -> bool:
@@ -1444,6 +1485,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 # A refusal (422, a stream-bound 409, a conflict or a gone id): counted,
                 # so one that never passes parks the job instead of holding the slot.
                 self._note_job_failure(f"open refused (HTTP {err.status})")
+            else:
+                # A server error: counted toward the higher bar for server errors.
+                self._note_server_failure(f"open failed (HTTP {err.status})")
             job["replacement"] = None
             await self._store.async_save(self._state)
             _LOGGER.warning(
