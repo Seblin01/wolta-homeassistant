@@ -1575,3 +1575,114 @@ def test_merge_streams_without_complete_is_unchanged():
     rows = stats.merge_streams(batt_in={q1: 0.5}, batt_out={}, grid_in={}, grid_out={},
                                solar={}, external=None)
     assert len(rows) == 1
+
+
+# --- known zeros: a counter that stood still across a gap, solar at night ----------
+
+
+def test_gap_followed_by_zero_change_is_known_zeros():
+    """(b) The first period after a gap has change 0: the counter stood still, so the
+    gap's periods are zeros and the period after the gap is clean."""
+    rows = _r5(-5, 0) + _r5(30, change=0.0) + _r5(35, 40)
+    assert stats.clean_quarters(rows, 300) == {
+        T, T + timedelta(minutes=15), T + timedelta(minutes=30)}
+
+
+def test_gap_followed_by_a_change_stays_a_gap():
+    """The same gap with energy in the first period after it is a catch-up."""
+    rows = _r5(-5, 0) + _r5(30, change=0.2) + _r5(35, 40, 45, 50, 55)
+    assert stats.clean_quarters(rows, 300) == {T + timedelta(minutes=45)}
+
+
+def test_zero_change_without_a_gap_adds_nothing():
+    """Zero changes before a gap do not fill it - only the period after it decides."""
+    rows = _r5(-5, 0, 5, change=0.0) + _r5(15, 20, 25, 30, 35, 40)
+    assert stats.clean_quarters(rows, 300) == {T + timedelta(minutes=30)}
+
+
+_D = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+
+def _sun_down_before(rise: datetime, period_s: int):
+    """sun_down for a test day: the sun is down while the period's midpoint lies before
+    ``rise``."""
+    return lambda p: p + period_s // 2 < rise.timestamp()
+
+
+def _r5_between(first: datetime, end: datetime, *, skip=(), change=0.1):
+    out, t = [], first
+    while t < end:
+        if t not in skip:
+            out.append({"start": t.timestamp(), "change": change})
+        t += timedelta(minutes=5)
+    return out
+
+
+def test_solar_night_without_rows_is_clean():
+    """(a) No periods 00:00-05:00 (the inverter sleeps), measured from 05:05: every
+    night quarter and the quarter 05:00 are clean - the sun is down in every missing
+    period, including the one before the window and 05:00 itself."""
+    rise = _D + timedelta(hours=5, minutes=4)
+    rows = _r5_between(_D + timedelta(hours=5, minutes=5), _D + timedelta(hours=6))
+    window = (int(_D.timestamp()), int((_D + timedelta(hours=6)).timestamp()))
+    got = stats.clean_quarters(rows, 300, window=window,
+                               sun_down=_sun_down_before(rise, 300))
+    assert got == {_D + timedelta(minutes=15 * k) for k in range(24)}
+
+
+def test_solar_gap_in_daylight_stays_a_gap():
+    """(a) never applies while the sun is up: a missing period at 12:00 dirties its
+    quarter (the catch-up 12:05 lies inside it) and the next quarter is clean."""
+    rise = _D + timedelta(hours=5, minutes=4)
+    noon = _D + timedelta(hours=12)
+    rows = _r5_between(_D + timedelta(hours=5, minutes=5), _D + timedelta(hours=13),
+                       skip={noon})
+    window = (int(_D.timestamp()), int((_D + timedelta(hours=13)).timestamp()))
+    got = stats.clean_quarters(rows, 300, window=window,
+                               sun_down=_sun_down_before(rise, 300))
+    assert noon not in got
+    assert noon + timedelta(minutes=15) in got
+    assert noon - timedelta(minutes=15) in got
+
+
+def test_without_sun_down_the_window_changes_nothing():
+    rows = _r5_between(_D + timedelta(hours=5, minutes=5), _D + timedelta(hours=6))
+    window = (int(_D.timestamp()), int((_D + timedelta(hours=6)).timestamp()))
+    assert stats.clean_quarters(rows, 300, window=window) == stats.clean_quarters(rows, 300)
+
+
+def _hours(*hours, change=1.0):
+    return [{"start": (_D + timedelta(hours=h)).timestamp(), "change": change} for h in hours]
+
+
+def _quarters_of(*hours):
+    return {_D + timedelta(hours=h, minutes=m) for h in hours for m in (0, 15, 30, 45)}
+
+
+def test_hourly_gap_followed_by_zero_change_is_known_zeros():
+    rows = _hours(0, 1) + _hours(4, change=0.0) + _hours(5)
+    assert stats.clean_quarters(rows, 3600) == _quarters_of(1, 2, 3, 4, 5)
+
+
+def test_hourly_gap_followed_by_a_change_stays_a_gap():
+    rows = _hours(0, 1) + _hours(4, change=0.5) + _hours(5)
+    assert stats.clean_quarters(rows, 3600) == _quarters_of(1, 5)
+
+
+def test_hourly_solar_night_without_rows_is_clean():
+    """(a) on hourly rows: no hours before 05:00, sun down until 05:00 (the hour
+    04:00's midpoint 04:30 is before it): every hour of the window is clean, the hour
+    before the window (the previous day's 23:00) counting as a known zero."""
+    rows = _hours(5, 6, 7)
+    window = (int(_D.timestamp()), int((_D + timedelta(hours=8)).timestamp()))
+    got = stats.clean_quarters(rows, 3600, window=window,
+                               sun_down=_sun_down_before(_D + timedelta(hours=5), 3600))
+    assert got == _quarters_of(*range(8))
+
+
+def test_hourly_solar_gap_in_daylight_stays_a_gap():
+    rows = _hours(5, 6, 8, 9)
+    window = (int(_D.timestamp()), int((_D + timedelta(hours=10)).timestamp()))
+    got = stats.clean_quarters(rows, 3600, window=window,
+                               sun_down=_sun_down_before(_D + timedelta(hours=5), 3600))
+    assert got == _quarters_of(0, 1, 2, 3, 4, 5, 6, 9)

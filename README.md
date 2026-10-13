@@ -19,7 +19,10 @@ After setup the integration automatically:
 sensor has its own value for it in Home Assistant's statistics, and never the first
 period after a gap: when a sensor has been unavailable, Home Assistant puts the whole
 gap's energy into the first period after it, which is not a measurement of that
-period. If a selected sensor stops producing statistics altogether, uploading pauses
+period. A missing period counts as a zero only when that is known: for a solar sensor
+while the sun is down at your Home Assistant location (many inverters report nothing at
+night), and for any sensor whose counter has not moved across the gap. If a selected
+sensor stops producing statistics altogether, uploading pauses
 and a repair names the sensor. Periods when Home Assistant itself was not running are
 still sent (Home Assistant records them as zero), and Wolta's server sets them aside.
 A full re-send after reconfiguration only replaces the quarters that are complete;

@@ -181,6 +181,11 @@ def mock_entry(hass: HomeAssistant):
     from homeassistant.config_entries import ConfigEntry
     from unittest.mock import PropertyMock
 
+    # The users live at 55-69 °N, and solar periods without statistics are known zeros
+    # while the sun is down (spec 6.2). Pin a Swedish position, so that each test's
+    # clock decides whether the sun is up: NOW (12:00 UTC on 1 June) is daylight here.
+    hass.config.latitude = 59.3
+    hass.config.longitude = 16.5
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "test_entry_id"
     entry.domain = DOMAIN
@@ -3149,7 +3154,12 @@ async def _run_dying_cycles(
 ):
     """Run slow-poll cycles on ONE coordinator and record after each cycle whether
     (statistics_missing, energy_stream_no_statistics) is raised. ``reads`` collects the
-    period of every statistics read."""
+    period of every statistics read.
+
+    The sun never sets here: the cycles span a night, and a dead solar sensor's night
+    periods would be known zeros (spec 6.2) - the night quarters complete, the bookmark
+    moving on. These scenarios are about lag in daylight; the night has its own tests
+    (known zeros, below)."""
     clock = {"now": NOW}
     reg = ir.async_get(hass)
     seen: list[tuple[bool, bool]] = []
@@ -3165,6 +3175,8 @@ async def _run_dying_cycles(
               side_effect=lambda: clock["now"]),
         patch("custom_components.wolta.coordinator.async_fetch_change",
               side_effect=recording_fetch),
+        patch("custom_components.wolta.coordinator.WoltaCoordinator._sun_down_fn",
+              lambda self, period_s: lambda start: False),
     ):
         coordinator = await _make_coordinator(
             hass, mock_entry, client,
@@ -4913,3 +4925,306 @@ async def test_backfill_quarter_after_short_term_start_is_judged_by_5min_only(
     assert q.isoformat() not in sent
     assert (boundary - timedelta(hours=3)).isoformat() in sent    # hourly part still sent
     assert (boundary + timedelta(hours=3)).isoformat() in sent    # intact 5-minute part too
+
+
+# ---------------------------------------------------------------------------
+# Known zeros (spec 6.2): solar at night, a counter that stood still across a gap
+# ---------------------------------------------------------------------------
+#
+# The sun times below are astral's for 59.3 °N 16.5 °E (the mock_entry position):
+# 2025-10-11 sunset 15:57 UTC, 2025-10-12 sunrise 05:25 UTC; 2024-12-21 sunrise 07:50,
+# sunset 13:54 UTC; 2025-06-01 sunrise 01:50, sunset 19:54 UTC. Solar rows are kept
+# only inside a range of UTC hours, so every missing period outside it is either a
+# night period or a daylight gap the test names.
+
+
+def _solar_by_hours(data: dict, lo: float, hi: float, *, sensors=("sensor.solar",),
+                    hole: tuple[datetime, datetime] | None = None) -> dict:
+    """Keep the solar sensors' rows whose UTC time of day lies in [lo, hi) hours and
+    outside ``hole``."""
+    def keep(r):
+        t = datetime.fromtimestamp(r["start"], tz=timezone.utc)
+        h = t.hour + t.minute / 60
+        in_hole = hole is not None and hole[0].timestamp() <= r["start"] < hole[1].timestamp()
+        return lo <= h < hi and not in_hole
+    for sid in sensors:
+        data[sid] = [r for r in data[sid] if keep(r)]
+    return data
+
+
+@pytest.mark.asyncio
+async def test_solar_without_statistics_at_night_is_sent_as_zero(
+    hass: HomeAssistant, mock_entry
+):
+    """The inverter sleeps at night and leaves no statistics. Night quarters are sent
+    with solar 0.0 through the real astral path; a solar gap in daylight is still a gap
+    and its quarter and the catch-up quarter are not sent."""
+    now = datetime(2025, 10, 12, 14, 0, tzinfo=timezone.utc)
+    bookmark = now - timedelta(hours=24)
+    hole = (datetime(2025, 10, 12, 11, 0, tzinfo=timezone.utc),
+            datetime(2025, 10, 12, 11, 15, tzinfo=timezone.utc))
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        return _solar_by_hours(_full_stats(start, end, period), 5, 17, hole=hole)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=now),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = {r["ts"]: r for c in client.put_data.call_args_list for r in c.args[1]}
+    night = [datetime(2025, 10, 11, 17, 0, tzinfo=timezone.utc) + timedelta(minutes=15 * k)
+             for k in range(48)]                                   # 17:00 - 05:00 UTC
+    for q in night:
+        assert q.isoformat() in sent, f"night quarter {q} not sent"
+        assert sent[q.isoformat()]["solar_kwh"] == 0.0
+    morning = datetime(2025, 10, 12, 5, 0, tzinfo=timezone.utc)
+    assert morning.isoformat() in sent                             # after the night
+    assert sent[(morning + timedelta(hours=4)).isoformat()]["solar_kwh"] == pytest.approx(0.3)
+    assert hole[0].isoformat() not in sent                         # daylight gap
+    assert hole[1].isoformat() not in sent                         # its catch-up
+    assert (hole[1] + timedelta(minutes=15)).isoformat() in sent
+
+
+@pytest.mark.asyncio
+async def test_battery_gap_followed_by_zero_change_is_sent(hass: HomeAssistant, mock_entry):
+    """A battery counter that stood still across a gap: the first period after it has
+    change 0, so the gap held no energy and its quarters are complete."""
+    q = NOW - timedelta(hours=2)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        data = _stats_with_hole(start, end, sensor="sensor.batt_in",
+                                hole=(q, q + timedelta(minutes=15)))
+        data["sensor.batt_in"] = [
+            {**r, "change": 0.0} if r["start"] == (q + timedelta(minutes=15)).timestamp()
+            else r
+            for r in data["sensor.batt_in"]]
+        return data
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    sent = {r["ts"]: r for c in client.put_data.call_args_list for r in c.args[1]}
+    assert q.isoformat() in sent
+    assert sent[q.isoformat()]["batt_charged_kwh"] == 0.0
+    assert (q + timedelta(minutes=15)).isoformat() in sent
+    assert sent[(q + timedelta(minutes=15)).isoformat()]["batt_charged_kwh"] == pytest.approx(0.2)
+
+
+async def _run_solar_cycles(
+    hass, mock_entry, client, *, now: datetime, cycles: int, hours: tuple[float, float],
+    dead: tuple[str, ...] = (), advance: timedelta = timedelta(hours=6),
+):
+    """Slow-poll cycles on ONE coordinator with two solar sensors whose rows exist only
+    inside ``hours`` (UTC); the sensors in ``dead`` have no rows at all. Returns the
+    coordinator and, per cycle, (statistics_missing, energy_stream_no_statistics)."""
+    _two_solar_entry(hass, mock_entry)
+    clock = {"now": now}
+    reg = ir.async_get(hass)
+    seen: list[tuple[bool, bool]] = []
+
+    async def fetch(h, ids, start, end, period):
+        data = _solar_by_hours(
+            _full_stats(start, end, period, values={"sensor.solar2": 0.1}), *hours,
+            sensors=("sensor.solar", "sensor.solar2"))
+        for sid in dead:
+            data[sid] = []
+        return data
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (now - advance).isoformat(),
+                         "applied_invert": False, "applied_entities": _TWO_SOLAR_FP})
+        for _ in range(cycles):
+            await coordinator._async_update_data()
+            seen.append((
+                reg.async_get_issue(DOMAIN, coordinator._stats_issue_id) is not None,
+                reg.async_get_issue(DOMAIN, coordinator._energy_issue_id) is not None,
+            ))
+            clock["now"] = clock["now"] + advance
+    return coordinator, seen
+
+
+@pytest.mark.asyncio
+async def test_sleeping_solar_at_night_raises_no_repair(hass: HomeAssistant, mock_entry):
+    """Both solar sensors measure until sunset and sleep through a December night: the
+    windows 12-18, 18-24 and 00-06 UTC raise neither repair - the solar stream is empty
+    in two of them, and both sensors trail the others only by known zeros."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, seen = await _run_solar_cycles(
+        hass, mock_entry, client, now=datetime(2024, 12, 21, 18, 0, tzinfo=timezone.utc),
+        cycles=3, hours=(8, 13 + 55 / 60))
+    assert seen == [(False, False)] * 3
+    assert coordinator._state.get("silent_sensor_cycles") is None
+    assert coordinator._state.get("energy_empty_cycles") is None
+
+
+@pytest.mark.asyncio
+async def test_sleeping_solar_neither_counts_nor_clears_energy_empty(
+    hass: HomeAssistant, mock_entry
+):
+    """A solar stream without values only because the sun is down says nothing about
+    the sensor: a raised energy_empty repair and its streak stay until daylight."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _make_coordinator(hass, mock_entry, client)
+    coordinator._state["energy_empty_cycles"] = 3
+    ir.async_create_issue(
+        hass, DOMAIN, coordinator._energy_issue_id, is_fixable=False,
+        severity=ir.IssueSeverity.WARNING, translation_key="energy_stream_no_statistics",
+        translation_placeholders={"streams": "solar: sensor.solar"})
+    now = datetime(2024, 12, 21, 23, 0, tzinfo=timezone.utc)
+    coordinator._state.update({"last_uploaded_ts": (now - timedelta(hours=6)).isoformat(),
+                               "applied_invert": False, "applied_entities": _fingerprint()})
+
+    async def fetch(h, ids, start, end, period):
+        return _solar_by_hours(_full_stats(start, end, period), 8, 13.5)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=now),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        await coordinator._async_update_data()
+
+    assert coordinator._state.get("energy_empty_cycles") == 3
+    assert ir.async_get(hass).async_get_issue(DOMAIN, coordinator._energy_issue_id)
+
+
+@pytest.mark.asyncio
+async def test_polar_night_raises_no_repair(hass: HomeAssistant, mock_entry):
+    """Near Kiruna the sun does not rise in late December (astral raises ValueError for
+    sunrise and sunset): solar without any statistics for four days is no fault."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    hass.config.latitude, hass.config.longitude = 67.85, 20.2
+    coordinator, seen = await _run_solar_cycles(
+        hass, mock_entry, client, now=datetime(2024, 12, 20, 12, 0, tzinfo=timezone.utc),
+        cycles=16, hours=(0, 0))
+    assert seen == [(False, False)] * 16
+    sent = {r["ts"] for c in client.put_data.call_args_list for r in c.args[1]}
+    assert datetime(2024, 12, 21, 10, 0, tzinfo=timezone.utc).isoformat() in sent
+
+
+@pytest.mark.parametrize(
+    ("position", "when", "down"),
+    [
+        ((59.3, 16.5), datetime(2025, 10, 12, 3, 0), True),
+        ((59.3, 16.5), datetime(2025, 10, 12, 12, 0), False),
+        ((55.4, 13.0), datetime(2025, 6, 21, 23, 0), True),
+        # Near Kiruna: polar night (astral raises), a day on which the sun only grazes
+        # the horizon around noon (astral raises too) and midnight sun.
+        ((67.85, 20.2), datetime(2024, 12, 21, 10, 40), True),
+        ((67.85, 20.2), datetime(2025, 1, 9, 10, 40), False),
+        ((67.85, 20.2), datetime(2025, 1, 9, 20, 0), True),
+        ((67.85, 20.2), datetime(2025, 6, 21, 23, 0), False),
+    ],
+)
+def test_sun_down_at_swedish_latitudes(position, when, down):
+    """sun_down(period_start) judges the middle of the 5-minute period."""
+    from astral import Observer
+
+    from custom_components.wolta.coordinator import _make_sun_down
+
+    sun_down = _make_sun_down(Observer(*position, 0), 300, {})
+    assert sun_down(int(when.replace(tzinfo=timezone.utc).timestamp())) is down
+
+
+@pytest.mark.asyncio
+async def test_solar_silent_in_daylight_raises_the_repair(hass: HomeAssistant, mock_entry):
+    """The same sensor without statistics in daylight is silent: windows 06-12, 12-18
+    and 18-24 UTC on 1 June (sun up 01:50-19:54 UTC) raise statistics_missing."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, seen = await _run_solar_cycles(
+        hass, mock_entry, client, now=NOW, cycles=3, hours=(0, 24), dead=("sensor.solar2",))
+    assert seen == [(False, False), (False, False), (True, False)]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, coordinator._stats_issue_id)
+    assert issue.translation_placeholders["entities"] == "sensor.solar2"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_solar_sensor_is_held_through_the_night_not_cleared(
+    hass: HomeAssistant, mock_entry
+):
+    """A December day has fewer than three daylight windows in a row. The night says
+    nothing about a dead solar sensor - its streak is held, not cleared, so the repair
+    is raised on the next day's first daylight window and stays through the night."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, seen = await _run_solar_cycles(
+        hass, mock_entry, client, now=datetime(2024, 12, 21, 12, 0, tzinfo=timezone.utc),
+        cycles=7, hours=(8, 13 + 55 / 60), dead=("sensor.solar2",))
+    # windows 06-12 and 12-18 count, 18-24 and 00-06 hold, 06-12 trips, 12-18 counts,
+    # 18-24 holds
+    assert seen == [(False, False)] * 4 + [(True, False)] * 3
+    assert coordinator._state["silent_sensor_cycles"] == {"sensor.solar2": 4}
+
+
+@pytest.mark.asyncio
+async def test_solar_that_stops_shortly_before_sunset_is_not_silent_at_night(
+    hass: HomeAssistant, mock_entry
+):
+    """An inverter that goes to standby 20 minutes before sunset trails the others by
+    20 minutes of daylight and then only by known zeros: below the 30-minute lag."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator, seen = await _run_solar_cycles(
+        hass, mock_entry, client, now=datetime(2024, 12, 21, 18, 0, tzinfo=timezone.utc),
+        cycles=3, hours=(8, 13 + 35 / 60))
+    assert seen == [(False, False)] * 3
+
+
+@pytest.mark.asyncio
+async def test_backfill_over_a_year_with_solar_sleeping_every_night(
+    hass: HomeAssistant, mock_entry
+):
+    """365 days of hourly statistics and 9 days of 5-minute statistics with a solar
+    sensor that only has rows 06:00-18:00 UTC. Night quarters are sent all year round,
+    daylight gaps in summer are not, and the sun computation stays cheap."""
+    import time
+
+    client = _mock_client()
+
+    async def fetch(h, ids, start, end, period):
+        return _solar_by_hours(_full_stats(start, end, period), 6, 18)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(hass, mock_entry, client, store_state={})
+        t0 = time.perf_counter()
+        rows = await coordinator._backfill_rows(NOW)
+        elapsed = time.perf_counter() - t0
+
+    sent = {r["ts"]: r for r in rows}
+    winter_night = datetime(2025, 1, 15, 22, 0, tzinfo=timezone.utc)
+    summer_night = datetime(2024, 6, 21, 23, 0, tzinfo=timezone.utc)
+    summer_dawn = datetime(2024, 6, 21, 4, 0, tzinfo=timezone.utc)   # sun up, no rows
+    recent_night = NOW.replace(hour=0) - timedelta(days=1)            # 5-minute part
+    for q in (winter_night, summer_night, recent_night):
+        assert sent[q.isoformat()]["solar_kwh"] == 0.0
+    assert summer_dawn.isoformat() not in sent
+    assert elapsed < 2.0, f"backfill took {elapsed:.2f} s"

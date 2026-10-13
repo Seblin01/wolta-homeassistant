@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
@@ -161,7 +162,13 @@ def measured_starts(rows: list[StatisticsRow], period_s: int) -> set[int]:
     return out
 
 
-def clean_quarters(rows: list[StatisticsRow], period_s: int) -> set[datetime]:
+def clean_quarters(
+    rows: list[StatisticsRow],
+    period_s: int,
+    *,
+    window: tuple[int, int] | None = None,
+    sun_down: Callable[[int], bool] | None = None,
+) -> set[datetime]:
     """Quarters this sensor measured completely, with no catch-up inside.
 
     A period is *clean* when it and the period before it are both measured. After a
@@ -170,22 +177,60 @@ def clean_quarters(rows: list[StatisticsRow], period_s: int) -> set[datetime]:
     restarts from the previous row's ``state``). That period is a catch-up, not a
     measurement of its own interval.
 
+    Known zeros: a missing period counts as measured with the value 0 when there is
+    evidence that nothing happened in it, and only then.
+
+    * (b) The counter stood still across the gap: when the first measured period after
+      a gap has ``change == 0``, the gap's energy was 0, so its periods are zeros and
+      the period after it is clean. Always applied.
+    * (a) The sun was down: ``sun_down(period_start)`` is true when the sun is below the
+      horizon in the middle of the period. Every missing period in ``window`` (start,
+      end in UNIX seconds), and the period before the window, for which it holds is a
+      zero - an inverter that sleeps at night leaves no statistics at all (a whole
+      night can lack measured periods). Only for solar sensors; the caller decides by
+      passing ``sun_down``. Without ``window`` the span of the measured periods is used.
+
+    The values are untouched: a known zero has no row, and merge_streams fills an
+    absent value with 0.0, which is now correct because the quarter is complete.
+
     5-minute statistics (``period_s`` 300): a quarter is clean when its three periods
     are clean. Hourly statistics (3600, split into quarters): the four quarters of an
     hour are clean when the hour is clean."""
+    if period_s not in (300, 3600):
+        raise ValueError(f"unsupported statistics period: {period_s} s")
     m = measured_starts(rows, period_s)
+    changes: dict[int, float] = {}
+    for row in rows:
+        change = row.get("change")
+        if change is None:
+            continue
+        start = int(row["start"])
+        key = start - start % period_s
+        changes[key] = changes.get(key, 0.0) + change
+    known = set(m)
+    ordered = sorted(m)
+    for before, after in zip(ordered, ordered[1:]):
+        if after - before > period_s and changes[after] == 0:
+            known.update(range(before + period_s, after, period_s))
+    if sun_down is not None:
+        if window is not None:
+            lo = window[0] - window[0] % period_s - period_s
+            hi = window[1]
+        elif m:
+            lo, hi = min(m), max(m) + 1
+        else:
+            lo = hi = 0
+        known.update(p for p in range(lo, hi, period_s) if p not in m and sun_down(p))
     out: set[datetime] = set()
     if period_s == 300:
-        for q in {s - s % 900 for s in m}:
-            if all(p in m for p in (q - 300, q, q + 300, q + 600)):
+        for q in {s - s % 900 for s in known}:
+            if all(p in known for p in (q - 300, q, q + 300, q + 600)):
                 out.add(datetime.fromtimestamp(q, tz=timezone.utc))
-    elif period_s == 3600:
-        for h in m:
-            if h - 3600 in m:
+    else:
+        for h in known:
+            if h - 3600 in known:
                 out.update(datetime.fromtimestamp(h + 900 * k, tz=timezone.utc)
                            for k in range(4))
-    else:
-        raise ValueError(f"unsupported statistics period: {period_s} s")
     return out
 
 
