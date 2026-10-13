@@ -154,7 +154,14 @@ class _ReplacementType:
     """The hooks a replacement job type plugs into the runner (_run_replacement_job).
 
     A replacement spec is a dict {kind, window_start, window_end, fields, reason} with the
-    window as ISO strings in UTC on whole hours; the runner adds the id."""
+    window as ISO strings in UTC on whole hours; the runner adds the id.
+
+    Contract: hooks mutate `job` (the dict in Store) in place and never replace it; the
+    runner saves it. `rows_for` must give the same rows for the same spec, since it runs
+    again on every resume of an open replacement. Hooks should not raise: the runner
+    tolerates it (logged, retried next cycle, and a replacement that keeps failing is
+    given up), but a hook that raises never makes progress. A hook that wants the job
+    held back sets `job["retry_at"]` (ISO) rather than returning None every cycle."""
 
     # (job, now, profile) -> the next spec; None to wait (nothing is opened and the regular
     # upload goes on), or "done" when the job has nothing left to replace.
@@ -381,6 +388,13 @@ _REPLACEMENTS_PER_CYCLE = 12
 # After a commit the server refused with 413 (the result would exceed the profile's row
 # limit) the replacement is dropped and the job tries again this much later.
 _REPLACEMENT_FULL_RETRY = timedelta(days=1)
+
+# A replacement that failed this many cycles in a row without a verdict from the server
+# (5xx, a hook error) is tried once more; the next failure gives it up for
+# _REPLACEMENT_GIVE_UP_RETRY, so a deterministic server error cannot pause the regular
+# upload for good (staging the rows again keeps moving the server's expiry).
+_REPLACEMENT_MAX_FAILURES = 3
+_REPLACEMENT_GIVE_UP_RETRY = timedelta(days=1)
 
 # Trigger a recompute when this many new days of data have been uploaded
 _RECOMPUTE_INTERVAL_DAYS = 7
@@ -727,8 +741,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return False
         retry_at = job.get("retry_at")
         if retry_at:
-            if now < datetime.fromisoformat(retry_at):
-                return job.get("replacement") is not None
+            if now < self._parse_retry_at(retry_at):
+                return self._replacement_held(job)
             job["retry_at"] = None
             await self._store.async_save(self._state)
         try:
@@ -743,6 +757,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                             job, hooks, rep, status.get("result") or {}
                         )
                         continue
+                    if status is not None and rep.get("abandoned"):
+                        # Given up earlier: it is never committed any more.
+                        await self._discard_replacement(rep["id"])
+                        status = None
                     if status is None:
                         job["replacement"] = None
                         await self._store.async_save(self._state)
@@ -754,6 +772,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                             if rows is None:
                                 return True  # still open on the server: wait, paused
                 if rep is None:
+                    if profile is None:
+                        # Fast-poll (or no profile this cycle): only an open replacement
+                        # is carried on; a new one waits for a full cycle.
+                        return False
                     spec = await hooks.next_replacement(job, now, profile)
                     if spec is None:
                         return False
@@ -763,6 +785,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         await self._store.async_save(self._state)
                         _LOGGER.info("Wolta replacement job (%s) finished", job["type"])
                         return False
+                    if [spec["window_start"], spec["window_end"]] in job["done_windows"]:
+                        # A hook error: committing the window again would, for a swap,
+                        # undo it.
+                        _LOGGER.warning(
+                            "Wolta replacement job (%s) asked for a window it already "
+                            "committed (%s..%s); not opening it",
+                            job["type"], spec["window_start"], spec["window_end"],
+                        )
+                        return False
                     if spec["kind"] == "rows":
                         # Built before the id is assigned: rows that cannot be built now
                         # leave nothing behind that would pause the upload.
@@ -771,9 +802,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                             return False
                     rep = {**spec, "id": str(uuid4())}
                     job["replacement"] = rep
-                result = await self._execute_replacement(rep, rows, opened=opened)
+                    job.pop("failures", None)
+                result = await self._execute_replacement(rep, rows, now, opened=opened)
                 if result is None:
-                    return job.get("replacement") is not None
+                    return self._replacement_held(job)
                 await self._replacement_committed(job, hooks, rep, result)
         except (WoltaAuthError, aiohttp.ClientError, TimeoutError):
             raise  # lost profile → reauth; unreachable server → the cycle fails as before
@@ -794,18 +826,83 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 job["replacement"] = None
                 if err.status == 413:
                     job["retry_at"] = (now + _REPLACEMENT_FULL_RETRY).isoformat()
-            await self._store.async_save(self._state)
-            _LOGGER.warning(
-                "Wolta replacement failed (HTTP %s); retrying next cycle", err.status
-            )
+                await self._store.async_save(self._state)
+                _LOGGER.warning(
+                    "Wolta replacement refused (HTTP %s); retrying later", err.status
+                )
+            else:
+                _LOGGER.warning(
+                    "Wolta replacement failed (HTTP %s); retrying next cycle", err.status
+                )
+                await self._replacement_failed(job, hooks, now)
         except Exception as err:  # pylint: disable=broad-except
-            # A job that cannot run must not stop the regular upload: only a replacement
-            # the server holds open pauses it, and that one expires within a day.
+            # A job that cannot run must not stop the regular upload: a failing hook is
+            # counted like a server error, so an open replacement is given up in time.
             _LOGGER.warning(
                 "Wolta replacement job failed (%s); retrying next cycle", type(err).__name__
             )
             _LOGGER.debug("Replacement job failure detail", exc_info=True)
-        return job.get("replacement") is not None
+            await self._replacement_failed(job, hooks, now)
+        return self._replacement_held(job)
+
+    @staticmethod
+    def _replacement_held(job: dict) -> bool:
+        """Whether the job holds a replacement open on the server (the upload pauses).
+        One given up (`abandoned`) is never committed, so it pauses nothing."""
+        rep = job.get("replacement")
+        return rep is not None and not rep.get("abandoned")
+
+    @staticmethod
+    def _parse_retry_at(value) -> datetime:
+        """`retry_at` as an aware datetime; anything unreadable counts as expired."""
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is None or parsed.tzinfo is None:
+            _LOGGER.debug("Ignoring an unreadable replacement retry_at %r", value)
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return parsed
+
+    async def _replacement_failed(
+        self, job: dict, hooks: _ReplacementType, now: datetime
+    ) -> None:
+        """Count a cycle that failed without a verdict from the server. Past
+        _REPLACEMENT_MAX_FAILURES the replacement is given up: committed after all (a
+        502/504 can follow a commit that went through) is booked; anything else is
+        deleted and cleared. Either way the job waits _REPLACEMENT_GIVE_UP_RETRY and
+        the upload goes on. When the server cannot even say which it is, the
+        replacement stays in the job marked `abandoned` - pausing nothing, never
+        committed - until a GET can tell, so a committed swap is never repeated."""
+        rep = job.get("replacement")
+        if rep is None:
+            await self._store.async_save(self._state)
+            return
+        job["failures"] = job.get("failures", 0) + 1
+        if job["failures"] <= _REPLACEMENT_MAX_FAILURES:
+            await self._store.async_save(self._state)
+            return
+        _LOGGER.warning(
+            "Wolta replacement failed %s cycles in a row; giving it up for now",
+            job["failures"],
+        )
+        try:
+            status = await self._replacement_status(rep)
+        except WoltaAuthError:
+            raise
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Replacement status unreadable while giving up", exc_info=True)
+            await self._discard_replacement(rep["id"])
+            rep["abandoned"] = True
+        else:
+            if status is not None and status["status"] == "committed":
+                await self._replacement_committed(job, hooks, rep, status.get("result") or {})
+            elif status is not None:
+                await self._discard_replacement(rep["id"])
+            job["replacement"] = None
+        job.pop("failures", None)
+        job["retry_at"] = (now + _REPLACEMENT_GIVE_UP_RETRY).isoformat()
+        await self._store.async_save(self._state)
 
     async def _replacement_status(self, rep: dict) -> dict | None:
         """The server's view of a replacement this client opened earlier: the GET body
@@ -830,8 +927,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         window = [rep["window_start"], rep["window_end"]]
         if window not in job["done_windows"]:
             job["done_windows"].append(window)
-        await hooks.on_committed(job, rep, result)
+        try:
+            await hooks.on_committed(job, rep, result)
+        except Exception as err:  # pylint: disable=broad-except
+            # The window is committed whatever the hook did: never hold it open.
+            _LOGGER.warning(
+                "Wolta replacement hook failed after a commit (%s)", type(err).__name__
+            )
+            _LOGGER.debug("on_committed failure detail", exc_info=True)
         job["replacement"] = None
+        job.pop("failures", None)
         await self._store.async_save(self._state)
         _LOGGER.info(
             "Wolta replacement committed (%s, %s, %s..%s)",
@@ -839,7 +944,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
     async def _execute_replacement(
-        self, rep: dict, rows: list[dict] | None, *, opened: bool = False
+        self, rep: dict, rows: list[dict] | None, now: datetime, *, opened: bool = False
     ) -> dict | None:
         """Open (idempotent on the id), stage the rows in chunks and commit one
         replacement of the current job. `rows` is None for "swap_battery"; `opened` skips
@@ -854,7 +959,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         can change the server's state."""
         job = self._state["replacement_job"]
         rid = rep["id"]
-        if not opened and not await self._open_replacement(job, rep):
+        if not opened and not await self._open_replacement(job, rep, now):
             return None
         expected = None if rows is None else len({row["ts"] for row in rows})
         try:
@@ -893,7 +998,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         await self._store.async_save(self._state)
         return None
 
-    async def _open_replacement(self, job: dict, rep: dict) -> bool:
+    async def _open_replacement(self, job: dict, rep: dict, now: datetime) -> bool:
         """Open `rep` on the server after saving its id. False when it was not opened;
         the job then has no replacement, so nothing pauses."""
         await self._store.async_save(self._state)
@@ -913,9 +1018,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # 429 archive_full: the plant's archive of replaced rows is full until its
             # oldest entries age out (Retry-After).
             job["replacement"] = None
-            job["retry_at"] = (
-                dt_util.utcnow() + timedelta(seconds=err.retry_after)
-            ).isoformat()
+            job["retry_at"] = (now + timedelta(seconds=err.retry_after)).isoformat()
             await self._store.async_save(self._state)
             _LOGGER.warning(
                 "Wolta cannot open a replacement now (archive full or rate limited); "

@@ -508,3 +508,252 @@ async def test_store_holds_only_json(hass: HomeAssistant, mock_entry):
 
     job = coordinator._state["replacement_job"]
     assert json.loads(json.dumps(job)) == job
+
+
+# ---------------------------------------------------------------------------
+# Bounded failures, hook guards, fast-poll
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_persistent_5xx_gives_up_after_three_cycles(hass: HomeAssistant, mock_entry):
+    """A commit that keeps failing with 503 pauses the upload for three cycles; on the
+    fourth the replacement is given up (it is still open: deleted), the job waits a day
+    and the upload resumes."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    coordinator, committed = await _coordinator(
+        hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+
+    for n in range(3):
+        await _cycle(coordinator, NOW + timedelta(hours=n))
+        client.put_data.assert_not_called()
+        assert coordinator._state["replacement_job"]["failures"] == n + 1
+
+    fourth = NOW + timedelta(hours=3)
+    await _cycle(coordinator, fourth)
+
+    job = coordinator._state["replacement_job"]
+    assert job["replacement"] is None
+    assert "failures" not in job
+    assert job["retry_at"] == (fourth + timedelta(days=1)).isoformat()
+    client.delete_replacement.assert_awaited_once_with(coordinator.token, OLD_ID)
+    assert committed == []
+    client.put_data.assert_awaited()
+    coordinator._reconcile_coverage.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_give_up_books_a_replacement_that_was_committed_after_all(
+    hass: HomeAssistant, mock_entry
+):
+    """A 502/504 can follow a commit that went through: the give-up GET finds it
+    committed, so the window is booked, nothing is deleted or opened again."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("gateway", status=504)
+    client.get_replacement.side_effect = [{"status": "open"}] * 4 + [
+        {"status": "committed", "result": COMMIT_RESULT}]
+    coordinator, committed = await _coordinator(
+        hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+
+    for n in range(4):
+        await _cycle(coordinator, NOW + timedelta(hours=n))
+
+    job = coordinator._state["replacement_job"]
+    assert committed == [COMMIT_RESULT]
+    assert job["done_windows"] == [[WS, WE]]
+    assert job["replacement"] is None
+    client.delete_replacement.assert_not_called()
+    client.open_replacement.assert_not_called()
+    client.put_data.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_give_up_without_a_status_abandons_without_pausing(
+    hass: HomeAssistant, mock_entry
+):
+    """When even the give-up GET fails, the replacement is kept but marked abandoned:
+    it pauses nothing and is never committed; once a GET can tell, an open one is
+    deleted and the job starts over with a new id."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("down", status=503)
+    client.get_replacement.side_effect = [{"status": "open"}] * 4 + [
+        WoltaApiError("down", status=503)]
+    coordinator, _ = await _coordinator(
+        hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+
+    for n in range(4):
+        await _cycle(coordinator, NOW + timedelta(hours=n))
+
+    job = coordinator._state["replacement_job"]
+    assert job["replacement"]["id"] == OLD_ID
+    assert job["replacement"]["abandoned"] is True
+    client.put_data.assert_awaited_once()
+
+    client.get_replacement.side_effect = None
+    client.get_replacement.return_value = {"status": "open"}
+    client.commit_replacement.side_effect = None
+    client.commit_replacement.return_value = dict(COMMIT_RESULT)
+    client.delete_replacement.reset_mock()
+    client.put_data.reset_mock()
+    await _cycle(coordinator, NOW + timedelta(days=2))
+
+    client.delete_replacement.assert_awaited_with(coordinator.token, OLD_ID)
+    new_id = client.open_replacement.await_args.args[1]
+    assert new_id != OLD_ID
+    client.commit_replacement.assert_awaited_with(coordinator.token, new_id, None)
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_spec_for_a_committed_window_is_not_opened(hass: HomeAssistant, mock_entry):
+    """A hook that asks for a window it already committed is a hook error: nothing is
+    opened (for a swap that would undo the window) and nothing pauses."""
+    client = _client()
+    job = {**_job(SWAP), "done_windows": [[WS, WE]]}
+    coordinator, _ = await _coordinator(hass, mock_entry, client, job, SWAP)
+
+    async def again(job, now, profile):
+        return dict(SWAP)
+
+    coordinator._replacement_types["test"] = _ReplacementType(
+        next_replacement=again, on_committed=AsyncMock(), on_finished=AsyncMock())
+    await _cycle(coordinator)
+
+    client.open_replacement.assert_not_called()
+    assert coordinator._state["replacement_job"]["replacement"] is None
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failing_on_committed_still_books_and_clears(hass: HomeAssistant, mock_entry):
+    """GET says committed and the type's on_committed raises: the window is still booked
+    and the replacement cleared, so the upload is never held by a hook."""
+    client = _client()
+    client.get_replacement.return_value = {"status": "committed", "result": COMMIT_RESULT}
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+    hooks = coordinator._replacement_types["test"]
+
+    async def broken(job, rep, result):
+        raise RuntimeError("hook bug")
+
+    coordinator._replacement_types["test"] = _ReplacementType(
+        next_replacement=hooks.next_replacement,
+        on_committed=broken,
+        on_finished=hooks.on_finished,
+    )
+    await _cycle(coordinator)
+
+    assert "replacement_job" not in coordinator._state  # booked, then "done"
+    assert coordinator._state["applied_invert_intervals"] == TARGET
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fast_poll_never_starts_a_replacement(hass: HomeAssistant, mock_entry):
+    """Fast-poll skips the profile GET (profile None): no new replacement is started and
+    neither next_replacement nor rows_for is asked."""
+    from custom_components.wolta.coordinator import _FAST_POLL
+
+    client = _client()
+    coordinator, _ = await _coordinator(
+        hass, mock_entry, client, _job(ROWS_SPEC), ROWS_SPEC, rows=REPLACEMENT_ROWS)
+    next_spy = AsyncMock(return_value=dict(ROWS_SPEC))
+    rows_spy = AsyncMock(return_value=REPLACEMENT_ROWS)
+    coordinator._replacement_types["test"] = _ReplacementType(
+        next_replacement=next_spy, on_committed=AsyncMock(), on_finished=AsyncMock(),
+        rows_for=rows_spy)
+    coordinator.update_interval = _FAST_POLL
+
+    await _cycle(coordinator)
+
+    client.get_profile.assert_not_called()
+    next_spy.assert_not_called()
+    rows_spy.assert_not_called()
+    client.open_replacement.assert_not_called()
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fast_poll_resumes_an_open_replacement(hass: HomeAssistant, mock_entry):
+    from custom_components.wolta.coordinator import _FAST_POLL
+
+    client = _client()
+    coordinator, committed = await _coordinator(
+        hass, mock_entry, client, _job(SWAP, OLD_ID), SWAP)
+    coordinator.update_interval = _FAST_POLL
+
+    await _cycle(coordinator)
+
+    client.commit_replacement.assert_awaited_once_with(coordinator.token, OLD_ID, None)
+    assert committed == [COMMIT_RESULT]
+    job = coordinator._state["replacement_job"]  # finishing waits for a full cycle
+    assert job["replacement"] is None
+    assert job["done_windows"] == [[WS, WE]]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_retry_at_counts_as_expired(hass: HomeAssistant, mock_entry):
+    client = _client()
+    job = {**_job(SWAP), "retry_at": "not a time"}
+    coordinator, _ = await _coordinator(hass, mock_entry, client, job, SWAP)
+
+    await _cycle(coordinator)
+
+    client.open_replacement.assert_awaited_once()
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_stream_bound_refusal_on_open_keeps_the_job_without_pausing(
+    hass: HomeAssistant, mock_entry
+):
+    client = _client()
+    client.open_replacement.side_effect = WoltaApiError("bound", status=409)
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    await _cycle(coordinator)
+
+    job = coordinator._state["replacement_job"]
+    assert job["target"] == TARGET
+    assert job["replacement"] is None
+    client.commit_replacement.assert_not_called()
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_profile_full_on_commit_waits_a_day(hass: HomeAssistant, mock_entry):
+    """413 on commit (the result would exceed the profile's row limit): the replacement
+    is deleted, the job waits a day, the upload goes on."""
+    client = _client()
+    client.commit_replacement.side_effect = WoltaApiError("full", status=413)
+    coordinator, _ = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    await _cycle(coordinator)
+
+    job = coordinator._state["replacement_job"]
+    rid = client.open_replacement.await_args.args[1]
+    client.delete_replacement.assert_awaited_once_with(coordinator.token, rid)
+    assert job["replacement"] is None
+    assert job["retry_at"] == (NOW + timedelta(days=1)).isoformat()
+    client.put_data.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_conflict_reopens_with_a_new_id_next_cycle(hass: HomeAssistant, mock_entry):
+    client = _client()
+    client.commit_replacement.side_effect = [
+        WoltaReplacementConflict("conflict"), dict(COMMIT_RESULT)]
+    coordinator, committed = await _coordinator(hass, mock_entry, client, _job(SWAP), SWAP)
+
+    await _cycle(coordinator)
+    first = client.open_replacement.await_args.args[1]
+    assert client.open_replacement.await_count == 1
+
+    await _cycle(coordinator, NOW + timedelta(hours=6))
+    second = client.open_replacement.await_args.args[1]
+    assert client.open_replacement.await_count == 2
+    assert second != first
+    client.commit_replacement.assert_awaited_with(coordinator.token, second, None)
+    assert committed == [COMMIT_RESULT]
+    assert "replacement_job" not in coordinator._state
