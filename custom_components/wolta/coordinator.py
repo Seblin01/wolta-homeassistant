@@ -55,6 +55,7 @@ from .const import (
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
+    CONF_INVERT_INTERVALS,
     CONF_NAMEPLATE_KW,
     CONF_POWER_ISSUE_IGNORED,
     CONF_PURCHASE_DATE,
@@ -71,6 +72,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from . import intervals
 from .stats import (
     aggregate_5min_to_15min,
     async_fetch_change,
@@ -138,6 +140,10 @@ class _Built:
     incomplete: int                   # quarters with a value somewhere but not complete
     blame: dict[str, int]             # sensor -> quarters it made incomplete
     asleep: set[str]                  # solar sensors not silent only because the sun was down
+    # Per stream (merge_streams' names, unswapped): quarters where every sensor of the
+    # stream measured cleanly. None for a stream without sensors - unbounded, it never
+    # limits a quarter. Field-scoped replacements judge only the streams they replace.
+    complete_by_stream: dict[str, set[datetime] | None]
 
 
 def _silent_sensors(
@@ -591,12 +597,59 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         loaded = await self._store.async_load()
         self._state = dict(loaded) if loaded else {}
         _LOGGER.debug("Coordinator state loaded: %s", self._state)
+        await self._migrate_invert_intervals()
         # Sidopoll för webbändringar (delad profil) – avregistreras vid unload.
         self.config_entry.async_on_unload(
             async_track_time_interval(
                 self.hass, self.async_check_profile_sync, _PROFILE_SYNC_INTERVAL
             )
         )
+
+    async def _migrate_invert_intervals(self) -> None:
+        """Move the boolean invert flag to intervals, once (no row moves).
+
+        Desired (entry.data): missing intervals become [[None, None]] when
+        CONF_INVERT_BATTERY is set, else []. Applied (Store): missing intervals come from
+        applied_invert - what the stored rows were built with - or, without that either,
+        from the desired value. The legacy keys are left as they are."""
+        data = self.config_entry.data
+        if CONF_INVERT_INTERVALS in data:
+            desired = self._desired_intervals()
+        else:
+            desired = [(None, None)] if data.get(CONF_INVERT_BATTERY) else []
+            self._set_desired_intervals(desired)
+        if "applied_invert_intervals" in self._state:
+            return
+        applied_invert = self._state.get("applied_invert")
+        if applied_invert is None:
+            applied = desired
+        else:
+            applied = [(None, None)] if applied_invert else []
+        self._state["applied_invert_intervals"] = intervals.dump(applied)
+        await self._store.async_save(self._state)
+
+    def _desired_intervals(self) -> list[intervals.Interval]:
+        """The battery inversion the owner wants (entry.data)."""
+        return intervals.parse(self.config_entry.data.get(CONF_INVERT_INTERVALS))
+
+    def _applied_intervals(self) -> list[intervals.Interval]:
+        """The battery inversion the server's stored rows are built with (Store).
+        Every row this client builds uses these, never the desired ones."""
+        return intervals.parse(self._state.get("applied_invert_intervals"))
+
+    def _set_desired_intervals(self, desired: list[intervals.Interval]) -> None:
+        """Write the desired intervals to entry.data, mirroring CONF_INVERT_BATTERY as
+        "everything inverted" so a downgrade reads the right global flag in the common
+        case. Writes only on an actual change."""
+        entry = self.config_entry
+        stored = intervals.dump(intervals.normalize(desired))
+        new_data = {
+            **entry.data,
+            CONF_INVERT_INTERVALS: stored,
+            CONF_INVERT_BATTERY: stored == [[None, None]],
+        }
+        if new_data != dict(entry.data):
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
 
     # ------------------------------------------------------------------
     # Main update
@@ -955,10 +1008,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     def _stream_ids(self) -> dict[str, list[str]]:
         """The selected statistic ids per stream, keyed by merge_streams' parameter
-        names, with the invert flag applied (_effective_stream): a snapshot taken on the
-        event loop, so the build in the executor reads no config entry."""
-        return {name: list(self._entity_map[self._effective_stream(name)])
-                for name in self._entity_map}
+        names, as configured: a snapshot taken on the event loop, so the build in the
+        executor reads no config entry. The battery direction is NOT applied here - it
+        can differ per quarter, so _build_rows swaps the built values instead."""
+        return {name: list(ids) for name, ids in self._entity_map.items()}
 
     async def _build_rows(
         self, now: datetime, sources: list[_Source], external: set[datetime]
@@ -969,17 +1022,26 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         The build is pure but CPU-heavy: a backfill judges a year of hourly and nine
         days of 5-minute periods for every sensor, plus the sun's position per day. Off
         the event loop it cannot stall Home Assistant. What reads Home Assistant - the
-        stream ids under the invert flag and the home position for the sun - is taken
-        here, on the loop, and handed in."""
+        stream ids, the applied invert intervals and the home position for the sun - is
+        taken here, on the loop, and handed in.
+
+        The battery direction: the streams are built as the sensors say, then charge and
+        discharge swap for every quarter starting inside an APPLIED invert interval - the
+        intervals the server's stored rows are built with, so a new row always matches
+        its stored neighbours. Completeness is untouched by the swap: both battery
+        streams' sensors are judged for every quarter either way. ``built`` keeps the
+        unswapped streams; only the rows carry the swap."""
         sources = await self._anchor_solar(now, sources)
         ids = self._stream_ids()
+        applied = self._applied_intervals()
         sun_down = ({_PERIOD_S[src.agg_fn]: self._sun_down_fn(_PERIOD_S[src.agg_fn])
                      for src in sources} if ids["solar"] else {})
 
         def job() -> tuple[_Built, list[dict]]:
             built = self._build_streams(*sources, ids=ids, sun_down=sun_down)
+            streams = intervals.apply_invert(built.streams, applied)
             return built, merge_streams(
-                **built.streams, external=external, complete=built.complete)
+                **streams, external=external, complete=built.complete)
 
         return await self.hass.async_add_executor_job(job)
 
@@ -1027,12 +1089,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             streams[name] = merged
 
         sensors = {e for stream_ids in ids.values() for e in stream_ids}
-        # The solar stream is not swapped by the invert flag.
         solar = set(ids["solar"])
         periods = {_PERIOD_S[src.agg_fn] for src in sources}
         if sun_down is None:
             sun_down = {p: self._sun_down_fn(p) for p in periods} if solar else {}
         complete: set[datetime] = set()
+        by_stream: dict[str, set[datetime] | None] = {
+            name: (set() if stream_ids else None) for name, stream_ids in ids.items()}
         blame = {e: 0 for e in sensors}
         # Newest measured period per sensor over the whole read, with its source's period.
         newest: dict[str, tuple[int, int]] = {}
@@ -1059,6 +1122,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             else:
                 src_complete = set()
             complete |= src_complete
+            for name, stream_ids in ids.items():
+                if stream_ids:
+                    by_stream[name] |= set.intersection(*(clean[e] for e in stream_ids))
             for e in sensors:
                 blame[e] += len(src_candidates - clean[e])
         asleep: set[str] = set()
@@ -1069,7 +1135,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             asleep = _discount_night(newest, solar, first, step, sun_down[step])
         silent = _silent_sensors(sensors, newest, _ENERGY_EMPTY_MIN_WINDOW)
         incomplete = len(candidates - complete)
-        return _Built(streams, complete, silent, incomplete, blame, asleep - silent)
+        return _Built(streams, complete, silent, incomplete, blame, asleep - silent,
+                      by_stream)
 
     def _sun_down_fn(self, period_s: int) -> Callable[[int], bool]:
         """``sun_down(period_start)`` for statistics periods of ``period_s`` at Home
@@ -1151,10 +1218,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         whose only sensor died after it had worked - the bookmark quarter keeps such a
         stream non-empty in every read. A stream without configured sensors is never
         empty: solar-less plants are a normal configuration. Nor is a stream whose
-        sensors are all asleep (_asleep_streams)."""
+        sensors are all asleep (_asleep_streams).
+
+        Named by role as it stands now (_effective_stream): ``built`` holds the
+        unswapped streams, so a role's data is the stream of the sensors feeding it,
+        and the repair texts pair each role with exactly those sensors."""
         out = []
-        for name, data in built.streams.items():
-            entities = set(self._entity_map[self._effective_stream(name)])
+        for name in built.streams:
+            source = self._effective_stream(name)
+            entities = set(self._entity_map[source])
+            data = built.streams[source]
             if not entities or entities <= built.asleep:
                 continue
             if not data or entities <= built.silent:
@@ -1166,9 +1239,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         sensors that trail only by night (_discount_night) - an inverter that sleeps
         from sunset, or through a polar night. Such a read says nothing about the
         sensors: it neither counts toward energy_empty nor clears it."""
-        return [name for name, data in built.streams.items()
-                if (entities := set(self._entity_map[self._effective_stream(name)]))
-                and not data and entities <= built.asleep]
+        out = []
+        for name in built.streams:
+            source = self._effective_stream(name)  # by role, as in _empty_streams
+            entities = set(self._entity_map[source])
+            if entities and not built.streams[source] and entities <= built.asleep:
+                out.append(name)
+        return out
 
     async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
         """Track selected sensors that are silent (_silent_sensors: no measured period,
@@ -1270,11 +1347,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         ir.async_delete_issue(self.hass, DOMAIN, self._energy_issue_id)
 
     def _effective_stream(self, stream: str) -> str:
-        """With the invert flag (issue #1), batt_in reads the discharge sensor and batt_out
-        the charge sensor – the battery direction is flipped so a reversed sensor mapping is corrected
-        without the user touching their HA sensors. Only the battery currents are affected (grid/solar untouched).
-        The flag is read live from config_entry so an options change takes effect without a reload."""
-        if not self.config_entry.data.get(CONF_INVERT_BATTERY):
+        """The stream whose sensors feed ``stream``'s role NOW (issue #1): inside an
+        applied invert interval batt_in reads the discharge sensor and batt_out the
+        charge sensor. Only the battery currents are affected (grid/solar untouched).
+
+        For texts and the silence diagnostics only - the rows swap per quarter
+        (_build_rows), and history may be inverted in some intervals but not in others.
+        Answers from the APPLIED intervals, like the rows: a desired value that has not
+        reached the server's data yet describes nothing that was sent."""
+        if not intervals.contains(self._applied_intervals(), dt_util.utcnow()):
             return stream
         if stream == "batt_in":
             return "batt_out"
