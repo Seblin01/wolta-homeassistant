@@ -280,24 +280,46 @@ def replaced_fields(streams: list[str]) -> list[str]:
     return [f for f in _FIELD_ORDER if f in fields]
 
 
-def _runs(hours: list[datetime]) -> list[tuple[datetime, datetime]]:
+def _runs(
+    hours: list[datetime],
+    committed: list[tuple[datetime, datetime]] = (),
+    split: datetime | None = None,
+) -> list[tuple[datetime, datetime]]:
     """The windows of an entity job's energy phase from its sorted complete hours:
     maximal runs of consecutive hours, runs at most _ENTITY_GAP_MERGE apart joined, and
-    then the smallest gaps joined until at most _ENTITY_MAX_WINDOWS remain."""
+    then the smallest gaps joined until at most _ENTITY_MAX_WINDOWS remain (a soft cap:
+    only gaps that may be joined at all are).
+
+    A gap is never joined when a `committed` window lies in it (that window's rows are
+    replaced already and must not be removed or replaced twice), nor when it touches
+    `split`, the switch from hourly to 5-minute statistics, which stays a window
+    boundary."""
     runs: list[list[datetime]] = []
     for h in hours:
         if runs and runs[-1][1] == h:
             runs[-1][1] = h + timedelta(hours=1)
         else:
             runs.append([h, h + timedelta(hours=1)])
+
+    def joinable(left: list[datetime], right: list[datetime]) -> bool:
+        gap_start, gap_end = left[1], right[0]
+        if split is not None and gap_start <= split <= gap_end:
+            return False
+        return not any(ws < gap_end and gap_start < we for ws, we in committed)
+
     merged: list[list[datetime]] = []
     for run in runs:
-        if merged and run[0] - merged[-1][1] <= _ENTITY_GAP_MERGE:
+        if (merged and run[0] - merged[-1][1] <= _ENTITY_GAP_MERGE
+                and joinable(merged[-1], run)):
             merged[-1][1] = run[1]
         else:
             merged.append(run)
     while len(merged) > _ENTITY_MAX_WINDOWS:
-        i = min(range(len(merged) - 1), key=lambda k: merged[k + 1][0] - merged[k][1])
+        candidates = [k for k in range(len(merged) - 1)
+                      if joinable(merged[k], merged[k + 1])]
+        if not candidates:
+            break
+        i = min(candidates, key=lambda k: merged[k + 1][0] - merged[k][1])
         merged[i][1] = merged[i + 1][1]
         del merged[i + 1]
     return [(start, end) for start, end in merged]
@@ -537,6 +559,9 @@ _ENTITY_SHORT_TERM_DAYS = 8
 _ENTITY_PLAN_MAX_AGE = timedelta(hours=12)
 # Failed reads of the external-control sensor's states before its phase is given up.
 _EXTERNAL_MAX_ERRORS = 3
+# Cycles in a row in which a started entity job cannot make its energy plan before the
+# phase is ended (nothing else can replace a started job).
+_ENTITY_PLAN_MAX_FAILURES = 4
 
 # After a commit the server refused with 413 (the result would exceed the profile's row
 # limit) the replacement is dropped and the job tries again this much later.
@@ -1456,6 +1481,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         than _ENTITY_PLAN_MAX_AGE is made anew for what is not committed yet, before its
         5-minute statistics can be purged. Returns a spec, None to wait (no statistics
         from the added sensors yet), "phase_done", or "done" (no rows on the server)."""
+        if self._selection_left(job, "energy"):
+            return self._end_phase(job, "energy", "the added sensors are no longer selected")
         plan = job.get("energy_plan")
         if plan is not None and now - datetime.fromisoformat(plan["planned_at"]) > (
             _ENTITY_PLAN_MAX_AGE
@@ -1471,18 +1498,22 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             energy = sorted(s for s in streams if s != "external_control")
             added = sorted({e for s in energy for e in streams[s]})
             if not await self._entities_probe(added, read_from, now):
+                if self._started(job):
+                    return self._end_phase(
+                        job, "energy", "the added sensors have no statistics any more")
                 _LOGGER.debug("No statistics from the new sensors yet; the sensor change waits")
                 return None
             split = _floor(now - timedelta(days=_ENTITY_SHORT_TERM_DAYS), 3600)
             built = await self._energy_build(job, read_from, split, now)
             if built is None:
                 _LOGGER.debug("No complete hour from the new sensors yet; the sensor change waits")
-                return None
+                return self._plan_failed(job)
             windows, rows_by_window = built
             if not windows:
-                if any(len(k) == 3 and k[2] == "energy" for k in job["done_windows"]):
+                if self._started(job):
                     return "phase_done"
                 return None
+            job.pop("plan_failures", None)
             plan = {
                 "read_from": read_from.isoformat(),
                 "read_end": now.isoformat(),
@@ -1515,12 +1546,56 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             }
         return "phase_done"
 
+    @staticmethod
+    def _started(job: dict) -> bool:
+        """Whether the job has committed a window: it is no longer idle, so no new
+        selection or direction change can replace it - only finishing it can."""
+        return bool(job.get("done_windows"))
+
+    def _selection_left(self, job: dict, phase: str) -> bool:
+        """Whether a sensor the job adds in `phase` is no longer selected (the owner
+        reconfigured while the job ran). A job that has committed nothing is retargeted
+        before it runs (_queue_entity_job), so this only ends a started one."""
+        streams = job.get("streams") or {}
+        if not self._started(job):
+            return False
+        if phase == "external":
+            return set(streams.get("external_control") or []) != (
+                {self._external_entity} if self._external_entity else set())
+        return any(
+            not set(added) <= set(self._entity_map.get(stream) or [])
+            for stream, added in streams.items() if stream != "external_control")
+
+    @staticmethod
+    def _end_phase(job: dict, phase: str, why: str) -> str:
+        """End a started job's phase early: the job finishes with its target, and the
+        next cycle queues a new job from that target to the current selection."""
+        _LOGGER.info("Wolta sensor change: ending the %s phase early (%s)", phase, why)
+        job.pop("energy_plan", None)
+        job.pop("plan_failures", None)
+        return "phase_done"
+
+    def _plan_failed(self, job: dict) -> str | None:
+        """A cycle in which the energy plan could not be made (no complete hour from the
+        added sensors). A job that has committed nothing just waits; a started one -
+        which nothing else can replace - ends its phase after _ENTITY_PLAN_MAX_FAILURES
+        cycles in a row."""
+        if not self._started(job):
+            return None
+        job["plan_failures"] = job.get("plan_failures", 0) + 1
+        if job["plan_failures"] >= _ENTITY_PLAN_MAX_FAILURES:
+            return self._end_phase(
+                job, "energy", "the added sensors' statistics cannot be read")
+        return None
+
     async def _external_next(self, job: dict, now: datetime, profile: dict | None):
         """The external_control phase: one replacement over the span the chosen binary
         sensor's recorded states cover. No recorded state: nothing to replace, the phase
         is done. A failed read is tried again next cycle; after _EXTERNAL_MAX_ERRORS in a
         row the phase is given up, so it never holds the job (and with it every later
         direction or sensor change) for good."""
+        if self._selection_left(job, "external"):
+            return self._end_phase(job, "external", "the sensor is no longer selected")
         read_from = self._plan_since(profile)
         if read_from is coverage.MISSING:
             return None
@@ -1567,6 +1642,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         be built again: the runner then drops the replacement, and the energy plan is
         made anew."""
         phase = spec.get("phase", "energy")
+        if self._selection_left(job, phase):
+            # Reconfigured meanwhile: dropped by the runner, and the phase then ends.
+            return None
         key = (job["target"], phase, spec["window_start"], spec["window_end"])
         cached = self._entity_rows_cache.pop(key, None)
         if cached is not None:
@@ -1658,7 +1736,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 if h >= read_from
                 and all(h + _QUARTER * k in complete for k in range(4))
                 and not any(ws <= h < we for ws, we in done))
-            spans = _runs(hours)
+            spans = _runs(hours, done, split)
         inside = {q for q in complete if any(ws <= q < we for ws, we in spans)}
         external = await self._external_quarters(read_from, read_end)
         rows = await self.hass.async_add_executor_job(

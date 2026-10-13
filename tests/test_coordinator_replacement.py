@@ -1798,3 +1798,161 @@ async def test_open_replacement_whose_rows_cannot_be_built_is_dropped(
     client.open_replacement.assert_not_called()
     assert coordinator._state["replacement_job"]["replacement"] is None
     client.put_data.assert_awaited()
+
+
+# --- Round 3: a started job never waits for good; merging rules; re-plans ----------
+
+from custom_components.wolta.coordinator import _runs  # noqa: E402
+
+H = timedelta(hours=1)
+T0 = datetime(2026, 3, 1, tzinfo=UTC)
+
+
+def _hours(*spans) -> list[datetime]:
+    out = []
+    for start, n in spans:
+        out += [start + H * k for k in range(n)]
+    return out
+
+
+def test_runs_merge_short_gaps_but_not_across_a_committed_window_or_the_split():
+    hours = _hours((T0, 2), (T0 + 5 * H, 2))  # gap 3 h
+    assert _runs(hours) == [(T0, T0 + 7 * H)]
+    # A committed window inside the gap: kept apart.
+    assert _runs(hours, committed=[(T0 + 3 * H, T0 + 4 * H)]) == [
+        (T0, T0 + 2 * H), (T0 + 5 * H, T0 + 7 * H)]
+    # The hourly/5-minute switch in (or at the edge of) the gap: kept apart.
+    for split in (T0 + 2 * H, T0 + 3 * H, T0 + 5 * H):
+        assert _runs(hours, split=split) == [(T0, T0 + 2 * H), (T0 + 5 * H, T0 + 7 * H)]
+    # A long gap stays apart.
+    assert _runs(_hours((T0, 1), (T0 + 8 * H, 1))) == [
+        (T0, T0 + H), (T0 + 8 * H, T0 + 9 * H)]
+
+
+def test_runs_cap_merges_the_smallest_joinable_gaps_only():
+    hours = _hours(*[(T0 + 10 * H * k, 1) for k in range(55)])  # gaps of 9 h
+    assert len(_runs(hours)) == 50
+    # Every gap blocked by a committed window: the cap gives way.
+    committed = [(T0 + 10 * H * k + 5 * H, T0 + 10 * H * k + 6 * H) for k in range(55)]
+    assert len(_runs(hours, committed=committed)) == 55
+
+
+def _started_job(coordinator, done_windows, plan=None) -> dict:
+    job = coordinator._new_replacement_job("entities", coordinator._entities_fingerprint())
+    job.update({"streams": {"grid_in": [G_NEW]}, "fields": ["grid_import_kwh"],
+                "phases_done": [], "done_windows": done_windows})
+    if plan is not None:
+        job["energy_plan"] = plan
+    return job
+
+
+STALE_PLAN = {
+    "read_from": "2025-10-01T00:00:00+00:00", "read_end": "2026-10-12T00:00:00+00:00",
+    "split": "2026-10-04T00:00:00+00:00", "planned_at": "2026-10-12T00:00:00+00:00",
+    "windows": [[E_START.isoformat(), "2026-10-12T00:00:00+00:00", None]],
+}
+
+
+@pytest.mark.asyncio
+async def test_replan_after_twelve_hours_skips_committed_windows(
+    hass: HomeAssistant, mock_entry
+):
+    """A plan older than 12 h is made anew for what is not committed: the new windows
+    start after the committed one and never overlap it."""
+    client = _direction_client(E_SINCE)
+    mid = datetime(2026, 8, 1, tzinfo=UTC)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_GRID_IN: [G_NEW]})
+    coordinator._state["replacement_job"] = _started_job(
+        coordinator, [[E_START.isoformat(), mid.isoformat(), "energy"]], STALE_PLAN)
+
+    await _entity_cycle(coordinator, _others(**{G_NEW: E_NEW_FROM}))
+
+    assert _opened_windows(client) == [(mid, E_END)]
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+
+
+@pytest.mark.asyncio
+async def test_replan_without_windows_left_ends_the_phase(hass: HomeAssistant, mock_entry):
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_GRID_IN: [G_NEW]})
+    coordinator._state["replacement_job"] = _started_job(
+        coordinator, [[E_START.isoformat(), E_END.isoformat(), "energy"]], STALE_PLAN)
+
+    await _entity_cycle(coordinator, _others(**{G_NEW: E_NEW_FROM}))
+
+    client.open_replacement.assert_not_called()
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["applied_entities"] == coordinator._entities_fingerprint()
+
+
+@pytest.mark.asyncio
+async def test_started_job_ends_when_its_added_sensor_has_no_statistics(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_GRID_IN: [G_NEW]})
+    job = _started_job(coordinator, [[E_START.isoformat(), "2026-08-01T00:00:00+00:00",
+                                      "energy"]])
+    with patch("custom_components.wolta.coordinator.async_fetch_change",
+               side_effect=_fake_statistics(_others())):
+        assert await coordinator._energy_next(
+            job, E_NOW, {"data_since": E_SINCE}) == "phase_done"
+
+
+@pytest.mark.asyncio
+async def test_started_job_ends_after_four_cycles_without_a_plan(
+    hass: HomeAssistant, mock_entry
+):
+    from custom_components.wolta.coordinator import WoltaCoordinator
+
+    coordinator = WoltaCoordinator(hass, mock_entry)
+    job = {"done_windows": [["a", "b", "energy"]]}
+    assert [coordinator._plan_failed(job) for _ in range(4)] == [
+        None, None, None, "phase_done"]
+    assert coordinator._plan_failed({"done_windows": []}) is None  # idle: just waits
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_mid_job_finishes_it_and_queues_a_new_one(
+    hass: HomeAssistant, mock_entry
+):
+    """12 of 50 windows committed, then the added sensor is swapped for another: the job
+    ends its phase and finishes with its target, a direction change queued meanwhile
+    runs next, and then a new job goes from that target to the current selection."""
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client, data_updates={CONF_GRID_IN: [G_NEW]})
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    spans = [(base + timedelta(hours=12 * k), base + timedelta(hours=12 * k + 3))
+             for k in range(60)]
+    available = _others(**{G_NEW: spans})
+
+    async def cycle(now):
+        coordinator._state["last_uploaded_ts"] = E_BOOKMARK
+        await _entity_cycle(coordinator, available, now=now)
+
+    await cycle(E_NOW)
+    first_target = coordinator._state["replacement_job"]["target"]
+    assert client.open_replacement.await_count == 12
+
+    other = "sensor.grid_in_other"
+    mock_entry.data = {**mock_entry.data, CONF_GRID_IN: [other],
+                       CONF_INVERT_INTERVALS: [[None, None]], CONF_INVERT_BATTERY: True}
+    coordinator._entity_map["grid_in"] = [other]
+
+    await cycle(E_NOW + timedelta(hours=1))
+    assert client.open_replacement.await_count == 12
+    assert "replacement_job" not in coordinator._state
+    assert coordinator._state["applied_entities"] == first_target
+
+    await cycle(E_NOW + timedelta(hours=2))
+    assert client.open_replacement.call_args.kwargs["kind"] == "swap_battery"
+
+    await cycle(E_NOW + timedelta(hours=3))
+    job = coordinator._state["replacement_job"]
+    assert job["type"] == "entities"
+    assert job["streams"] == {"grid_in": [other]}
