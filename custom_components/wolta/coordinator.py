@@ -77,6 +77,7 @@ from .stats import (
     async_fetch_measurement,
     battery_state_rows,
     clean_quarters,
+    known_zero_gaps,
     measured_starts,
     merge_streams,
     soc_unit_ok,
@@ -214,6 +215,29 @@ def _discount_night(
         newest[e] = (top - daylight, newest[e][1] if e in newest else step)
         moved.add(e)
     return moved
+
+
+def _log_known_zero_gaps(
+    entity_id: str, rows: list, period_s: int, window: tuple[int, int],
+    anchor_start: int | None,
+) -> None:
+    """Log at debug every gap of an hour or more that rule (b) accepts as known zeros
+    (stats.known_zero_gaps) and that ends inside the window. An integration that
+    reports a stale, unchanged counter when it reconnects after an outage looks exactly
+    like an idle battery; the log makes such a run visible."""
+    if not _LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    for first, after in known_zero_gaps(rows, period_s, anchor_start=anchor_start):
+        if after < window[0]:
+            continue
+        _LOGGER.debug(
+            "Known zeros: %s has no statistics from %s to %s (%s) and its counter "
+            "stood still across the gap; the gap is sent as zero",
+            entity_id,
+            datetime.fromtimestamp(first, tz=timezone.utc).isoformat(),
+            datetime.fromtimestamp(after, tz=timezone.utc).isoformat(),
+            timedelta(seconds=after - first),
+        )
 
 
 _DAY_S = 86400
@@ -1007,6 +1031,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     rows, period, window=window,
                     sun_down=sun_down[period] if e in solar else None,
                     anchor_start=src.anchors.get(e)) if in_window(q)}
+                _log_known_zero_gaps(e, rows, period, window, src.anchors.get(e))
             src_candidates = {q for d in streams.values() for q in d if in_window(q)}
             candidates |= src_candidates
             if sensors:

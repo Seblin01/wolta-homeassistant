@@ -163,6 +163,62 @@ def measured_starts(rows: list[StatisticsRow], period_s: int) -> set[int]:
     return out
 
 
+def _measured_changes(rows: list[StatisticsRow], period_s: int) -> dict[int, float]:
+    """The change per measured period (start floored to ``period_s``); the keys are
+    exactly measured_starts."""
+    changes: dict[int, float] = {}
+    for row in rows:
+        change = row.get("change")
+        if change is None:
+            continue
+        start = int(row["start"])
+        key = start - start % period_s
+        changes[key] = changes.get(key, 0.0) + change
+    return changes
+
+
+def _ordered_with_anchor(
+    measured: set[int], period_s: int, anchor_start: int | None
+) -> list[int]:
+    """The measured periods in order, with the anchor (the sensor's last measured
+    period before the rows) in front: the previous measured period of each."""
+    anchor = None
+    if anchor_start is not None:
+        anchor = anchor_start - anchor_start % period_s
+        if measured and anchor >= min(measured):
+            anchor = None  # the rows hold the sensor's earlier periods themselves
+    return sorted(measured if anchor is None else measured | {anchor})
+
+
+def _still_gaps(
+    ordered: list[int], changes: dict[int, float], period_s: int
+) -> list[tuple[int, int]]:
+    """Rule (b): the gaps whose first measured period after them has change 0, as
+    (start of the first missing period, start of that measured period)."""
+    return [(before + period_s, after) for before, after in zip(ordered, ordered[1:])
+            if after - before > period_s and changes[after] == 0]
+
+
+def known_zero_gaps(
+    rows: list[StatisticsRow],
+    period_s: int,
+    *,
+    anchor_start: int | None = None,
+    min_s: int = 3600,
+) -> list[tuple[int, int]]:
+    """The gaps clean_quarters accepts as known zeros by rule (b) - the counter stood
+    still across them - that last at least ``min_s`` seconds, as (start of the first
+    missing period, start of the measured period after the gap) in UNIX seconds.
+
+    For the log only: an integration that reports a stale, unchanged counter when it
+    reconnects after a long outage looks exactly like a battery that was idle, and a
+    long run is worth seeing. Same arguments as clean_quarters."""
+    changes = _measured_changes(rows, period_s)
+    ordered = _ordered_with_anchor(set(changes), period_s, anchor_start)
+    return [(first, after) for first, after in _still_gaps(ordered, changes, period_s)
+            if after - first >= min_s]
+
+
 def clean_quarters(
     rows: list[StatisticsRow],
     period_s: int,
@@ -212,26 +268,12 @@ def clean_quarters(
     hour are clean when the hour is clean."""
     if period_s not in (300, 3600):
         raise ValueError(f"unsupported statistics period: {period_s} s")
-    m = measured_starts(rows, period_s)
-    changes: dict[int, float] = {}
-    for row in rows:
-        change = row.get("change")
-        if change is None:
-            continue
-        start = int(row["start"])
-        key = start - start % period_s
-        changes[key] = changes.get(key, 0.0) + change
+    changes = _measured_changes(rows, period_s)
+    m = set(changes)
     known = set(m)
-    anchor = None
-    if anchor_start is not None:
-        anchor = anchor_start - anchor_start % period_s
-        if m and anchor >= min(m):
-            anchor = None  # the rows hold the sensor's earlier periods themselves
-    # Measured periods, with the anchor in front: the previous measured period of each.
-    ordered = sorted(m if anchor is None else m | {anchor})
-    for before, after in zip(ordered, ordered[1:]):
-        if after - before > period_s and changes[after] == 0:
-            known.update(range(before + period_s, after, period_s))
+    ordered = _ordered_with_anchor(m, period_s, anchor_start)
+    for first, after in _still_gaps(ordered, changes, period_s):
+        known.update(range(first, after, period_s))
     lo = None
     if sun_down is not None:
         if window is not None:

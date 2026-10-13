@@ -1832,3 +1832,26 @@ def test_merge_streams_with_complete_emits_a_quarter_without_battery_keys():
                      "batt_discharged_kwh": 0.0, "solar_kwh": 0.0,
                      "grid_import_kwh": 0.3, "grid_export_kwh": 0.0,
                      "external_control": True}]
+
+
+def test_known_zero_gaps_lists_long_still_runs_only():
+    """Rule (b) runs of at least an hour, for the log: a 60-minute gap with change 0
+    after it is listed, a 25-minute one and a gap followed by energy are not."""
+    rows = (_r5(-5, 0) + _r5(65, change=0.0) + _r5(70)            # 10:05-11:05 still
+            + _r5(100, change=0.0) + _r5(105)                      # 11:15-11:40 still
+            + _r5(200, change=0.3) + _r5(205))                     # 11:50-13:20 energy
+    assert stats.known_zero_gaps(rows, 300) == [
+        (int((T + timedelta(minutes=5)).timestamp()),
+         int((T + timedelta(minutes=65)).timestamp()))]
+    assert stats.known_zero_gaps(rows, 300, min_s=1500) == [
+        (int((T + timedelta(minutes=5)).timestamp()),
+         int((T + timedelta(minutes=65)).timestamp())),
+        (int((T + timedelta(minutes=75)).timestamp()),
+         int((T + timedelta(minutes=100)).timestamp()))]
+
+
+def test_known_zero_gaps_hourly():
+    rows = _hours(0, 1) + _hours(4, change=0.0) + _hours(5)
+    assert stats.known_zero_gaps(rows, 3600) == [
+        (int((_D + timedelta(hours=2)).timestamp()),
+         int((_D + timedelta(hours=4)).timestamp()))]

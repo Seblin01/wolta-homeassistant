@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -5101,6 +5102,45 @@ async def test_both_battery_sensors_standing_still_hourly_are_sent(
         assert row["batt_discharged_kwh"] == 0.0
         assert row["grid_import_kwh"] == pytest.approx(0.025)
     assert (h + timedelta(hours=2)).isoformat() in sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("minutes", "logged"), [(120, True), (30, False)])
+async def test_a_long_still_run_is_logged_at_debug(
+    hass: HomeAssistant, mock_entry, caplog, minutes, logged
+):
+    """A gap of an hour or more accepted as known zeros because the counter stood still
+    is logged at debug with the sensor and the run, so an integration that reports a
+    stale counter on reconnect is visible. A shorter run is not logged."""
+    q = NOW - timedelta(hours=4)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+
+    async def fetch(h, ids, start, end, period):
+        return _batteries_stand_still(_energy_stats(start, end),
+                                      (q, q + timedelta(minutes=minutes)))
+
+    caplog.set_level(logging.DEBUG, logger="custom_components.wolta.coordinator")
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=6)).isoformat(),
+                         "applied_invert": False, "applied_entities": _fingerprint()})
+        await coordinator._async_update_data()
+
+    lines = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.DEBUG and "stood still" in r.getMessage()]
+    if not logged:
+        assert lines == []
+        return
+    for sid in ("sensor.batt_in", "sensor.batt_out"):
+        line = next(m for m in lines if sid in m)
+        assert q.isoformat() in line
+        assert (q + timedelta(minutes=minutes)).isoformat() in line
+        assert "2:00:00" in line
 
 
 async def _run_solar_cycles(
