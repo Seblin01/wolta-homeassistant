@@ -6004,7 +6004,84 @@ async def test_copies_seen_ids_in_stored_state_decide_the_release(hass, mock_ent
         await c._evaluate_copies()
         issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
         assert (issue.dismissed_version is None) is released, listed
-        assert c._state["copies_seen_ids"] == listed
+        assert c._state["copies_seen_ids"] == sorted({12, 13} | set(listed))
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_survives_an_empty_listing(hass, mock_entry):
+    """An ignored issue is invisible; deleting it on an empty listing would drop the ignore,
+    so the same ids coming back would show the repair again."""
+    reg = ir.async_get(hass)
+    both = {"copies": [_copy(12), _copy(13)], "self": None, "purge_days": 30}
+    c = await _copies_coordinator(hass, mock_entry, both)
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    c.client.get_copies = AsyncMock(return_value={"copies": [], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+    c.client.get_copies = AsyncMock(return_value=both)
+    await c._evaluate_copies()
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+    assert c._state["copies_seen_ids"] == [12, 13]
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_survives_remove_then_undo(hass, mock_entry):
+    """The seen set never shrinks: [12, 13] -> [12] (13 removed) -> [12, 13] (undone) is not a
+    new copy, so the ignore stays."""
+    reg = ir.async_get(hass)
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12), _copy(13)],
+                                                     "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12)], "self": None,
+                                                  "purge_days": 30})
+    await c._evaluate_copies()
+    assert c._state["copies_seen_ids"] == [12, 13]
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12), _copy(13)],
+                                                  "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue.dismissed_version is not None and issue.data["ids"] == [12, 13]
+
+
+@pytest.mark.asyncio
+async def test_copies_endpoint_unavailable_is_logged_and_keeps_issue(hass, mock_entry, caplog):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(return_value=None)
+    with caplog.at_level("DEBUG", logger="custom_components.wolta.coordinator"):
+        await c._evaluate_copies()
+    assert "Copies endpoint unavailable" in caplog.text
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_update_cycle_fetches_copies_only_on_the_slow_poll(hass, mock_entry):
+    """The main cycle evaluates copies; the 60 s fast poll does not. A None listing (older
+    server or lost token) raises nothing, in particular no re-authentication."""
+    from custom_components.wolta.coordinator import _FAST_POLL, _SLOW_POLL
+
+    client = _mock_client()
+    client.get_copies = AsyncMock(return_value=None)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
+                         "last_recompute": NOW.date().isoformat()})
+        coordinator.update_interval = _FAST_POLL
+        await coordinator._async_update_data()
+        client.get_copies.assert_not_awaited()
+        coordinator.update_interval = _SLOW_POLL
+        await coordinator._async_update_data()   # must not raise ConfigEntryAuthFailed
+        client.get_copies.assert_awaited_once_with(coordinator.token)
 
 
 @pytest.mark.asyncio

@@ -3585,6 +3585,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         try:
             listing = await self.client.get_copies(self.token)
             if listing is None:
+                _LOGGER.debug("Copies endpoint unavailable (older server or lost token); "
+                              "keeping the repair as it is")
                 return
             active = sorted(
                 (c for c in listing.get("copies") or []
@@ -3598,7 +3600,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         seen = {int(i) for i in self._state.get(_COPIES_SEEN_KEY) or []}
         if not ids:
-            ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
+            # An ignored issue is invisible already; deleting it would drop the ignore, so the
+            # same copies reappearing later (for example after a remove and undo) would show the
+            # repair again. Only a non-ignored issue is deleted.
+            existing = ir.async_get(self.hass).async_get_issue(DOMAIN, self._copies_issue_id)
+            if existing is not None and existing.dismissed_version is None:
+                ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
         else:
             if set(ids) - seen:
                 ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
@@ -3614,8 +3621,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 data={"entry_id": self.config_entry.entry_id, "ids": ids,
                       "lines": lines, "purge_days": days},
             )
-        if sorted(seen) != ids:
-            self._state[_COPIES_SEEN_KEY] = ids
+        # The seen set only grows: an id that left the listing (removed) and comes back (undo)
+        # is not new, so the user's ignore survives it.
+        merged = sorted(seen | set(ids))
+        if sorted(seen) != merged:
+            self._state[_COPIES_SEEN_KEY] = merged
             await self._store.async_save(self._state)
 
     def _set_measured_issue(
