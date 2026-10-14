@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import data_entry_flow
 from homeassistant.components.repairs import RepairsFlow
@@ -420,7 +421,7 @@ class HouseCopiesRepairFlow(RepairsFlow):
                 continue  # already removed, or no longer a copy this plant may handle
             except WoltaCopyBusy:
                 return self.async_abort(reason="busy")
-            except WoltaApiError:
+            except (WoltaApiError, aiohttp.ClientError, TimeoutError):
                 return self.async_abort(reason="failed")
         return self.async_create_entry(title="", data={})
 

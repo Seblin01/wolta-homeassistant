@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -896,18 +897,29 @@ async def test_copies_flow_skips_gone(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_copies_flow_aborts_on_busy_and_keeps_issue(hass: HomeAssistant):
-    """An abort does not delete the issue (only create_entry does)."""
-    entry, _ = _copies_entry([WoltaCopyBusy("busy")])
-    flow = HouseCopiesRepairFlow(entry, [12], "", 30)
+async def test_copies_flow_aborts_on_busy_and_stops(hass: HomeAssistant):
+    """Busy aborts with reason "busy" and the loop stops at the first busy copy."""
+    entry, coordinator = _copies_entry([WoltaCopyBusy("busy"), None])
+    flow = HouseCopiesRepairFlow(entry, [12, 13], "", 30)
     flow.hass = hass
     result = await flow.async_step_confirm({})
     assert result["type"] == "abort" and result["reason"] == "busy"
+    assert coordinator.client.remove_copy.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_copies_flow_aborts_on_other_errors(hass: HomeAssistant):
     entry, _ = _copies_entry([WoltaApiError("boom")])
+    flow = HouseCopiesRepairFlow(entry, [12], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "abort" and result["reason"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [aiohttp.ClientError("down"), TimeoutError()])
+async def test_copies_flow_aborts_on_network_errors(hass: HomeAssistant, error):
+    entry, _ = _copies_entry([error])
     flow = HouseCopiesRepairFlow(entry, [12], "", 30)
     flow.hass = hass
     result = await flow.async_step_confirm({})
