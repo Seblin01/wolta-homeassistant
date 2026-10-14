@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -5874,3 +5875,225 @@ async def test_no_measured_row_within_the_lookback_leaves_the_dawn_unproven(
     assert first_row.isoformat() not in sent
     assert (first_row + timedelta(minutes=15)).isoformat() in sent
     assert sent[(_OCT12 + timedelta(hours=2)).isoformat()]["solar_kwh"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Copies of this plant: the house_copies repair
+# ---------------------------------------------------------------------------
+
+_COPIES_ISSUE_ID = "house_copies_test_entry_id"
+
+
+def _copy(cid, *, status="active", removable=True, frm="2025-03-01", to="2026-03-01"):
+    return {"id": cid, "status": status, "uploaded": "2026-03-02",
+            "period": {"from": frm, "to": to}, "n_days": 365, "source": "ha_upload",
+            "transport": None, "removable": removable}
+
+
+async def _copies_coordinator(hass, mock_entry, listing):
+    client = _mock_client()
+    client.get_copies = AsyncMock(return_value=listing)
+    return await _make_coordinator(hass, mock_entry, client)
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_lists_active_removable_copies(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [
+        _copy(13), _copy(12), _copy(14, status="removed"), _copy(15, removable=False),
+        _copy(16, frm=None, to=None)], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue is not None and issue.is_fixable and not issue.is_persistent
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.data["ids"] == [12, 13, 16]
+    assert issue.data["lines"] == ("- 2026-03-02 (2025-03-01 – 2026-03-01)\n"
+                                   "- 2026-03-02 (2025-03-01 – 2026-03-01)\n- 2026-03-02")
+    assert issue.data["purge_days"] == 30
+    assert issue.translation_placeholders == {"count": "3", "days": "30"}
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_cleared_when_none(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(return_value={"copies": [], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_never_in_view_only(hass, mock_entry):
+    """The repair is never raised in view-only mode, and the listing is not even fetched."""
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    c._view_only = True
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is None
+    c.client.get_copies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_untouched_on_fetch_error_or_old_server(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(side_effect=RuntimeError("boom"))
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+    c.client.get_copies = AsyncMock(return_value=None)
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_resurfaces_only_on_new_id(hass, mock_entry):
+    """HA keeps an ignored issue ignored on re-create; only delete + create releases it, so
+    the repair is deleted first exactly when the server lists an id not seen before."""
+    reg = ir.async_get(hass)
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12), _copy(13)],
+                                                     "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12)], "self": None,
+                                                  "purge_days": 30})
+    await c._evaluate_copies()                                   # fewer: stays ignored
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12), _copy(20)],
+                                                  "self": None, "purge_days": 30})
+    await c._evaluate_copies()                                   # new id: surfaces again
+    issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue.dismissed_version is None and issue.data["ids"] == [12, 20]
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_stays_ignored_after_restart(hass, mock_entry):
+    """A non-persistent issue comes back from the registry without its data after a restart;
+    the ids already seen live in the coordinator's store, so the ignore survives."""
+    reg = ir.async_get(hass)
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12), _copy(13)],
+                                                     "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    assert c._state["copies_seen_ids"] == [12, 13]
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    # What IssueRegistry._async_load does with a non-persistent issue: data is dropped.
+    key = (DOMAIN, _COPIES_ISSUE_ID)
+    reg.issues[key] = dataclasses.replace(reg.issues[key], data=None)
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).data is None
+    await c._evaluate_copies()
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+
+
+@pytest.mark.asyncio
+async def test_copies_seen_ids_in_stored_state_decide_the_release(hass, mock_entry):
+    reg = ir.async_get(hass)
+    for listed, released in (([12, 13], False), ([12, 20], True)):
+        ir.async_delete_issue(hass, DOMAIN, _COPIES_ISSUE_ID)
+        client = _mock_client()
+        client.get_copies = AsyncMock(return_value={
+            "copies": [_copy(i) for i in (12, 13)], "self": None, "purge_days": 30})
+        c = await _make_coordinator(hass, mock_entry, client,
+                                    store_state={"copies_seen_ids": [12, 13]})
+        await c._evaluate_copies()
+        reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+        c.client.get_copies = AsyncMock(return_value={
+            "copies": [_copy(i) for i in listed], "self": None, "purge_days": 30})
+        await c._evaluate_copies()
+        issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+        assert (issue.dismissed_version is None) is released, listed
+        assert c._state["copies_seen_ids"] == sorted({12, 13} | set(listed))
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_survives_an_empty_listing(hass, mock_entry):
+    """An ignored issue is invisible; deleting it on an empty listing would drop the ignore,
+    so the same ids coming back would show the repair again."""
+    reg = ir.async_get(hass)
+    both = {"copies": [_copy(12), _copy(13)], "self": None, "purge_days": 30}
+    c = await _copies_coordinator(hass, mock_entry, both)
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    c.client.get_copies = AsyncMock(return_value={"copies": [], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+    c.client.get_copies = AsyncMock(return_value=both)
+    await c._evaluate_copies()
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+    assert c._state["copies_seen_ids"] == [12, 13]
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_survives_remove_then_undo(hass, mock_entry):
+    """The seen set never shrinks: [12, 13] -> [12] (13 removed) -> [12, 13] (undone) is not a
+    new copy, so the ignore stays."""
+    reg = ir.async_get(hass)
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12), _copy(13)],
+                                                     "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12)], "self": None,
+                                                  "purge_days": 30})
+    await c._evaluate_copies()
+    assert c._state["copies_seen_ids"] == [12, 13]
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12), _copy(13)],
+                                                  "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue.dismissed_version is not None and issue.data["ids"] == [12, 13]
+
+
+@pytest.mark.asyncio
+async def test_copies_endpoint_unavailable_is_logged_and_keeps_issue(hass, mock_entry, caplog):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(return_value=None)
+    with caplog.at_level("DEBUG", logger="custom_components.wolta.coordinator"):
+        await c._evaluate_copies()
+    assert "Copies endpoint unavailable" in caplog.text
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_update_cycle_fetches_copies_only_on_the_slow_poll(hass, mock_entry):
+    """The main cycle evaluates copies; the 60 s fast poll does not. A None listing (older
+    server or lost token) raises nothing, in particular no re-authentication."""
+    from custom_components.wolta.coordinator import _FAST_POLL, _SLOW_POLL
+
+    client = _mock_client()
+    client.get_copies = AsyncMock(return_value=None)
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=NOW),
+        patch("custom_components.wolta.coordinator.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.coordinator.async_fetch_change", return_value={}),
+        patch("custom_components.wolta.coordinator.merge_streams", return_value=[]),
+        _patch_aggregator("aggregate_5min_to_15min", return_value={}),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": (NOW - timedelta(hours=2)).isoformat(),
+                         "last_recompute": NOW.date().isoformat()})
+        coordinator.update_interval = _FAST_POLL
+        await coordinator._async_update_data()
+        client.get_copies.assert_not_awaited()
+        coordinator.update_interval = _SLOW_POLL
+        await coordinator._async_update_data()   # must not raise ConfigEntryAuthFailed
+        client.get_copies.assert_awaited_once_with(coordinator.token)
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_untouched_on_malformed_listing(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    before = ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    for bad in ({"copies": [{"status": "active", "removable": True}], "purge_days": 30},
+                {"copies": [_copy(12)], "purge_days": "x"}):
+        c.client.get_copies = AsyncMock(return_value=bad)
+        await c._evaluate_copies()
+        after = ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+        assert after is not None and after.data == before.data
+        assert c._state["copies_seen_ids"] == [12]

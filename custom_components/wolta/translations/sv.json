@@ -118,6 +118,22 @@
         }
       }
     },
+    "house_copies": {
+      "title": "Samma mätdata finns i andra anläggningar hos Wolta",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Ta bort kopiorna?",
+            "description": "Uppladdningar hos Wolta med samma mätdata som den här anläggningen ({count} st), efter uppladdningsdag och dataperiod:\n\n{list}\n\nDe räknas en gång i jämförelsen med andra hus. Tar du bort dem tas de ur jämförelsen direkt och raderas efter {days} dagar, om ingen som har deras personliga länk väljer att behålla dem.\n\nFram till dess går det att ångra på wolta.se: koppla anläggningen till ett konto (Konfigurera → Koppla till ett wolta.se-konto) och öppna den under Mitt konto."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort.",
+          "busy": "Någon av anläggningarna räknas om just nu. Försök igen om en stund.",
+          "failed": "Det gick inte att ta bort kopiorna just nu. Försök igen senare."
+        }
+      }
+    },
     "soc_missing": {
       "title": "Frivilligt: lägg till batteriets laddningsnivå i Wolta",
       "fix_flow": {

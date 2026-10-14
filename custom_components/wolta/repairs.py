@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import data_entry_flow
 from homeassistant.components.repairs import RepairsFlow
@@ -55,6 +56,7 @@ from .const import (
     DOMAIN,
 )
 from . import intervals
+from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .soc_picker import soc_candidates, soc_error
 
@@ -386,6 +388,44 @@ class BatteryDirectionRepairFlow(RepairsFlow):
         return self.async_create_entry(title="", data={})
 
 
+class HouseCopiesRepairFlow(RepairsFlow):
+    """Remove uploads at Wolta that carry this plant's metering data.
+
+    The server decides which rows qualify (same house, same owner) and puts them out of the
+    comparison at once; they are deleted after the grace period unless whoever holds their
+    personal link keeps them. One confirmation step: Home Assistant's repair flow is itself the
+    confirmation, and undo lives on wolta.se (the text says where)."""
+
+    def __init__(self, entry: ConfigEntry | None, ids: list[int], lines: str, days: int) -> None:
+        self._entry = entry
+        self._ids = ids
+        self._lines = lines
+        self._days = days
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(self, user_input=None) -> data_entry_flow.FlowResult:
+        if user_input is None:
+            return self.async_show_form(
+                step_id="confirm", data_schema=vol.Schema({}),
+                description_placeholders={"count": str(len(self._ids)), "list": self._lines,
+                                          "days": str(self._days)})
+        coordinator = self._entry.runtime_data
+        for copy_id in self._ids:
+            try:
+                await coordinator.client.remove_copy(coordinator.token, copy_id)
+            except WoltaCopyGone:
+                continue  # already removed, or no longer a copy this plant may handle
+            except WoltaCopyBusy:
+                return self.async_abort(reason="busy")
+            except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+                return self.async_abort(reason="failed")
+        return self.async_create_entry(title="", data={})
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict[str, Any] | None
 ) -> RepairsFlow:
@@ -416,6 +456,10 @@ async def async_create_fix_flow(
             entry, float(data.get("measured_eff", 0.0)),
             configured_eff=float(configured) if configured is not None else None,
             days=days)
+    if issue_id.startswith("house_copies"):
+        return HouseCopiesRepairFlow(
+            entry, [int(x) for x in data.get("ids") or []], str(data.get("lines") or ""),
+            int(data.get("purge_days") or 30))
     configured = data.get("configured_kwh")
     return MeasuredCapacityRepairFlow(
         entry, float(data.get("measured_kwh", 0.0)),

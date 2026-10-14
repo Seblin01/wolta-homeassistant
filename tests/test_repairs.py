@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -849,3 +850,93 @@ def test_direction_pending_abort_is_translated_for_every_fixable_key(lang):
     for key in ("battery_direction_all", "battery_direction_partial",
                 "battery_direction_since_flip", "battery_direction_ended_flip"):
         assert issues[key]["fix_flow"]["abort"]["direction_pending"]
+
+
+from custom_components.wolta.api import (  # noqa: E402
+    WoltaApiError,
+    WoltaCopyBusy,
+    WoltaCopyGone,
+)
+from custom_components.wolta.repairs import HouseCopiesRepairFlow  # noqa: E402
+
+
+def _copies_entry(remove_side_effect=None):
+    entry = MagicMock()
+    entry.entry_id = "e1"
+    coordinator = MagicMock()
+    coordinator.token = "tok"
+    coordinator.client = MagicMock()
+    coordinator.client.remove_copy = AsyncMock(side_effect=remove_side_effect)
+    entry.runtime_data = coordinator
+    return entry, coordinator
+
+
+@pytest.mark.asyncio
+async def test_copies_flow_shows_list_and_removes_each(hass: HomeAssistant):
+    entry, coordinator = _copies_entry()
+    flow = HouseCopiesRepairFlow(entry, [12, 13], "- 2026-03-02\n- 2026-03-03", 30)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] == "form" and form["step_id"] == "confirm"
+    assert form["description_placeholders"] == {
+        "count": "2", "list": "- 2026-03-02\n- 2026-03-03", "days": "30"}
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "create_entry"
+    assert [c.args for c in coordinator.client.remove_copy.await_args_list] == [
+        ("tok", 12), ("tok", 13)]
+
+
+@pytest.mark.asyncio
+async def test_copies_flow_skips_gone(hass: HomeAssistant):
+    entry, coordinator = _copies_entry([WoltaCopyGone("gone"), None])
+    flow = HouseCopiesRepairFlow(entry, [12, 13], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "create_entry"
+    assert coordinator.client.remove_copy.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_copies_flow_aborts_on_busy_and_stops(hass: HomeAssistant):
+    """Busy aborts with reason "busy" and the loop stops at the first busy copy."""
+    entry, coordinator = _copies_entry([WoltaCopyBusy("busy"), None])
+    flow = HouseCopiesRepairFlow(entry, [12, 13], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "abort" and result["reason"] == "busy"
+    assert coordinator.client.remove_copy.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_copies_flow_aborts_on_other_errors(hass: HomeAssistant):
+    entry, _ = _copies_entry([WoltaApiError("boom")])
+    flow = HouseCopiesRepairFlow(entry, [12], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "abort" and result["reason"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [aiohttp.ClientError("down"), TimeoutError()])
+async def test_copies_flow_aborts_on_network_errors(hass: HomeAssistant, error):
+    entry, _ = _copies_entry([error])
+    flow = HouseCopiesRepairFlow(entry, [12], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_confirm({})
+    assert result["type"] == "abort" and result["reason"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_copies_flow_without_entry_aborts(hass: HomeAssistant):
+    flow = HouseCopiesRepairFlow(None, [12], "", 30)
+    flow.hass = hass
+    result = await flow.async_step_init()
+    assert result["type"] == "abort" and result["reason"] == "entry_not_found"
+
+
+@pytest.mark.asyncio
+async def test_create_fix_flow_dispatches_house_copies(hass: HomeAssistant):
+    flow = await async_create_fix_flow(
+        hass, "house_copies_e1",
+        {"entry_id": "e1", "ids": [12], "lines": "- 2026-03-02", "purge_days": 30})
+    assert isinstance(flow, HouseCopiesRepairFlow)
