@@ -575,6 +575,20 @@ def _daylight(observer: Observer, day: date) -> tuple[float, float] | None:
     return (mid + crossing(-half), mid + crossing(half))
 
 
+def _copy_lines(copies: list[dict]) -> str:
+    """One line per copy: upload day and data period as ISO dates only, so the list reads the
+    same in every language (the words live in the translation)."""
+    lines = []
+    for c in copies:
+        period = c.get("period") or {}
+        frm, to = period.get("from"), period.get("to")
+        line = f"- {c.get('uploaded')}"
+        if frm and to:
+            line += f" ({frm} – {to})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _make_sun_down(
     observer: Observer, period_s: int, cache: dict[int, tuple[float, float] | None]
 ) -> Callable[[int], bool]:
@@ -760,6 +774,9 @@ _ISSUE_SOC_MISSING = "soc_missing"
 # history waits until Retry-After. Non-fixable, one per entry; the translation key says
 # which correction waits (_direction / _entities), the placeholder when it is retried.
 _ISSUE_REPLACEMENT_WAITING = "replacement_waiting"
+# Uploads at Wolta that carry this plant's metering data (server spec "copies of your plant").
+# The server decides which rows qualify - same house and same owner - the client only shows them.
+_ISSUE_HOUSE_COPIES = "house_copies"
 
 # Consecutive bad read cycles before the repair is raised. Same threshold and
 # rationale as the flex twin above: at the 6 h slow poll this is roughly a day,
@@ -882,6 +899,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._energy_issue_id: str = f"{_ISSUE_ENERGY_NO_STATS}_{entry.entry_id}"
         self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
         self._waiting_issue_id: str = f"{_ISSUE_REPLACEMENT_WAITING}_{entry.entry_id}"
+        self._copies_issue_id: str = f"{_ISSUE_HOUSE_COPIES}_{entry.entry_id}"
         # Completeness of the latest regular read (quarters dropped as incomplete and the
         # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
         # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
@@ -2329,6 +2347,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
 
+            # Copies of this plant (server spec "copies of your plant" §8): the main cycle only,
+            # not the fast poll - copies are rare and already counted once on the server.
+            if self.update_interval != _FAST_POLL:
+                await self._evaluate_copies()
+
             # Visningsläge: bara resultat-pollen. Hela strömningsmaskineriet (invert-/
             # entitets-självläkning, bookmark, statistikläsning, PUT /data, recompute-
             # kadens, measured-params-repairs) förutsätter att VI äger datan - här ägs
@@ -3540,6 +3563,49 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     )
             except (ValueError, AttributeError):
                 pass
+
+    async def _evaluate_copies(self) -> None:
+        """Raise, update or clear the house_copies repair from the server's copies listing.
+
+        Never in view-only mode: there the plant's binding owns the profile, and the Home
+        Assistant user is not necessarily its owner. A failed fetch, or a server without the
+        endpoint (None), leaves the repair as it is. A NEW copy id deletes the repair before it is
+        created again: Home Assistant keeps an ignored issue ignored when it is re-created and
+        releases it only when the issue is deleted (repairs docs, "Issue persistence")."""
+        if self._view_only:
+            ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
+            return
+        try:
+            listing = await self.client.get_copies(self.token)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Copies fetch failed; keeping the repair as it is", exc_info=True)
+            return
+        if listing is None:
+            return
+        active = sorted(
+            (c for c in listing.get("copies") or []
+             if c.get("status") == "active" and c.get("removable")),
+            key=lambda c: int(c["id"]))
+        if not active:
+            ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
+            return
+        ids = [int(c["id"]) for c in active]
+        days = int(listing.get("purge_days") or 30)
+        existing = ir.async_get(self.hass).async_get_issue(DOMAIN, self._copies_issue_id)
+        if existing is not None and set(ids) - set((existing.data or {}).get("ids") or []):
+            ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._copies_issue_id,
+            is_fixable=True,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_HOUSE_COPIES,
+            translation_placeholders={"count": str(len(ids)), "days": str(days)},
+            data={"entry_id": self.config_entry.entry_id, "ids": ids,
+                  "lines": _copy_lines(active), "purge_days": days},
+        )
 
     def _set_measured_issue(
         self, key: str, *, fire, translation_key: str, placeholders: dict, data: dict

@@ -5874,3 +5874,95 @@ async def test_no_measured_row_within_the_lookback_leaves_the_dawn_unproven(
     assert first_row.isoformat() not in sent
     assert (first_row + timedelta(minutes=15)).isoformat() in sent
     assert sent[(_OCT12 + timedelta(hours=2)).isoformat()]["solar_kwh"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Copies of this plant: the house_copies repair
+# ---------------------------------------------------------------------------
+
+_COPIES_ISSUE_ID = "house_copies_test_entry_id"
+
+
+def _copy(cid, *, status="active", removable=True, frm="2025-03-01", to="2026-03-01"):
+    return {"id": cid, "status": status, "uploaded": "2026-03-02",
+            "period": {"from": frm, "to": to}, "n_days": 365, "source": "ha_upload",
+            "transport": None, "removable": removable}
+
+
+async def _copies_coordinator(hass, mock_entry, listing):
+    client = _mock_client()
+    client.get_copies = AsyncMock(return_value=listing)
+    return await _make_coordinator(hass, mock_entry, client)
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_lists_active_removable_copies(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [
+        _copy(13), _copy(12), _copy(14, status="removed"), _copy(15, removable=False),
+        _copy(16, frm=None, to=None)], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue is not None and issue.is_fixable and not issue.is_persistent
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.data["ids"] == [12, 13, 16]
+    assert issue.data["lines"] == ("- 2026-03-02 (2025-03-01 – 2026-03-01)\n"
+                                   "- 2026-03-02 (2025-03-01 – 2026-03-01)\n- 2026-03-02")
+    assert issue.data["purge_days"] == 30
+    assert issue.translation_placeholders == {"count": "3", "days": "30"}
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_cleared_when_none(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(return_value={"copies": [], "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_never_in_view_only(hass, mock_entry):
+    """Review Focus 3."""
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    c._view_only = True
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is None
+    c.client.get_copies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_copies_issue_untouched_on_fetch_error_or_old_server(hass, mock_entry):
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12)], "self": None,
+                                                     "purge_days": 30})
+    await c._evaluate_copies()
+    c.client.get_copies = AsyncMock(side_effect=RuntimeError("boom"))
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+    c.client.get_copies = AsyncMock(return_value=None)
+    await c._evaluate_copies()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_ignored_copies_issue_resurfaces_only_on_new_id(hass, mock_entry):
+    """Review Focus 4: HA keeps an ignored issue ignored on re-create; only delete + create
+    releases it."""
+    reg = ir.async_get(hass)
+    c = await _copies_coordinator(hass, mock_entry, {"copies": [_copy(12), _copy(13)],
+                                                     "self": None, "purge_days": 30})
+    await c._evaluate_copies()
+    reg.async_ignore(DOMAIN, _COPIES_ISSUE_ID, True)
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12)], "self": None,
+                                                  "purge_days": 30})
+    await c._evaluate_copies()                                   # fewer: stays ignored
+    assert reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID).dismissed_version is not None
+
+    c.client.get_copies = AsyncMock(return_value={"copies": [_copy(12), _copy(20)],
+                                                  "self": None, "purge_days": 30})
+    await c._evaluate_copies()                                   # new id: surfaces again
+    issue = reg.async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
+    assert issue.dismissed_version is None and issue.data["ids"] == [12, 20]
