@@ -248,9 +248,9 @@ Leaving the field empty — the default — changes nothing: no extra sensor is 
 
 While a direction change is still being applied to the stored history, the flip is refused, so a repair computed from the old direction cannot flip the same period back.
 
-**"The same metering data exists in other plants at Wolta" repair (v0.46.0+).** If uploads at Wolta carry the same metering data as this plant and were uploaded after it (for example a CSV export of the same meter), Home Assistant offers to remove them. They are already counted only once in the comparison with other houses; removing them takes them out at once, and they are deleted after 30 days unless whoever holds their personal link chooses to keep them. Until then a removal can be undone on wolta.se once the plant is linked to an account (Configure → Link to a wolta.se account). Uploads on someone else's account, and uploads made before this plant, are never shown.
-
 For the flip repair you can also choose **Ignore**, which is remembered until the server reports the direction as fine. The check needs a battery state-of-charge sensor (see below) and a recent enough Wolta server; it is not raised in view-only mode. The repair clears itself once the server no longer finds the direction reversed.
+
+**"The same metering data exists in other plants at Wolta" repair (v0.46.0+).** If uploads at Wolta carry the same metering data as this plant and were uploaded after it (for example a CSV export of the same meter), Home Assistant offers to remove them. They are already counted only once in the comparison with other houses; removing them takes them out at once, and they are deleted after 30 days unless whoever holds their personal link chooses to keep them. Until then a removal can be undone on wolta.se once the plant is linked to an account (Configure → Link to a wolta.se account). Uploads on someone else's account, and uploads made before this plant, are never shown.
 
 **Payback time shows `unknown`.** The sensor has no payback year to report because the battery doesn't reach break-even — typically a small or expensive battery whose modelled internal rate of return (IRR) is negative. This is a real result, not an error; the IRR sensor shows the (negative) return. Increasing the battery capacity or lowering the entered purchase price moves it towards a payback.
 
