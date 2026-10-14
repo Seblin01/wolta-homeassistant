@@ -777,6 +777,8 @@ _ISSUE_REPLACEMENT_WAITING = "replacement_waiting"
 # Uploads at Wolta that carry this plant's metering data (server spec "copies of your plant").
 # The server decides which rows qualify - same house and same owner - the client only shows them.
 _ISSUE_HOUSE_COPIES = "house_copies"
+# Key in the coordinator's persistent state: the copy ids the repair has already shown.
+_COPIES_SEEN_KEY = "copies_seen_ids"
 
 # Consecutive bad read cycles before the repair is raised. Same threshold and
 # rationale as the flex twin above: at the 6 h slow poll this is roughly a day,
@@ -3568,44 +3570,53 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """Raise, update or clear the house_copies repair from the server's copies listing.
 
         Never in view-only mode: there the plant's binding owns the profile, and the Home
-        Assistant user is not necessarily its owner. A failed fetch, or a server without the
-        endpoint (None), leaves the repair as it is. A NEW copy id deletes the repair before it is
-        created again: Home Assistant keeps an ignored issue ignored when it is re-created and
-        releases it only when the issue is deleted (repairs docs, "Issue persistence")."""
+        Assistant user is not necessarily its owner. A failed fetch, a malformed listing, or a
+        server without the endpoint (None) leaves the repair as it is.
+
+        A NEW copy id deletes the repair before it is created again: Home Assistant keeps an
+        ignored issue ignored when it is re-created and releases it only when the issue is
+        deleted (repairs docs, "Issue persistence"). Which ids were already seen is kept in the
+        coordinator's own store, not read back from the issue: a non-persistent issue is
+        restored without its data after a restart, which would make every id look new and
+        release the user's ignore."""
         if self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
             return
         try:
             listing = await self.client.get_copies(self.token)
+            if listing is None:
+                return
+            active = sorted(
+                (c for c in listing.get("copies") or []
+                 if c.get("status") == "active" and c.get("removable")),
+                key=lambda c: int(c["id"]))
+            ids = [int(c["id"]) for c in active]
+            days = int(listing.get("purge_days") or 30)
+            lines = _copy_lines(active)
         except Exception:  # pylint: disable=broad-except
-            _LOGGER.debug("Copies fetch failed; keeping the repair as it is", exc_info=True)
+            _LOGGER.debug("Copies listing unusable; keeping the repair as it is", exc_info=True)
             return
-        if listing is None:
-            return
-        active = sorted(
-            (c for c in listing.get("copies") or []
-             if c.get("status") == "active" and c.get("removable")),
-            key=lambda c: int(c["id"]))
-        if not active:
+        seen = {int(i) for i in self._state.get(_COPIES_SEEN_KEY) or []}
+        if not ids:
             ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
-            return
-        ids = [int(c["id"]) for c in active]
-        days = int(listing.get("purge_days") or 30)
-        existing = ir.async_get(self.hass).async_get_issue(DOMAIN, self._copies_issue_id)
-        if existing is not None and set(ids) - set((existing.data or {}).get("ids") or []):
-            ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
-        ir.async_create_issue(
-            self.hass,
-            DOMAIN,
-            self._copies_issue_id,
-            is_fixable=True,
-            is_persistent=False,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key=_ISSUE_HOUSE_COPIES,
-            translation_placeholders={"count": str(len(ids)), "days": str(days)},
-            data={"entry_id": self.config_entry.entry_id, "ids": ids,
-                  "lines": _copy_lines(active), "purge_days": days},
-        )
+        else:
+            if set(ids) - seen:
+                ir.async_delete_issue(self.hass, DOMAIN, self._copies_issue_id)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                self._copies_issue_id,
+                is_fixable=True,
+                is_persistent=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=_ISSUE_HOUSE_COPIES,
+                translation_placeholders={"count": str(len(ids)), "days": str(days)},
+                data={"entry_id": self.config_entry.entry_id, "ids": ids,
+                      "lines": lines, "purge_days": days},
+            )
+        if sorted(seen) != ids:
+            self._state[_COPIES_SEEN_KEY] = ids
+            await self._store.async_save(self._state)
 
     def _set_measured_issue(
         self, key: str, *, fire, translation_key: str, placeholders: dict, data: dict
