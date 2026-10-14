@@ -1873,11 +1873,22 @@ async def test_efficiency_issue_not_fired_within_tolerance(hass, mock_entry):
 
 @pytest.mark.asyncio
 async def test_efficiency_issue_not_fired_at_implausible_ceiling(hass, mock_entry):
-    """Review #3: en uppmätt eff ≥ 0.98 är en clamp-/randartefakt, inte ett riktigt
+    """Review #3: en uppmätt eff över 0.98 är en clamp-/randartefakt, inte ett riktigt
     round-trip – ska inte erbjudas för adoption."""
     c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.85})
-    c._evaluate_measured_params(_oe_results(1.0))          # gap 0.15 men 1.0 ≥ 0.98
+    c._evaluate_measured_params(_oe_results(1.0))          # gap 0.15 men 1.0 > 0.98
     assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_fires_at_plausible_ceiling(hass, mock_entry):
+    """Taket ingår, som i serverns observed_eff (spec 2026-10-13 §4): 0.98 är en giltig
+    mätning (hybrid som mäter batteriet på DC-sidan) och ska kunna adopteras."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.85})
+    c._evaluate_measured_params(_oe_results(0.98))         # gap 0.13, 0.98 ≤ 0.98
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID)
+    assert issue is not None
+    assert issue.data["measured_eff"] == 0.98
 
 
 @pytest.mark.asyncio

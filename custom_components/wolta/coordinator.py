@@ -822,7 +822,9 @@ _POWER_GAP_SHRINK = 0.30
 # nudge the user to raise their (correct) value to it.
 _POWER_MAX_PHYSICAL = 1.5
 _EFF_ABS_GAP = 0.08        # absolute round-trip gap (eff is 0.5–1.0; a true measurement)
-_EFF_MAX_PLAUSIBLE = 0.98  # don't adopt an implausibly high round-trip (clamp/boundary artefact)
+# Don't adopt an implausibly high round-trip (clamp/boundary artefact). Same inclusive ceiling
+# as the server's observed_eff and the setup prefill (stats.EFF_MAX_PLAUSIBLE).
+_EFF_MAX_PLAUSIBLE = stats.EFF_MAX_PLAUSIBLE
 
 # Profile fields mirrored from the server into entry.data (cache only – the server
 # is the source of truth; entry.data is never used as a diff base since v0.10.0).
@@ -3881,7 +3883,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     def _evaluate_capacity_issue(self, betyg: dict) -> None:
         """Adopt the measured usable capacity. observed_capacity is the all-time DISPATCHABLE
-        window at the meter (what the battery has demonstrably moved). Compared against the
+        window at the battery sensors (what the battery has demonstrably moved). Compared against the
         configured EFFECTIVE window (battery_kwh minus any reserve). The fix flow adopts it as
         battery_kwh with the reserve cleared — the measurement already excludes the reserve, so
         it must NOT be reduced again (repairs.py)."""
@@ -3926,7 +3928,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
     def _evaluate_power_issue(self, betyg: dict) -> None:
         """Adopt the measured peak power. observed_power is the all-time max charge/discharge
-        power at the meter — a LOWER bound (the controller may never have demanded full power),
+        power at the battery sensors — a LOWER bound (the controller may never have demanded full power),
         so unlike capacity a too-low value can FLATTER the grade. The fix flow therefore uses an
         editable field pre-filled with the measured value and tells the user to set the real
         maximum: it's likely the measured figure, but higher if the battery can do more."""
@@ -3978,9 +3980,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
 
     def _evaluate_efficiency_issue(self, betyg: dict) -> None:
-        """Adopt the measured round-trip efficiency. observed_eff is the lifetime AC round-trip
-        (energy out / energy in) — a true measurement, not a lower bound — so a one-click adopt
-        is fine. This corrects a stale DEFAULT_EFF from a setup done with thin history."""
+        """Adopt the measured round-trip efficiency. observed_eff is the lifetime round-trip
+        (energy out / energy in) at the battery sensors' measuring point – typically DC for
+        hybrid inverters, AC for AC-coupled batteries (server spec 2026-10-13 §1.5) — a true
+        measurement, not a lower bound — so a one-click adopt is fine. This corrects a stale DEFAULT_EFF from a setup done with thin history."""
         oe = betyg.get("observed_eff") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_EFF)
         measured = float(oe["eff"]) if oe and oe.get("eff") else None
@@ -3994,9 +3997,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             measured is not None
             and configured
             and oe.get("n_days", 0) >= _CAP_MATURE_DAYS
-            # A home-battery AC round-trip can't realistically reach ~1.0; a measured value that
-            # high is a clamp/window-boundary artefact, so don't offer to adopt it.
-            and measured < _EFF_MAX_PLAUSIBLE
+            # A home-battery round-trip can't realistically reach ~1.0; a measured value that
+            # high is a clamp/window-boundary artefact, so don't offer to adopt it. The ceiling
+            # itself is a valid measurement (inclusive, as on the server).
+            and measured <= _EFF_MAX_PLAUSIBLE
             and abs(measured - float(configured)) >= _EFF_ABS_GAP
             and not ignored
         )
