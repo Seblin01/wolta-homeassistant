@@ -124,7 +124,7 @@
         "step": {
           "confirm": {
             "title": "Remove the copies?",
-            "description": "Uploads at Wolta with the same metering data as this plant ({count}), by upload day and data period:\n\n{list}\n\nThey are counted once in the comparison with other houses. If you remove them they leave the comparison at once and are deleted after {days} days, unless someone holding their personal link chooses to keep them.\n\nUntil then, undo is on wolta.se: link the plant to an account (Options → Link to a wolta.se account) and open it under My account."
+            "description": "Uploads at Wolta with the same metering data as this plant ({count}), by upload day and data period:\n\n{list}\n\nThey are counted once in the comparison with other houses. If you remove them they leave the comparison at once and are deleted after {days} days, unless someone holding their personal link chooses to keep them.\n\nUntil then, undo is on wolta.se: link the plant to an account (Configure → Link to a wolta.se account) and open it under My account."
           }
         },
         "abort": {
