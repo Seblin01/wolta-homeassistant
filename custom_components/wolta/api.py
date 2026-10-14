@@ -151,6 +151,16 @@ class WoltaReplacementConflict(WoltaApiError):
         self.code = code
 
 
+class WoltaCopyGone(WoltaApiError):
+    """404 with `detail.error == "copy_not_found"` from /copies: the copy is gone, or is no
+    longer one this plant may handle. Not a WoltaAuthError: the profile token is fine."""
+
+
+class WoltaCopyBusy(WoltaApiError):
+    """409 with `detail.error == "busy"` from /copies: the copy is being recalculated on the
+    server right now. Try again later."""
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -184,6 +194,7 @@ class WoltaApiClient:
         path: str,
         *,
         _replacement_errors: bool = False,
+        _copy_errors: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Issue a single HTTP request and return the parsed JSON body.
@@ -194,6 +205,8 @@ class WoltaApiClient:
             WoltaApiError: for any other non-2xx response.
         With _replacement_errors (see _replacement_request) 404/409/410 are told apart
         by their body first; see WoltaReplacementGone and WoltaReplacementConflict.
+        With _copy_errors a 404 `copy_not_found` / 409 `busy` body becomes WoltaCopyGone /
+        WoltaCopyBusy instead of a re-authentication; any other 404 is still WoltaAuthError.
         """
         url = f"{self._base}{path}"
         # PREPENDED to Home Assistant's own User-Agent, never a replacement.
@@ -217,6 +230,12 @@ class WoltaApiClient:
                     raise WoltaReplacementGone(
                         f"{resp.status} from {url}", status=resp.status, code=code
                     )
+            if _copy_errors and resp.status in (404, 409):
+                code = await self._error_code(resp)
+                if resp.status == 404 and code == "copy_not_found":
+                    raise WoltaCopyGone(f"404 copy_not_found from {url}", status=404)
+                if resp.status == 409 and code == "busy":
+                    raise WoltaCopyBusy(f"409 busy from {url}", status=409)
             if resp.status == 404:
                 raise WoltaAuthError(f"404 from {url}")
             if resp.status == 429:
@@ -492,6 +511,24 @@ class WoltaApiClient:
         await self._replacement_request(
             "DELETE", f"/profile/replacements/{rid}", headers=self._auth(token)
         )
+
+    async def get_copies(self, token: str) -> dict | None:
+        """GET /api/v1/copies (Bearer) -> the plant's copies as the server's gate decides.
+
+        A plain 404 returns None instead of raising WoltaAuthError: a server older than the
+        endpoint answers that way, and the profile call earlier in the same cycle already owns
+        re-authentication for a lost token."""
+        try:
+            return await self._request("GET", "/copies", headers=self._auth(token))
+        except WoltaAuthError:
+            return None
+
+    async def remove_copy(self, token: str, copy_id: int) -> dict:
+        """POST /api/v1/copies/{id}/remove (Bearer) -> the updated listing. Raises
+        WoltaCopyGone / WoltaCopyBusy for the copy's own errors."""
+        return await self._request(
+            "POST", f"/copies/{int(copy_id)}/remove", _copy_errors=True,
+            headers=self._auth(token))
 
     async def recompute(self, token: str) -> None:
         """Trigger a server-side recomputation for the profile.

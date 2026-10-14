@@ -12,6 +12,8 @@ from custom_components.wolta.api import (
     WoltaApiClient,
     WoltaApiError,
     WoltaAuthError,
+    WoltaCopyBusy,
+    WoltaCopyGone,
     WoltaRateLimitError,
     WoltaReplacementConflict,
     WoltaReplacementGone,
@@ -1078,3 +1080,64 @@ async def test_ordinary_404_elsewhere_is_still_auth_error(aioclient_mock: Aiohtt
     client = _client(aioclient_mock)
     with pytest.raises(WoltaAuthError):
         await client.recompute(TOKEN)
+
+
+# ---------------------------------------------------------------------------
+# copies
+# ---------------------------------------------------------------------------
+
+_LISTING = {"copies": [{"id": 12, "status": "active", "uploaded": "2026-03-02",
+                        "period": {"from": "2025-03-01", "to": "2026-03-01"}, "n_days": 365,
+                        "source": "ha_upload", "transport": None, "removable": True}],
+            "self": None, "purge_days": 30}
+
+
+@pytest.mark.asyncio
+async def test_get_copies_sends_bearer(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.get(f"{BASE_URL}/api/v1/copies", json=_LISTING)
+    client = _client(aioclient_mock)
+    assert await client.get_copies("tok") == _LISTING
+    assert aioclient_mock.mock_calls[-1][3]["Authorization"] == "Bearer tok"
+
+
+@pytest.mark.asyncio
+async def test_get_copies_plain_404_returns_none(aioclient_mock: AiohttpClientMocker):
+    """An older server has no /copies (FastAPI's plain 404). That is not a lost token: the
+    profile call earlier in the same cycle owns re-authentication."""
+    aioclient_mock.get(f"{BASE_URL}/api/v1/copies", status=404, json={"detail": "Not Found"})
+    client = _client(aioclient_mock)
+    assert await client.get_copies("tok") is None
+
+
+@pytest.mark.asyncio
+async def test_remove_copy_404_copy_not_found_is_not_auth(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/copies/12/remove", status=404,
+                        json={"detail": {"error": "copy_not_found", "message": "x"}})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaCopyGone):
+        await client.remove_copy("tok", 12)
+
+
+@pytest.mark.asyncio
+async def test_remove_copy_409_busy(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/copies/12/remove", status=409,
+                        json={"detail": {"error": "busy", "message": "x"}})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaCopyBusy):
+        await client.remove_copy("tok", 12)
+
+
+@pytest.mark.asyncio
+async def test_remove_copy_plain_404_is_still_auth(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/copies/12/remove", status=404,
+                        json={"detail": "okänd token"})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaAuthError):
+        await client.remove_copy("tok", 12)
+
+
+@pytest.mark.asyncio
+async def test_remove_copy_returns_listing(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/copies/12/remove", json=_LISTING)
+    client = _client(aioclient_mock)
+    assert await client.remove_copy("tok", 12) == _LISTING
