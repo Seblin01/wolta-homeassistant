@@ -118,6 +118,22 @@
         }
       }
     },
+    "house_copies": {
+      "title": "The same metering data exists in other plants at Wolta",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Remove the copies?",
+            "description": "Uploads at Wolta with the same metering data as this plant ({count}), by upload day and data period:\n\n{list}\n\nThey are counted once in the comparison with other houses. If you remove them they leave the comparison at once and are deleted after {days} days, unless someone holding their personal link chooses to keep them.\n\nUndo is on wolta.se: link the plant to an account (Options → Link to a wolta.se account) and open it under My account."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The Wolta integration this issue was about has been removed.",
+          "busy": "One of the plants is being recalculated right now. Try again in a moment.",
+          "failed": "The copies could not be removed right now. Try again later."
+        }
+      }
+    },
     "soc_missing": {
       "title": "Optional: add your battery's state-of-charge sensor to Wolta",
       "fix_flow": {
