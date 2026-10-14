@@ -559,13 +559,20 @@ def flagged_quarters(
 # ---------------------------------------------------------------------------
 
 # Thresholds for auto-prefill from lifetime battery statistics: the measured
-# discharge/charge ratio only converges to the true AC round-trip efficiency with
+# discharge/charge ratio only converges to the true round-trip efficiency (at the battery sensors'
+# measuring point: typically DC for hybrid inverters, AC for AC-coupled batteries) with
 # months of data and real throughput. Below these we suggest nothing.
 _PREFILL_MIN_DAYS = 60
 _PREFILL_MIN_CHARGED_KWH = 100.0
 # Ratio persistently above 1 means the charge/discharge sensors are swapped
 # (signed Shelly/Emaldo, issue #1); small margin for metering noise.
 _INVERT_RATIO_THRESHOLD = 1.05
+# Plausibility bounds for a MEASURED round-trip (server sanity.EFF_MIN/MAX_PLAUSIBLE,
+# spec 2026-10-13 §4). Outside them the ratio is a broken series (censored charging,
+# mis-mapping, SoC scaling), not a battery, and is never clamped into something that
+# looks like a measurement. Compared on the rounded ratio, both bounds inclusive.
+EFF_MIN_PLAUSIBLE = 0.50
+EFF_MAX_PLAUSIBLE = 0.98
 
 
 def analyze_battery_history(
@@ -592,7 +599,9 @@ def analyze_battery_history(
     if ratio > _INVERT_RATIO_THRESHOLD:
         out["invert_suspected"] = True
         ratio = 1.0 / ratio  # mirrored ratio = eff with the streams swapped
-    out["eff"] = round(min(max(ratio, 0.5), 1.0), 2)
+    eff = round(ratio, 2)
+    if EFF_MIN_PLAUSIBLE <= eff <= EFF_MAX_PLAUSIBLE:
+        out["eff"] = eff
     return out
 
 

@@ -1016,9 +1016,33 @@ def test_analysis_requires_enough_history():
     assert out["eff"] is None                                  # < 100 kWh laddat
 
 
-def test_analysis_clamps_eff():
-    out = analyze_battery_history(1000.0, 300.0, _OLD, _NOW)  # kvot 0.3 → orimlig
-    assert out["eff"] == 0.5
+@pytest.mark.parametrize(
+    ("charged", "discharged", "expected"),
+    [
+        (1000.0, 300.0, None),    # kvot 0,30 → trasig serie, klampas inte till 0,50
+        (1000.0, 494.0, None),    # avrundat 0,49 < golvet
+        (1000.0, 500.0, 0.5),     # golvet ingår
+        (1000.0, 980.0, 0.98),    # taket ingår
+        (1000.0, 990.0, None),    # 0,99 över taket
+        (1000.0, 1000.0, None),   # förlustfritt batteri är ingen mätning
+        (1000.0, 1040.0, None),   # > 1 men under inverteringströskeln → orimlig, ej speglad
+    ],
+)
+def test_analysis_eff_none_outside_plausible_range(charged, discharged, expected):
+    """Samma regel som serverns sanity.observed_eff (spec 2026-10-13 §4): den avrundade
+    kvoten utanför [0,50; 0,98] är en trasig serie och ger None i stället för ett klampat
+    värde som ser ut som en mätning."""
+    out = analyze_battery_history(charged, discharged, _OLD, _NOW)
+    assert out["eff"] == expected
+    assert out["invert_suspected"] is False
+
+
+def test_analysis_inverted_but_implausible_keeps_flag():
+    """Speglad kvot under golvet: inverteringen är fortfarande trolig, men verkningsgraden
+    går inte att mäta ur serien."""
+    out = analyze_battery_history(400.0, 1000.0, _OLD, _NOW)  # 2,5 → speglad 0,40
+    assert out["invert_suspected"] is True
+    assert out["eff"] is None
 
 
 def test_analysis_no_history():

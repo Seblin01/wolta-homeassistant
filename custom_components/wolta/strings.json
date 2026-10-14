@@ -34,7 +34,7 @@
         "step": {
           "init": {
             "title": "Adopt the measured battery capacity?",
-            "description": "Over {days} days, Wolta measured your battery's usable capacity at the meter as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measured value is what your battery actually delivers to the house (AC side), not the rated/nameplate figure. Adopt it (this also clears any reserve, which the measurement already excludes), or keep your value — for example if you simply haven't fully cycled the battery in this period.",
+            "description": "Over {days} days, Wolta measured your battery's usable capacity as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measurement comes from your battery's own sensors (the ones you selected), not the electricity meter, and shows what the battery actually moves — not the rated/nameplate figure. Adopt it (this also clears any reserve, which the measurement already excludes), or keep your value — for example if you simply haven't fully cycled the battery in this period.",
             "menu_options": {
               "confirm": "Adopt the measured capacity",
               "ignore": "Ignore and keep my value"
@@ -42,7 +42,7 @@
           },
           "confirm": {
             "title": "Adopt the measured battery capacity?",
-            "description": "Over {days} days, Wolta measured your battery's usable capacity at the meter as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measured value is what your battery actually delivers to the house (AC side) — not the rated/nameplate or the cell figure your battery app may show at 100 %, which is higher because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on your hardware, so this value should match what the battery really moves.\n\nAdopt {measured} kWh? This sets the battery capacity and clears any reserve (the measured value already excludes it). If you simply haven't fully charged or discharged in this period, you can ignore this and dismiss the issue."
+            "description": "Over {days} days, Wolta measured your battery's usable capacity as about {measured} kWh, but your configuration works out to about {configured} kWh.\n\nThe measurement comes from your battery's own sensors and shows what the battery actually moves — not the rated/nameplate figure. If those sensors measure on the AC side, it is also lower than the cell figure your battery app may show at 100 %, because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on your hardware, so this value should match what the battery really moves.\n\nAdopt {measured} kWh? This sets the battery capacity and clears any reserve (the measured value already excludes it). If you simply haven't fully charged or discharged in this period, you can ignore this and dismiss the issue."
           }
         },
         "abort": {
@@ -56,7 +56,7 @@
         "step": {
           "init": {
             "title": "Check your battery's maximum power",
-            "description": "Over {days} days, the most power your battery has charged or discharged at the meter is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing, and a chronically spiky sensor can push it above what the hardware can really deliver. Set your battery's true maximum power (its inverter limit), or ignore this and keep the value you entered.",
+            "description": "Over {days} days, the most power your battery's own sensors have seen it charge or discharge is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing, and a chronically spiky sensor can push it above what the hardware can really deliver. Set your battery's true maximum power (its inverter limit), or ignore this and keep the value you entered.",
             "menu_options": {
               "set_power": "Set the maximum power",
               "ignore": "Ignore and keep my value"
@@ -64,12 +64,12 @@
           },
           "set_power": {
             "title": "Set the battery's maximum power",
-            "description": "Over {days} days, the most power your battery has charged or discharged at the meter is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing — if your control never demanded full power, the real maximum may be higher. Enter your battery's true maximum power (its inverter limit). A perfect controller would use all of it, so a value set too low would flatter your grade and one set too high would unfairly lower it. It's probably around {measured} kW — raise it if your battery can do more.",
+            "description": "Over {days} days, the most power your battery's own sensors have seen it charge or discharge is about {measured} kW, but you configured {configured} kW.\n\nThis is only what the battery has been *seen* doing — if your control never demanded full power, the real maximum may be higher. Enter your battery's true maximum power (its inverter limit). A perfect controller would use all of it, so a value set too low would flatter your grade and one set too high would unfairly lower it. It's probably around {measured} kW — raise it if your battery can do more.",
             "data": {
               "battery_kw": "Maximum power (kW)"
             },
             "data_description": {
-              "battery_kw": "The battery's real maximum charge/discharge power at the meter (inverter limit). Pre-filled with the measured peak — adjust it if you know the battery can do more."
+              "battery_kw": "The battery's real maximum charge/discharge power (inverter limit), as its own sensors measure it. Pre-filled with the measured peak — adjust it if you know the battery can do more."
             }
           }
         },
@@ -84,7 +84,7 @@
         "step": {
           "init": {
             "title": "Adopt the measured efficiency?",
-            "description": "Over {days} days, Wolta measured your battery's round-trip efficiency at the meter (energy out ÷ energy in) as about {measured}, but you configured {configured}.\n\nThis is a wall-to-wall AC round-trip, so it is lower than the battery's DC/cell spec. Adopt it to make your economics honest, or keep your value if you believe your real round-trip is higher — a spiky sensor can drag the measurement down.",
+            "description": "Over {days} days, Wolta measured your battery's round-trip efficiency (energy out ÷ energy in, from the battery's own sensors) as about {measured}, but you configured {configured}.\n\nWhere those sensors measure depends on the installation: on a hybrid inverter often on the battery's DC side, on an AC-coupled battery on the AC side, which includes the inverter's losses. Adopt it to make your economics honest, or keep your value if you believe your real round-trip is higher — a spiky sensor can drag the measurement down.",
             "menu_options": {
               "confirm": "Adopt the measured efficiency",
               "ignore": "Ignore and keep my value"
@@ -92,7 +92,7 @@
           },
           "confirm": {
             "title": "Adopt the measured efficiency?",
-            "description": "Over {days} days, Wolta measured your battery's round-trip efficiency at the meter (energy out ÷ energy in) as about {measured}, but you configured {configured}.\n\nThe grade compares you against a perfect controller on your hardware, so the efficiency should match your battery's real AC round-trip. This can drift when it was set from thin history at setup. Adopt {measured}?"
+            "description": "Over {days} days, Wolta measured your battery's round-trip efficiency (energy out ÷ energy in, from the battery's own sensors) as about {measured}, but you configured {configured}.\n\nThe grade compares you against a perfect controller on your hardware, so the efficiency should match your battery's real round-trip where its sensors measure. This can drift when it was set from thin history at setup. Adopt {measured}?"
           }
         },
         "abort": {
@@ -436,11 +436,11 @@
               "reserve_pct": "Reserve floor (%)"
             },
             "data_description": {
-              "battery_kwh": "Usable capacity **measured at your meter** — the kWh the battery actually delivers to the house on a full discharge (AC side) – leave empty while Wolta is measuring. This is less than the nameplate rating, and less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the meter-side usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
+              "battery_kwh": "Usable capacity — the kWh the battery actually delivers on a full discharge, **as its own sensors measure it** – leave empty while Wolta is measuring. This is less than the nameplate rating. If the battery sensors measure on the AC side, it is also less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
               "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
               "battery_kw": "Maximum charge/discharge power in kW – leave empty while Wolta is measuring.",
-              "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable AC power above; the rated figure lets wolta.se explain the difference when the measured power at the meter is lower (inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
-              "eff": "Round-trip efficiency (0.5–1.0), measured on the AC side — not the DC/cell figure. Prefilled with the value stored at Wolta. Changing plant values triggers a server-side regrade.",
+              "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable power above; the rated figure lets wolta.se explain the difference when the measured power is lower (e.g. inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
+              "eff": "Round-trip efficiency (0.5–1.0) where your battery sensors measure: on a hybrid inverter often the battery's DC side, on an AC-coupled battery the AC side. Prefilled with the value stored at Wolta. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
             }
           },

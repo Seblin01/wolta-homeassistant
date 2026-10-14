@@ -34,7 +34,7 @@
         "step": {
           "init": {
             "title": "Använd den uppmätta batterikapaciteten?",
-            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan), inte märkt kapacitet. Använd det (det nollar även eventuell reserv, som mätningen redan exkluderar), eller behåll ditt värde — t.ex. om du inte fulladdat eller urladdat helt under perioden.",
+            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nMätningen kommer från batteriets egna sensorer (de du valt), inte från elmätaren, och visar vad batteriet faktiskt flyttar – inte märkt kapacitet. Använd det (det nollar även eventuell reserv, som mätningen redan exkluderar), eller behåll ditt värde — t.ex. om du inte fulladdat eller urladdat helt under perioden.",
             "menu_options": {
               "confirm": "Använd den uppmätta kapaciteten",
               "ignore": "Ignorera och behåll mitt värde"
@@ -42,7 +42,7 @@
           },
           "confirm": {
             "title": "Använd den uppmätta batterikapaciteten?",
-            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet vid mätaren till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nDet uppmätta är vad batteriet faktiskt levererar till huset (AC-sidan) — inte märkt kapacitet eller cell-talet din batteri-app kan visa vid 100 %, som är högre eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på din hårdvara, så värdet bör motsvara vad batteriet verkligen flyttar.\n\nAnvänd {measured} kWh? Det sätter batterikapaciteten och nollar eventuell reserv (det uppmätta värdet exkluderar den redan). Har du bara inte fulladdat eller urladdat helt under perioden kan du strunta i detta och avfärda ärendet."
+            "description": "Under {days} dygn mätte Wolta batteriets användbara kapacitet till ungefär {measured} kWh, men din konfiguration motsvarar ungefär {configured} kWh.\n\nMätningen kommer från batteriets egna sensorer och visar vad batteriet faktiskt flyttar – inte märkt kapacitet. Mäter sensorerna på växelströmssidan är värdet också lägre än cell-talet din batteri-app kan visa vid 100 %, eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på din hårdvara, så värdet bör motsvara vad batteriet verkligen flyttar.\n\nAnvänd {measured} kWh? Det sätter batterikapaciteten och nollar eventuell reserv (det uppmätta värdet exkluderar den redan). Har du bara inte fulladdat eller urladdat helt under perioden kan du strunta i detta och avfärda ärendet."
           }
         },
         "abort": {
@@ -56,7 +56,7 @@
         "step": {
           "init": {
             "title": "Kontrollera batteriets maxeffekt",
-            "description": "Under {days} dygn är den högsta effekt batteriet laddat eller laddat ur vid mätaren ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra, och en sensor som hoppar kan pressa upp värdet över vad hårdvaran faktiskt klarar. Ange batteriets verkliga maxeffekt (växelriktarens gräns), eller ignorera detta och behåll värdet du angett.",
+            "description": "Under {days} dygn är den högsta effekt batteriets egna sensorer sett det ladda eller ladda ur ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra, och en sensor som hoppar kan pressa upp värdet över vad hårdvaran faktiskt klarar. Ange batteriets verkliga maxeffekt (växelriktarens gräns), eller ignorera detta och behåll värdet du angett.",
             "menu_options": {
               "set_power": "Ange maxeffekten",
               "ignore": "Ignorera och behåll mitt värde"
@@ -64,12 +64,12 @@
           },
           "set_power": {
             "title": "Ange batteriets maxeffekt",
-            "description": "Under {days} dygn är den högsta effekt batteriet laddat eller laddat ur vid mätaren ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra — om din styrning aldrig bad om full effekt kan det verkliga maxvärdet vara högre. Ange batteriets verkliga maxeffekt (växelriktarens gräns). En perfekt styrning skulle utnyttja hela, så ett för lågt värde smickrar betyget och ett för högt sänker det orättvist. Det ligger troligen runt {measured} kW — höj om batteriet klarar mer.",
+            "description": "Under {days} dygn är den högsta effekt batteriets egna sensorer sett det ladda eller ladda ur ungefär {measured} kW, men du har angett {configured} kW.\n\nDet är bara vad batteriet har *setts* göra — om din styrning aldrig bad om full effekt kan det verkliga maxvärdet vara högre. Ange batteriets verkliga maxeffekt (växelriktarens gräns). En perfekt styrning skulle utnyttja hela, så ett för lågt värde smickrar betyget och ett för högt sänker det orättvist. Det ligger troligen runt {measured} kW — höj om batteriet klarar mer.",
             "data": {
               "battery_kw": "Maxeffekt (kW)"
             },
             "data_description": {
-              "battery_kw": "Batteriets verkliga max ladd-/urladdningseffekt vid mätaren (växelriktargränsen). Förifylld med den uppmätta toppen — justera om du vet att batteriet klarar mer."
+              "battery_kw": "Batteriets verkliga max ladd-/urladdningseffekt (växelriktargränsen), som batteriets egna sensorer mäter den. Förifylld med den uppmätta toppen — justera om du vet att batteriet klarar mer."
             }
           }
         },
@@ -84,7 +84,7 @@
         "step": {
           "init": {
             "title": "Använd den uppmätta verkningsgraden?",
-            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nDet är AC-round-trip vägg-till-vägg, alltså lägre än batteriets DC/cell-siffra. Använd den för att göra ekonomin ärlig, eller behåll ditt värde om du tror att din verkliga round-trip är högre — en hoppande sensor kan dra ned mätningen.",
+            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur (energi ut ÷ energi in, ur batteriets egna sensorer) till ungefär {measured}, men du har angett {configured}.\n\nVar sensorerna mäter beror på installationen: på en hybridväxelriktare ofta på batteriets likströmssida (DC), på ett AC-kopplat batteri på växelströmssidan, där växelriktarens förluster ingår. Använd den för att göra ekonomin ärlig, eller behåll ditt värde om du tror att din verkliga verkningsgrad är högre — en hoppande sensor kan dra ned mätningen.",
             "menu_options": {
               "confirm": "Använd den uppmätta verkningsgraden",
               "ignore": "Ignorera och behåll mitt värde"
@@ -92,7 +92,7 @@
           },
           "confirm": {
             "title": "Använd den uppmätta verkningsgraden?",
-            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur vid mätaren (energi ut ÷ energi in) till ungefär {measured}, men du har angett {configured}.\n\nBetyget jämför dig med en perfekt styrning på din hårdvara, så verkningsgraden bör motsvara batteriets verkliga AC-round-trip. Den kan bli fel om den sattes utifrån tunn historik vid installationen. Använd {measured}?"
+            "description": "Under {days} dygn mätte Wolta batteriets verkningsgrad tur och retur (energi ut ÷ energi in, ur batteriets egna sensorer) till ungefär {measured}, men du har angett {configured}.\n\nBetyget jämför dig med en perfekt styrning på din hårdvara, så verkningsgraden bör motsvara batteriets verkliga verkningsgrad där sensorerna mäter. Den kan bli fel om den sattes utifrån tunn historik vid installationen. Använd {measured}?"
           }
         },
         "abort": {
@@ -436,11 +436,11 @@
               "reserve_pct": "Reservgolv (%)"
             },
             "data_description": {
-              "battery_kwh": "Användbar kapacitet **mätt vid din elmätare** — hur många kWh batteriet faktiskt levererar till huset vid en full urladdning (AC-sidan) – lämna tomt medan Wolta mäter. Det är mindre än märkt kapacitet, och mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det mätarnära användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
+              "battery_kwh": "Användbar kapacitet — hur många kWh batteriet faktiskt levererar vid en full urladdning, **mätt med batteriets egna sensorer** – lämna tomt medan Wolta mäter. Det är mindre än märkt kapacitet. Mäter batterisensorerna på växelströmssidan är det också mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
               "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
               "battery_kw": "Maximal ladd-/urladdningseffekt i kW – lämna tomt medan Wolta mäter.",
-              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara AC-effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt vid mätaren är lägre (växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
-              "eff": "Verkningsgrad tur och retur (0,5–1,0), mätt på växelströmssidan – inte DC-/cellsiffran. Förifyllt med värdet som är sparat hos Wolta. Ändrade anläggningsvärden räknar om betyget server-side.",
+              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt är lägre (t.ex. växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
+              "eff": "Verkningsgrad tur och retur (0,5–1,0) där batterisensorerna mäter: på en hybridväxelriktare ofta batteriets likströmssida (DC), på ett AC-kopplat batteri växelströmssidan. Förifyllt med värdet som är sparat hos Wolta. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
             }
           },
