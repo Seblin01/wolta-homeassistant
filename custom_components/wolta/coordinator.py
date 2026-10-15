@@ -2460,6 +2460,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
+            await self._clear_failure()
             self._evaluate_measured_params(results)
             self._evaluate_soc_missing_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
@@ -2486,7 +2487,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # "unable to upload energy data" och en view-only-entry laddar aldrig upp.
             # Felet syns ändå - UpdateFailed gör entiteterna unavailable.
             if not self._view_only:
-                self._track_failure(err)
+                await self._track_failure(err)
             raise UpdateFailed(f"wolta.se unreachable: {err}") from err
 
     async def _upload_regular(self, now: datetime) -> tuple[dict | None, bool]:
@@ -2568,9 +2569,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
                         soc, self._state["last_uploaded_ts"])
                 await self._store.async_save(self._state)
-                # Clear failure counter on success
-                self._state.pop("consecutive_failure_days", None)
-                ir.async_delete_issue(self.hass, DOMAIN, self._upload_failure_issue_id)
+                await self._clear_failure()
 
         # The full backfill read the whole window when it delivered or found nothing to
         # send; only a failed (413) delivery leaves it unread.
@@ -3618,27 +3617,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Repair issue tracking
     # ------------------------------------------------------------------
 
-    def _track_failure(self, err: Exception) -> None:
-        """Increment failure counter; raise repair issue after >7 days."""
+    async def _track_failure(self, err: Exception) -> None:
+        """Start or continue the network-failure streak; raise upload_failure once it
+        is older than _REPAIR_FAILURE_DAYS. The start is saved at once: an unsaved start
+        was lost on a restart, a saved one never ended (spec 2026-10-15 F2)."""
         failure_since_str = self._state.get("failure_since")
         if failure_since_str is None:
             self._state["failure_since"] = dt_util.utcnow().isoformat()
-        else:
-            try:
-                failure_since = datetime.fromisoformat(failure_since_str)
-                days_failing = (dt_util.utcnow() - failure_since).days
-                if days_failing > _REPAIR_FAILURE_DAYS:
-                    ir.async_create_issue(
-                        self.hass,
-                        DOMAIN,
-                        self._upload_failure_issue_id,
-                        is_fixable=False,
-                        severity=ir.IssueSeverity.WARNING,
-                        translation_key=_ISSUE_UPLOAD_FAILURE,
-                        translation_placeholders={"error": str(err)},
-                    )
-            except (ValueError, AttributeError):
-                pass
+            await self._store.async_save(self._state)
+            return
+        try:
+            failure_since = datetime.fromisoformat(failure_since_str)
+            days_failing = (dt_util.utcnow() - failure_since).days
+        except (ValueError, TypeError):
+            return
+        if days_failing > _REPAIR_FAILURE_DAYS:
+            ir.async_create_issue(
+                self.hass, DOMAIN, self._upload_failure_issue_id, is_fixable=False,
+                severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_UPLOAD_FAILURE,
+                translation_placeholders={"error": str(err)})
+
+    async def _clear_failure(self) -> None:
+        """A cycle that reached the server ends the failure streak and its repair. The
+        success path used to pop a key that was never written (consecutive_failure_days),
+        so one failure stood forever and the next one, weeks later, raised the repair at
+        once (spec 2026-10-15 F2)."""
+        if self._state.pop("failure_since", None) is not None:
+            await self._store.async_save(self._state)
+        ir.async_delete_issue(self.hass, DOMAIN, self._upload_failure_issue_id)
 
     async def _evaluate_copies(self) -> None:
         """Raise, update or clear the house_copies repair from the server's copies listing.

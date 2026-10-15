@@ -2055,6 +2055,66 @@ async def test_view_only_network_failure_skips_upload_repair_tracking(hass: Home
         "view-only ska inte räkna mot upload-failure-repairen"
 
 
+# Same state as _sync_refresh: a bookmark and the applied settings, so no correction job
+# is queued and the cycle only does what the test stubs.
+_QUIET_STATE = {"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+                "applied_entities": None}
+
+
+async def _failure_cycle(coordinator, client, when: datetime, *, fail: bool) -> None:
+    """One cycle at ``when``: the upload itself is stubbed (nothing to send); results
+    raises a network error when ``fail``."""
+    import aiohttp
+
+    coordinator._upload_regular = AsyncMock(return_value=(None, False))
+    coordinator._reconcile_coverage = AsyncMock()
+    client.results = AsyncMock(
+        side_effect=aiohttp.ClientError("down") if fail else None,
+        return_value=RESULTS_PAYLOAD)
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=when):
+        if fail:
+            with pytest.raises(UpdateFailed):
+                await coordinator._async_update_data()
+        else:
+            await coordinator._async_update_data()
+
+
+@pytest.mark.asyncio
+async def test_a_good_cycle_ends_the_failure_streak(hass: HomeAssistant, mock_entry):
+    """One network failure, a good cycle, then another failure ten days later: no
+    "more than 7 days" repair - the good cycle ended the first streak (spec F2)."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=_QUIET_STATE)
+    await _failure_cycle(coordinator, client, NOW, fail=True)
+    assert coordinator._state["failure_since"] == NOW.isoformat()
+    coordinator._store.async_save.assert_awaited()
+    await _failure_cycle(coordinator, client, NOW + timedelta(hours=1), fail=False)
+    assert "failure_since" not in coordinator._state
+    later = NOW + timedelta(days=10)
+    await _failure_cycle(coordinator, client, later, fail=True)
+    assert coordinator._state["failure_since"] == later.isoformat()
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._upload_failure_issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_failing_for_more_than_seven_days_raises_upload_failure(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=_QUIET_STATE)
+    await _failure_cycle(coordinator, client, NOW, fail=True)
+    await _failure_cycle(coordinator, client, NOW + timedelta(days=9), fail=True)
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"upload_failure_{mock_entry.entry_id}")
+    assert issue is not None and issue.translation_key == "upload_failure"
+    await _failure_cycle(coordinator, client, NOW + timedelta(days=9, hours=1), fail=False)
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, f"upload_failure_{mock_entry.entry_id}") is None
+
+
 @pytest.mark.asyncio
 async def test_view_only_with_soc_sensors_never_reads_soc(hass: HomeAssistant, mock_entry):
     """A view-only plant's data is owned by its binding and the server 409s every write, so
