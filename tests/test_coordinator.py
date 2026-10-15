@@ -3813,6 +3813,30 @@ async def test_fast_cycles_do_not_raise_stall_early(hass: HomeAssistant, mock_en
 
 
 @pytest.mark.asyncio
+async def test_no_stall_is_judged_before_home_assistant_has_started(
+    hass: HomeAssistant, mock_entry
+):
+    """The recorder compiles the periods missed while Home Assistant was down only after
+    startup has finished, and the first refresh runs during setup. After an outage of
+    12 h or more every sensor's newest row is the shutdown, which is not a stall: while
+    Home Assistant is starting, the stall is neither raised nor cleared."""
+    from homeassistant.core import CoreState
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=20)
+    shutdown = bookmark + timedelta(minutes=15)
+    hass.set_state(CoreState.starting)
+    try:
+        _, seen = await _run_stall_cycles(
+            hass, mock_entry, client, bookmark=bookmark,
+            plan=[{sid: shutdown for sid in _ALL_FIVE}])
+    finally:
+        hass.set_state(CoreState.running)
+    assert seen == [(False, False)]
+
+
+@pytest.mark.asyncio
 async def test_statistics_missing_is_held_while_the_upload_stands_still(
     hass: HomeAssistant, mock_entry
 ):

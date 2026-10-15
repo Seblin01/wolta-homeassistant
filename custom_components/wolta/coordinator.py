@@ -15,7 +15,7 @@ from astral import Observer
 from astral import sun as astral_sun
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
@@ -2868,8 +2868,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         A read without any measured period neither raises nor clears: every stream is
         empty then, which is energy_stream_no_statistics' case. No minimum window: a
         short window means the bookmark just moved, and the read holds the bookmark
-        quarter's rows, so its lag is far below the threshold - clearing is right."""
-        if built.measured_until is None:
+        quarter's rows, so its lag is far below the threshold - clearing is right.
+
+        Nor is anything judged before Home Assistant has started: the recorder compiles
+        the periods missed while Home Assistant was down only after startup has finished
+        (recorder core.py _run, 2026.10.1), and the first refresh runs during setup - an
+        outage of 12 h or more would look like a stall until the next slow cycle."""
+        if built.measured_until is None or self.hass.state is not CoreState.running:
             return False
         if not _upload_stalled(built.measured_until, now):
             ir.async_delete_issue(self.hass, DOMAIN, self._stalled_issue_id)
