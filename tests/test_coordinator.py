@@ -1343,8 +1343,35 @@ async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_e
         hass, mock_entry, client, rows=_make_rows(NOW))
     assert result.n_days == 150
     assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK  # ej avancerad
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, "profile_full")
-    assert issue is not None
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"profile_full_{mock_entry.entry_id}")
+    assert issue is not None and issue.translation_key == "profile_full"
+
+
+@pytest.mark.asyncio
+async def test_one_entrys_successful_upload_keeps_the_other_entrys_profile_full(
+    hass: HomeAssistant, mock_entry
+):
+    """Bronäs runs two Wolta entries: entry B's 413 must survive entry A's good PUT
+    (spec 2026-10-15 F1)."""
+    from homeassistant.config_entries import ConfigEntry
+
+    other = MagicMock(spec=ConfigEntry)
+    other.entry_id = "other_entry_id"
+    other.domain = DOMAIN
+    other.data = ENTRY_DATA.copy()
+    other.state = mock_entry.state
+    other.unique_id = "other_unique"
+
+    full = _mock_client(raise_on_put=WoltaApiError("full", status=413))
+    full.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    await _sync_refresh(hass, other, full, rows=_make_rows(NOW))
+    good = _mock_client()
+    good.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    await _sync_refresh(hass, mock_entry, good, rows=_make_rows(NOW))
+
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, "profile_full_other_entry_id") is not None
 
 
 @pytest.mark.asyncio
@@ -2843,15 +2870,16 @@ async def test_repair_cleared_when_the_picker_is_emptied(
 
 @pytest.mark.asyncio
 async def test_flex_repair_id_is_per_entry(hass: HomeAssistant, mock_entry):
-    """Two Wolta entries must not clear each other's warning. The non-fixable issues
-    that predate this one (upload_failure, profile_full) share a single id across
-    entries; the fixable ones already use the per-entry form, and so does this."""
+    """Two Wolta entries must not clear each other's warning: every non-fixable issue
+    uses the per-entry form, the flex one included (spec 2026-10-15 F1)."""
     from custom_components.wolta.coordinator import _ISSUE_FLEX_NO_STATS, WoltaCoordinator
 
     mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
     coordinator = WoltaCoordinator(hass, mock_entry)
     assert coordinator._flex_issue_id == f"{_ISSUE_FLEX_NO_STATS}_{mock_entry.entry_id}"
     assert coordinator._flex_issue_id != _ISSUE_FLEX_NO_STATS
+    assert coordinator._upload_failure_issue_id == f"upload_failure_{mock_entry.entry_id}"
+    assert coordinator._profile_full_issue_id == f"profile_full_{mock_entry.entry_id}"
 
 
 @pytest.mark.asyncio

@@ -702,6 +702,9 @@ _STORE_KEY = "wolta_coordinator"
 _PROFILE_SYNC_INTERVAL = timedelta(minutes=5)
 
 # Issue IDs
+# Translation keys; the issue ids are per entry (<key>_<entry_id>, spec 2026-10-15 F1) -
+# with one shared id, two Wolta entries cleared each other's warning. The old shared
+# ids were non-persistent and are gone after the restart the update needs.
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
 _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
@@ -934,6 +937,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._waiting_issue_id: str = f"{_ISSUE_REPLACEMENT_WAITING}_{entry.entry_id}"
         self._copies_issue_id: str = f"{_ISSUE_HOUSE_COPIES}_{entry.entry_id}"
         self._stalled_issue_id: str = f"{_ISSUE_UPLOAD_STALLED}_{entry.entry_id}"
+        self._upload_failure_issue_id: str = f"{_ISSUE_UPLOAD_FAILURE}_{entry.entry_id}"
+        self._profile_full_issue_id: str = f"{_ISSUE_PROFILE_FULL}_{entry.entry_id}"
         # Completeness of the latest regular read (quarters dropped as incomplete and the
         # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
         # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
@@ -2542,7 +2547,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     ir.async_create_issue(
                         self.hass,
                         DOMAIN,
-                        _ISSUE_PROFILE_FULL,
+                        self._profile_full_issue_id,
                         is_fixable=False,
                         severity=ir.IssueSeverity.WARNING,
                         translation_key=_ISSUE_PROFILE_FULL,
@@ -2550,7 +2555,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 else:
                     raise
             else:
-                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                ir.async_delete_issue(self.hass, DOMAIN, self._profile_full_issue_id)
                 put_payload = put_response
                 self._state["last_uploaded_ts"] = rows[-1]["ts"]
                 # The SoC backfill is done only when the read raised nothing AND the
@@ -2565,7 +2570,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 await self._store.async_save(self._state)
                 # Clear failure counter on success
                 self._state.pop("consecutive_failure_days", None)
-                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+                ir.async_delete_issue(self.hass, DOMAIN, self._upload_failure_issue_id)
 
         # The full backfill read the whole window when it delivered or found nothing to
         # send; only a failed (413) delivery leaves it unread.
@@ -3626,10 +3631,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     ir.async_create_issue(
                         self.hass,
                         DOMAIN,
-                        _ISSUE_UPLOAD_FAILURE,
+                        self._upload_failure_issue_id,
                         is_fixable=False,
                         severity=ir.IssueSeverity.WARNING,
-                        translation_key="upload_failure",
+                        translation_key=_ISSUE_UPLOAD_FAILURE,
                         translation_placeholders={"error": str(err)},
                     )
             except (ValueError, AttributeError):
