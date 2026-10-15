@@ -318,7 +318,7 @@ async def test_413_on_fill_warns_without_repair_and_remembers(hass, entry, caplo
     with patch("custom_components.wolta.coordinator.ir.async_create_issue") as issue,             caplog.at_level("WARNING", logger="custom_components.wolta.coordinator"):
         c = await _cycle(hass, entry, client, _state(bookmark), regular=_rows(bookmark, 4),
                          gap=_rows(NOW - timedelta(days=30), 4))
-    assert not any(call.args[2] == "profile_full" for call in issue.call_args_list)
+    assert not any(call.args[2].startswith("profile_full") for call in issue.call_args_list)
     assert "storage limit" in caplog.text
     assert c._state["coverage"] == coverage.memo(FP, bookmark)
 

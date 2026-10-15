@@ -15,7 +15,7 @@ from astral import Observer
 from astral import sun as astral_sun
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
@@ -148,6 +148,10 @@ class _Built:
     # stream measured cleanly. None for a stream without sensors - unbounded, it never
     # limits a quarter. Field-scoped replacements judge only the streams they replace.
     complete_by_stream: dict[str, set[datetime] | None]
+    # UNIX end of the newest measured period of ANY selected sensor in the read, taken
+    # before the night discount (pure measurement); None when no sensor measured anything.
+    # Judged against the clock by _upload_stalled (spec 2026-10-15).
+    measured_until: int | None = None
 
 
 @dataclass(frozen=True)
@@ -698,6 +702,9 @@ _STORE_KEY = "wolta_coordinator"
 _PROFILE_SYNC_INTERVAL = timedelta(minutes=5)
 
 # Issue IDs
+# Translation keys; the issue ids are per entry (<key>_<entry_id>, spec 2026-10-15 F1) -
+# with one shared id, two Wolta entries cleared each other's warning. The old shared
+# ids were non-persistent and are gone after the restart the update needs.
 _ISSUE_UPLOAD_FAILURE = "upload_failure"
 _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
@@ -777,6 +784,10 @@ _ISSUE_REPLACEMENT_WAITING = "replacement_waiting"
 # Uploads at Wolta that carry this plant's metering data (server spec "copies of your plant").
 # The server decides which rows qualify - same house and same owner - the client only shows them.
 _ISSUE_HOUSE_COPIES = "house_copies"
+# No selected sensor has given new statistics for _UPLOAD_STALL_LAG (spec 2026-10-15):
+# every sensor stopped at once, so none lags another and the upload stands still without
+# statistics_missing or energy_stream_no_statistics. Non-fixable, one per entry.
+_ISSUE_UPLOAD_STALLED = "upload_stalled"
 # Key in the coordinator's persistent state: the copy ids the repair has already shown.
 _COPIES_SEEN_KEY = "copies_seen_ids"
 
@@ -793,6 +804,27 @@ _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE = 3
 # clearing on them would give a broken setup a false all-clear. Two 5-min compile
 # periods plus margin is the smallest window where "no rows" means something.
 _ENERGY_EMPTY_MIN_WINDOW = timedelta(minutes=30)
+
+# A read stands still when the newest measured period of every selected sensor ended at
+# least this long ago (spec 2026-10-15 uppladdning-star-still §3.2). _silent_sensors
+# judges lag between the sensors, never against the clock, so sensors that all stop at
+# once - a hybrid integration delivering all five streams going down - stop the upload
+# without any repair. Home Assistant compiles 5-minute statistics at second 10 of every
+# fifth minute and the hour together with its :55 period (recorder core.py/statistics.py,
+# 2026.10.1), so a healthy read trails now by at most about an hour. Time, not a cycle
+# streak: the 60 s fast poll would reach three cycles in three minutes. At the 6 h slow
+# poll the repair shows 12-18 h after the stop, the same delay as the cycle-counted
+# siblings' third cycle.
+_UPLOAD_STALL_LAG = timedelta(hours=12)
+
+
+def _upload_stalled(measured_until: int | None, now: datetime) -> bool:
+    """True when the read's newest measured period (_Built.measured_until) ended at least
+    _UPLOAD_STALL_LAG before ``now``. Nothing measured at all is not a stall: every
+    stream is then empty, which energy_stream_no_statistics already reports."""
+    if measured_until is None:
+        return False
+    return now.timestamp() - measured_until >= _UPLOAD_STALL_LAG.total_seconds()
 
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
 # from the meter, so we only propose adopting when we're confident the entered value is wrong).
@@ -904,6 +936,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
         self._waiting_issue_id: str = f"{_ISSUE_REPLACEMENT_WAITING}_{entry.entry_id}"
         self._copies_issue_id: str = f"{_ISSUE_HOUSE_COPIES}_{entry.entry_id}"
+        self._stalled_issue_id: str = f"{_ISSUE_UPLOAD_STALLED}_{entry.entry_id}"
+        self._upload_failure_issue_id: str = f"{_ISSUE_UPLOAD_FAILURE}_{entry.entry_id}"
+        self._profile_full_issue_id: str = f"{_ISSUE_PROFILE_FULL}_{entry.entry_id}"
         # Completeness of the latest regular read (quarters dropped as incomplete and the
         # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
         # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
@@ -2425,6 +2460,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._maybe_recompute(now)
 
             results = await self.client.results(self.token)
+            await self._clear_failure()
             self._evaluate_measured_params(results)
             self._evaluate_soc_missing_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
@@ -2451,7 +2487,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # "unable to upload energy data" och en view-only-entry laddar aldrig upp.
             # Felet syns ändå - UpdateFailed gör entiteterna unavailable.
             if not self._view_only:
-                self._track_failure(err)
+                await self._track_failure(err)
             raise UpdateFailed(f"wolta.se unreachable: {err}") from err
 
     async def _upload_regular(self, now: datetime) -> tuple[dict | None, bool]:
@@ -2512,7 +2548,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     ir.async_create_issue(
                         self.hass,
                         DOMAIN,
-                        _ISSUE_PROFILE_FULL,
+                        self._profile_full_issue_id,
                         is_fixable=False,
                         severity=ir.IssueSeverity.WARNING,
                         translation_key=_ISSUE_PROFILE_FULL,
@@ -2520,7 +2556,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 else:
                     raise
             else:
-                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_PROFILE_FULL)
+                ir.async_delete_issue(self.hass, DOMAIN, self._profile_full_issue_id)
                 put_payload = put_response
                 self._state["last_uploaded_ts"] = rows[-1]["ts"]
                 # The SoC backfill is done only when the read raised nothing AND the
@@ -2533,9 +2569,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     self._state["soc_uploaded_ts"] = self._next_soc_bookmark(
                         soc, self._state["last_uploaded_ts"])
                 await self._store.async_save(self._state)
-                # Clear failure counter on success
-                self._state.pop("consecutive_failure_days", None)
-                ir.async_delete_issue(self.hass, DOMAIN, _ISSUE_UPLOAD_FAILURE)
+                await self._clear_failure()
 
         # The full backfill read the whole window when it delivered or found nothing to
         # send; only a failed (413) delivery leaves it unread.
@@ -2705,6 +2739,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     by_stream[name] |= set.intersection(*(clean[e] for e in stream_ids))
             for e in sensors:
                 blame[e] += len(src_candidates - clean[e])
+        measured_until = max((s + p for s, p in newest.values()), default=None)
         asleep: set[str] = set()
         if solar and sources:
             step = min(periods)
@@ -2714,7 +2749,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         silent = _silent_sensors(sensors, newest, _ENERGY_EMPTY_MIN_WINDOW)
         incomplete = len(candidates - complete)
         return _Built(streams, complete, silent, incomplete, blame, asleep - silent,
-                      by_stream)
+                      by_stream, measured_until)
 
     def _sun_down_fn(self, period_s: int) -> Callable[[int], bool]:
         """``sun_down(period_start)`` for statistics periods of ``period_s`` at Home
@@ -2825,7 +2860,38 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 out.append(name)
         return out
 
-    async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
+    def _note_upload_stalled(self, built: _Built, now: datetime) -> bool:
+        """Raise upload_stalled when the read's newest measured period of any selected
+        sensor ended _UPLOAD_STALL_LAG or more before ``now``, clear it otherwise, and
+        return whether the read stands still (spec 2026-10-15 §3.3).
+
+        A read without any measured period neither raises nor clears: every stream is
+        empty then, which is energy_stream_no_statistics' case. No minimum window: a
+        short window means the bookmark just moved, and the read holds the bookmark
+        quarter's rows, so its lag is far below the threshold - clearing is right.
+
+        Nor is anything judged before Home Assistant has started: the recorder compiles
+        the periods missed while Home Assistant was down only after startup has finished
+        (recorder core.py _run, 2026.10.1), and the first refresh runs during setup - an
+        outage of 12 h or more would look like a stall until the next slow cycle."""
+        if built.measured_until is None or self.hass.state is not CoreState.running:
+            return False
+        if not _upload_stalled(built.measured_until, now):
+            ir.async_delete_issue(self.hass, DOMAIN, self._stalled_issue_id)
+            return False
+        since = datetime.fromtimestamp(built.measured_until, tz=timezone.utc)
+        ir.async_create_issue(
+            self.hass, DOMAIN, self._stalled_issue_id, is_fixable=False,
+            severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_UPLOAD_STALLED,
+            translation_placeholders={
+                "since": dt_util.as_local(since).strftime("%Y-%m-%d %H:%M"),
+                "entities": ", ".join(sorted(self._statistic_ids())),
+            })
+        return True
+
+    async def _note_silent_sensors(
+        self, built: _Built, window: timedelta, stalled: bool = False
+    ) -> None:
         """Track selected sensors that are silent (_silent_sensors: no measured period,
         or trailing the others) while another selected sensor is not, and raise
         statistics_missing after _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE cycles in a row.
@@ -2837,8 +2903,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         _ENERGY_EMPTY_MIN_WINDOW, and windows in which every selected sensor is silent,
         are neither counted nor cleared. Nor is a solar sensor asleep in the read
         (_discount_night: it trails only by night) - its streak is held, so a dead solar
-        sensor is still caught in winter, when no three windows in a row see daylight."""
+        sensor is still caught in winter, when no three windows in a row see daylight.
+
+        While the read stands still (_note_upload_stalled) the repair's claim that the
+        other selected sensors deliver is false: it is withdrawn and the streak held,
+        so a sensor that died first is named again at once when the others return."""
         if window < _ENERGY_EMPTY_MIN_WINDOW:
+            return
+        if stalled:
+            ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
             return
         empty_streams = {
             e for name in self._empty_streams(built)
@@ -3290,9 +3363,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _Source(lts_data, split_hour_to_quarters, start, short_term_start),
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
         ], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -3307,9 +3381,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         built, rows = await self._build_rows(
             now, [_Source(lts_data, split_hour_to_quarters, start, now)], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -3324,9 +3399,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         built, rows = await self._build_rows(
             now, [_Source(short_data, aggregate_5min_to_15min, start, now)], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:
@@ -3546,27 +3622,34 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
     # Repair issue tracking
     # ------------------------------------------------------------------
 
-    def _track_failure(self, err: Exception) -> None:
-        """Increment failure counter; raise repair issue after >7 days."""
+    async def _track_failure(self, err: Exception) -> None:
+        """Start or continue the network-failure streak; raise upload_failure once it
+        is older than _REPAIR_FAILURE_DAYS. The start is saved at once: an unsaved start
+        was lost on a restart, a saved one never ended (spec 2026-10-15 F2)."""
         failure_since_str = self._state.get("failure_since")
         if failure_since_str is None:
             self._state["failure_since"] = dt_util.utcnow().isoformat()
-        else:
-            try:
-                failure_since = datetime.fromisoformat(failure_since_str)
-                days_failing = (dt_util.utcnow() - failure_since).days
-                if days_failing > _REPAIR_FAILURE_DAYS:
-                    ir.async_create_issue(
-                        self.hass,
-                        DOMAIN,
-                        _ISSUE_UPLOAD_FAILURE,
-                        is_fixable=False,
-                        severity=ir.IssueSeverity.WARNING,
-                        translation_key="upload_failure",
-                        translation_placeholders={"error": str(err)},
-                    )
-            except (ValueError, AttributeError):
-                pass
+            await self._store.async_save(self._state)
+            return
+        try:
+            failure_since = datetime.fromisoformat(failure_since_str)
+            days_failing = (dt_util.utcnow() - failure_since).days
+        except (ValueError, TypeError):
+            return
+        if days_failing > _REPAIR_FAILURE_DAYS:
+            ir.async_create_issue(
+                self.hass, DOMAIN, self._upload_failure_issue_id, is_fixable=False,
+                severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_UPLOAD_FAILURE,
+                translation_placeholders={"error": str(err)})
+
+    async def _clear_failure(self) -> None:
+        """A cycle that reached the server ends the failure streak and its repair. The
+        success path used to pop a key that was never written (consecutive_failure_days),
+        so one failure stood forever and the next one, weeks later, raised the repair at
+        once (spec 2026-10-15 F2)."""
+        if self._state.pop("failure_since", None) is not None:
+            await self._store.async_save(self._state)
+        ir.async_delete_issue(self.hass, DOMAIN, self._upload_failure_issue_id)
 
     async def _evaluate_copies(self) -> None:
         """Raise, update or clear the house_copies repair from the server's copies listing.

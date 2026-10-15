@@ -14,6 +14,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from custom_components.wolta.api import (
     WoltaApiError,
@@ -1342,8 +1343,35 @@ async def test_put_413_raises_repair_issue_not_crash(hass: HomeAssistant, mock_e
         hass, mock_entry, client, rows=_make_rows(NOW))
     assert result.n_days == 150
     assert coordinator._state["last_uploaded_ts"] == _RECENT_BOOKMARK  # ej avancerad
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, "profile_full")
-    assert issue is not None
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"profile_full_{mock_entry.entry_id}")
+    assert issue is not None and issue.translation_key == "profile_full"
+
+
+@pytest.mark.asyncio
+async def test_one_entrys_successful_upload_keeps_the_other_entrys_profile_full(
+    hass: HomeAssistant, mock_entry
+):
+    """Bronäs runs two Wolta entries: entry B's 413 must survive entry A's good PUT
+    (spec 2026-10-15 F1)."""
+    from homeassistant.config_entries import ConfigEntry
+
+    other = MagicMock(spec=ConfigEntry)
+    other.entry_id = "other_entry_id"
+    other.domain = DOMAIN
+    other.data = ENTRY_DATA.copy()
+    other.state = mock_entry.state
+    other.unique_id = "other_unique"
+
+    full = _mock_client(raise_on_put=WoltaApiError("full", status=413))
+    full.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    await _sync_refresh(hass, other, full, rows=_make_rows(NOW))
+    good = _mock_client()
+    good.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    await _sync_refresh(hass, mock_entry, good, rows=_make_rows(NOW))
+
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, "profile_full_other_entry_id") is not None
 
 
 @pytest.mark.asyncio
@@ -2025,6 +2053,66 @@ async def test_view_only_network_failure_skips_upload_repair_tracking(hass: Home
 
     assert "failure_since" not in coordinator._state, \
         "view-only ska inte räkna mot upload-failure-repairen"
+
+
+# Same state as _sync_refresh: a bookmark and the applied settings, so no correction job
+# is queued and the cycle only does what the test stubs.
+_QUIET_STATE = {"last_uploaded_ts": _RECENT_BOOKMARK, "applied_invert": False,
+                "applied_entities": None}
+
+
+async def _failure_cycle(coordinator, client, when: datetime, *, fail: bool) -> None:
+    """One cycle at ``when``: the upload itself is stubbed (nothing to send); results
+    raises a network error when ``fail``."""
+    import aiohttp
+
+    coordinator._upload_regular = AsyncMock(return_value=(None, False))
+    coordinator._reconcile_coverage = AsyncMock()
+    client.results = AsyncMock(
+        side_effect=aiohttp.ClientError("down") if fail else None,
+        return_value=RESULTS_PAYLOAD)
+    with patch("custom_components.wolta.coordinator.dt_util.utcnow", return_value=when):
+        if fail:
+            with pytest.raises(UpdateFailed):
+                await coordinator._async_update_data()
+        else:
+            await coordinator._async_update_data()
+
+
+@pytest.mark.asyncio
+async def test_a_good_cycle_ends_the_failure_streak(hass: HomeAssistant, mock_entry):
+    """One network failure, a good cycle, then another failure ten days later: no
+    "more than 7 days" repair - the good cycle ended the first streak (spec F2)."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=_QUIET_STATE)
+    await _failure_cycle(coordinator, client, NOW, fail=True)
+    assert coordinator._state["failure_since"] == NOW.isoformat()
+    coordinator._store.async_save.assert_awaited()
+    await _failure_cycle(coordinator, client, NOW + timedelta(hours=1), fail=False)
+    assert "failure_since" not in coordinator._state
+    later = NOW + timedelta(days=10)
+    await _failure_cycle(coordinator, client, later, fail=True)
+    assert coordinator._state["failure_since"] == later.isoformat()
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, coordinator._upload_failure_issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_failing_for_more_than_seven_days_raises_upload_failure(
+    hass: HomeAssistant, mock_entry
+):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    coordinator = await _make_coordinator(hass, mock_entry, client, store_state=_QUIET_STATE)
+    await _failure_cycle(coordinator, client, NOW, fail=True)
+    await _failure_cycle(coordinator, client, NOW + timedelta(days=9), fail=True)
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"upload_failure_{mock_entry.entry_id}")
+    assert issue is not None and issue.translation_key == "upload_failure"
+    await _failure_cycle(coordinator, client, NOW + timedelta(days=9, hours=1), fail=False)
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, f"upload_failure_{mock_entry.entry_id}") is None
 
 
 @pytest.mark.asyncio
@@ -2842,15 +2930,16 @@ async def test_repair_cleared_when_the_picker_is_emptied(
 
 @pytest.mark.asyncio
 async def test_flex_repair_id_is_per_entry(hass: HomeAssistant, mock_entry):
-    """Two Wolta entries must not clear each other's warning. The non-fixable issues
-    that predate this one (upload_failure, profile_full) share a single id across
-    entries; the fixable ones already use the per-entry form, and so does this."""
+    """Two Wolta entries must not clear each other's warning: every non-fixable issue
+    uses the per-entry form, the flex one included (spec 2026-10-15 F1)."""
     from custom_components.wolta.coordinator import _ISSUE_FLEX_NO_STATS, WoltaCoordinator
 
     mock_entry.data = {**ENTRY_DATA, CONF_FLEX_COMPENSATION: _FLEX_ENTITY}
     coordinator = WoltaCoordinator(hass, mock_entry)
     assert coordinator._flex_issue_id == f"{_ISSUE_FLEX_NO_STATS}_{mock_entry.entry_id}"
     assert coordinator._flex_issue_id != _ISSUE_FLEX_NO_STATS
+    assert coordinator._upload_failure_issue_id == f"upload_failure_{mock_entry.entry_id}"
+    assert coordinator._profile_full_issue_id == f"profile_full_{mock_entry.entry_id}"
 
 
 @pytest.mark.asyncio
@@ -3535,6 +3624,241 @@ async def test_silence_is_a_lag_of_at_least_max_30_min_and_the_period(
     agg = aggregate_5min_to_15min if period == "5minute" else split_hour_to_quarters
     built = coordinator._build_streams(_Source(raw, agg, start, end))
     assert built.silent == ({"sensor.solar2"} if silent else set())
+
+
+# ---------------------------------------------------------------------------
+# Upload stalled (spec 2026-10-15): every selected sensor stops at once
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lag", "stalled"),
+    [(None, False),
+     (timedelta(hours=12) - timedelta(seconds=1), False),
+     (timedelta(hours=12), True),
+     (timedelta(hours=1, seconds=10), False)],
+)
+def test_upload_stalled_is_a_lag_of_at_least_twelve_hours(lag, stalled):
+    """The read stands still when the newest measured period of every selected sensor
+    ended at least 12 h before now. None (nothing measured) is never a stall: that is
+    energy_empty's case. 1 h 10 s is the hourly compile delay (HA compiles the hour with
+    the :55 period, at hh+1:00:10)."""
+    from custom_components.wolta.coordinator import _upload_stalled
+
+    until = None if lag is None else int((NOW - lag).timestamp())
+    assert _upload_stalled(until, NOW) is stalled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("period", "step"), [("5minute", 300), ("hour", 3600)])
+async def test_measured_until_is_the_end_of_the_newest_measured_period(
+    hass: HomeAssistant, mock_entry, period, step
+):
+    """measured_until = start + period of the newest row of ANY selected sensor; a sensor
+    that stopped earlier does not lower it."""
+    from custom_components.wolta.coordinator import (
+        _Source,
+        aggregate_5min_to_15min,
+        split_hour_to_quarters,
+    )
+
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    start, end = NOW - timedelta(hours=6), NOW
+    raw = _full_stats(start - timedelta(seconds=step), end, period)
+    raw["sensor.solar"] = [r for r in raw["sensor.solar"]
+                           if r["start"] < (NOW - timedelta(hours=3)).timestamp()]
+    agg = aggregate_5min_to_15min if period == "5minute" else split_hour_to_quarters
+    built = coordinator._build_streams(_Source(raw, agg, start, end))
+    assert built.measured_until == int(NOW.timestamp())
+
+
+@pytest.mark.asyncio
+async def test_measured_until_is_none_without_any_measured_period(
+    hass: HomeAssistant, mock_entry
+):
+    from custom_components.wolta.coordinator import _Source, aggregate_5min_to_15min
+
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    start, end = NOW - timedelta(hours=6), NOW
+    built = coordinator._build_streams(
+        _Source(dict(_EMPTY_BATT_STATS), aggregate_5min_to_15min, start, end))
+    assert built.measured_until is None
+
+
+async def _run_stall_cycles(
+    hass, mock_entry, client, *, bookmark: datetime, plan: list[dict[str, datetime]],
+    fingerprint: str | None = None, advance: timedelta = timedelta(hours=6),
+    empty_cycles: frozenset[int] = frozenset(),
+):
+    """One coordinator, one cycle per entry of ``plan``: the recorder of that cycle has
+    no rows for the sensors in the dict from their moment on (_dying_fetch). A cycle in
+    ``empty_cycles`` reads no rows at all. Records (upload_stalled raised,
+    statistics_missing raised) after each cycle. The sun never sets (see
+    _run_dying_cycles)."""
+    clock = {"now": NOW}
+    reg = ir.async_get(hass)
+    seen: list[tuple[bool, bool]] = []
+    i = {"n": 0}
+
+    async def fetch(h, ids, start, end, period):
+        if i["n"] in empty_cycles:
+            return {sid: [] for sid in ids}
+        return await _dying_fetch(plan[i["n"]])(h, ids, start, end, period)
+
+    with (
+        patch("custom_components.wolta.coordinator.dt_util.utcnow",
+              side_effect=lambda: clock["now"]),
+        patch("custom_components.wolta.coordinator.async_fetch_change", side_effect=fetch),
+        patch("custom_components.wolta.coordinator.WoltaCoordinator._sun_down_fn",
+              lambda self, period_s: lambda start: False),
+    ):
+        coordinator = await _make_coordinator(
+            hass, mock_entry, client,
+            store_state={"last_uploaded_ts": bookmark.isoformat(),
+                         "applied_invert": False,
+                         "applied_entities": fingerprint or _fingerprint()})
+        for n in range(len(plan)):
+            i["n"] = n
+            await coordinator._async_update_data()
+            seen.append((
+                reg.async_get_issue(DOMAIN, coordinator._stalled_issue_id) is not None,
+                reg.async_get_issue(DOMAIN, coordinator._stats_issue_id) is not None,
+            ))
+            clock["now"] = clock["now"] + advance
+    return coordinator, seen
+
+
+_ALL_FIVE = ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in", "sensor.grid_out",
+             "sensor.solar")
+
+
+@pytest.mark.asyncio
+async def test_all_sensors_stopping_at_once_raises_upload_stalled(
+    hass: HomeAssistant, mock_entry
+):
+    """Every selected sensor stops 15 min after the bookmark. Nothing lags behind
+    anything else, so statistics_missing and energy_empty stay quiet - the stall repair
+    is raised once the newest measured period is 12 h old."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    stop = bookmark + timedelta(minutes=15)
+    coordinator, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=bookmark,
+        plan=[{sid: stop for sid in _ALL_FIVE}] * 4)
+    # lags: 5h45, 11h45, 17h45, 23h45
+    assert seen == [(False, False), (False, False), (True, False), (True, False)]
+    assert coordinator._state["last_uploaded_ts"] == bookmark.isoformat()
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, coordinator._energy_issue_id) is None
+    issue = reg.async_get_issue(DOMAIN, f"upload_stalled_{mock_entry.entry_id}")
+    assert issue.translation_key == "upload_stalled"
+    assert issue.is_fixable is False
+    assert issue.translation_placeholders == {
+        "since": dt_util.as_local(stop).strftime("%Y-%m-%d %H:%M"),
+        "entities": ", ".join(sorted(_ALL_FIVE)),
+    }
+
+
+@pytest.mark.asyncio
+async def test_upload_stalled_clears_when_the_sensors_return(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    stop = bookmark + timedelta(minutes=15)
+    _, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=bookmark,
+        plan=[{sid: stop for sid in _ALL_FIVE}] * 3 + [{}])
+    assert [s for s, _ in seen] == [False, False, True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_read_without_any_measured_period_neither_raises_nor_clears_the_stall(
+    hass: HomeAssistant, mock_entry
+):
+    """Nothing measured at all is energy_empty's case: the stall repair stays as it was."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    stop = bookmark + timedelta(minutes=15)
+    _, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=bookmark,
+        plan=[{sid: stop for sid in _ALL_FIVE}] * 4, empty_cycles=frozenset({3}))
+    assert [s for s, _ in seen] == [False, False, True, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bookmark_age", [timedelta(hours=6), timedelta(days=15)])
+async def test_a_healthy_setup_never_stalls(hass: HomeAssistant, mock_entry, bookmark_age):
+    """Incremental and heal path (hourly read): every sensor measures to now."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    _, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=NOW - bookmark_age, plan=[{}] * 4)
+    assert seen == [(False, False)] * 4
+
+
+@pytest.mark.asyncio
+async def test_fast_cycles_do_not_raise_stall_early(hass: HomeAssistant, mock_entry):
+    """Sixty-second cycles (fast poll) only see the stall once the lag itself reaches
+    12 h - no cycle count to hit in minutes."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    stop = bookmark + timedelta(minutes=15)
+    _, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=bookmark,
+        plan=[{sid: stop for sid in _ALL_FIVE}] * 5, advance=timedelta(seconds=60))
+    assert [s for s, _ in seen] == [False] * 5
+
+
+@pytest.mark.asyncio
+async def test_no_stall_is_judged_before_home_assistant_has_started(
+    hass: HomeAssistant, mock_entry
+):
+    """The recorder compiles the periods missed while Home Assistant was down only after
+    startup has finished, and the first refresh runs during setup. After an outage of
+    12 h or more every sensor's newest row is the shutdown, which is not a stall: while
+    Home Assistant is starting, the stall is neither raised nor cleared."""
+    from homeassistant.core import CoreState
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=20)
+    shutdown = bookmark + timedelta(minutes=15)
+    hass.set_state(CoreState.starting)
+    try:
+        _, seen = await _run_stall_cycles(
+            hass, mock_entry, client, bookmark=bookmark,
+            plan=[{sid: shutdown for sid in _ALL_FIVE}])
+    finally:
+        hass.set_state(CoreState.running)
+    assert seen == [(False, False)]
+
+
+@pytest.mark.asyncio
+async def test_statistics_missing_is_held_while_the_upload_stands_still(
+    hass: HomeAssistant, mock_entry
+):
+    """solar2 dies first and is named after three cycles. Then the rest die: its text
+    ("your other selected sensors do") is false, so it is withdrawn while the stall
+    stands - its streak kept - and it returns at once when the others measure again
+    while solar2 is still dead."""
+    _two_solar_entry(hass, mock_entry)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    bookmark = NOW - timedelta(hours=6)
+    early = bookmark + timedelta(minutes=15)
+    rest = {sid: NOW for sid in _ALL_FIVE}
+    dead_later = {"sensor.solar2": early, **rest}
+    coordinator, seen = await _run_stall_cycles(
+        hass, mock_entry, client, bookmark=bookmark, fingerprint=_TWO_SOLAR_FP,
+        advance=timedelta(hours=3),
+        plan=[dead_later] * 5 + [{"sensor.solar2": early}])
+    # cycles at NOW, +3h, +6h, +9h, +12h (lag 12h: stalled), +15h (others back)
+    assert seen == [(False, False), (False, False), (False, True), (False, True),
+                    (True, False), (False, True)]
+    assert coordinator._state["silent_sensor_cycles"]["sensor.solar2"] == 5
 
 
 @pytest.mark.asyncio
