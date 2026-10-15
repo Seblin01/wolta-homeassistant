@@ -781,6 +781,10 @@ _ISSUE_REPLACEMENT_WAITING = "replacement_waiting"
 # Uploads at Wolta that carry this plant's metering data (server spec "copies of your plant").
 # The server decides which rows qualify - same house and same owner - the client only shows them.
 _ISSUE_HOUSE_COPIES = "house_copies"
+# No selected sensor has given new statistics for _UPLOAD_STALL_LAG (spec 2026-10-15):
+# every sensor stopped at once, so none lags another and the upload stands still without
+# statistics_missing or energy_stream_no_statistics. Non-fixable, one per entry.
+_ISSUE_UPLOAD_STALLED = "upload_stalled"
 # Key in the coordinator's persistent state: the copy ids the repair has already shown.
 _COPIES_SEEN_KEY = "copies_seen_ids"
 
@@ -929,6 +933,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._stats_issue_id: str = f"{_ISSUE_STATISTICS_MISSING}_{entry.entry_id}"
         self._waiting_issue_id: str = f"{_ISSUE_REPLACEMENT_WAITING}_{entry.entry_id}"
         self._copies_issue_id: str = f"{_ISSUE_HOUSE_COPIES}_{entry.entry_id}"
+        self._stalled_issue_id: str = f"{_ISSUE_UPLOAD_STALLED}_{entry.entry_id}"
         # Completeness of the latest regular read (quarters dropped as incomplete and the
         # sensors that caused it most), for the diagnostics. Set by _backfill_rows,
         # _heal_rows and _incremental_rows only: a coverage fill in the same cycle reads
@@ -2851,7 +2856,33 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 out.append(name)
         return out
 
-    async def _note_silent_sensors(self, built: _Built, window: timedelta) -> None:
+    def _note_upload_stalled(self, built: _Built, now: datetime) -> bool:
+        """Raise upload_stalled when the read's newest measured period of any selected
+        sensor ended _UPLOAD_STALL_LAG or more before ``now``, clear it otherwise, and
+        return whether the read stands still (spec 2026-10-15 §3.3).
+
+        A read without any measured period neither raises nor clears: every stream is
+        empty then, which is energy_stream_no_statistics' case. No minimum window: a
+        short window means the bookmark just moved, and the read holds the bookmark
+        quarter's rows, so its lag is far below the threshold - clearing is right."""
+        if built.measured_until is None:
+            return False
+        if not _upload_stalled(built.measured_until, now):
+            ir.async_delete_issue(self.hass, DOMAIN, self._stalled_issue_id)
+            return False
+        since = datetime.fromtimestamp(built.measured_until, tz=timezone.utc)
+        ir.async_create_issue(
+            self.hass, DOMAIN, self._stalled_issue_id, is_fixable=False,
+            severity=ir.IssueSeverity.WARNING, translation_key=_ISSUE_UPLOAD_STALLED,
+            translation_placeholders={
+                "since": dt_util.as_local(since).strftime("%Y-%m-%d %H:%M"),
+                "entities": ", ".join(sorted(self._statistic_ids())),
+            })
+        return True
+
+    async def _note_silent_sensors(
+        self, built: _Built, window: timedelta, stalled: bool = False
+    ) -> None:
         """Track selected sensors that are silent (_silent_sensors: no measured period,
         or trailing the others) while another selected sensor is not, and raise
         statistics_missing after _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE cycles in a row.
@@ -2863,8 +2894,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         _ENERGY_EMPTY_MIN_WINDOW, and windows in which every selected sensor is silent,
         are neither counted nor cleared. Nor is a solar sensor asleep in the read
         (_discount_night: it trails only by night) - its streak is held, so a dead solar
-        sensor is still caught in winter, when no three windows in a row see daylight."""
+        sensor is still caught in winter, when no three windows in a row see daylight.
+
+        While the read stands still (_note_upload_stalled) the repair's claim that the
+        other selected sensors deliver is false: it is withdrawn and the streak held,
+        so a sensor that died first is named again at once when the others return."""
         if window < _ENERGY_EMPTY_MIN_WINDOW:
+            return
+        if stalled:
+            ir.async_delete_issue(self.hass, DOMAIN, self._stats_issue_id)
             return
         empty_streams = {
             e for name in self._empty_streams(built)
@@ -3316,9 +3354,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _Source(lts_data, split_hour_to_quarters, start, short_term_start),
             _Source(short_data, aggregate_5min_to_15min, short_term_start, now),
         ], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _heal_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -3333,9 +3372,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         built, rows = await self._build_rows(
             now, [_Source(lts_data, split_hour_to_quarters, start, now)], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _incremental_rows(self, start: datetime, now: datetime) -> list[dict]:
@@ -3350,9 +3390,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         built, rows = await self._build_rows(
             now, [_Source(short_data, aggregate_5min_to_15min, start, now)], external)
+        stalled = self._note_upload_stalled(built, now)
         await self._note_stream_emptiness(built, window=now - start)
         self._remember_completeness(built)
-        await self._note_silent_sensors(built, window=now - start)
+        await self._note_silent_sensors(built, window=now - start, stalled=stalled)
         return rows
 
     async def _gap_rows(self, gap: coverage.Gap, now: datetime) -> list[dict]:

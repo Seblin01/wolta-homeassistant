@@ -126,6 +126,16 @@ def test_statistics_missing_names_the_sensors(path: Path) -> None:
     assert "{" not in issue["title"]
 
 
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_upload_stalled_names_the_time_and_the_sensors(path: Path) -> None:
+    """The stall repair says since when nothing was measured ({since}) and which sensors
+    were picked ({entities}); the title carries no placeholder."""
+    issue = _load(path)["issues"]["upload_stalled"]
+    assert "{since}" in issue["description"]
+    assert "{entities}" in issue["description"]
+    assert "{" not in issue["title"]
+
+
 @pytest.mark.parametrize("path, needle", [
     (_STRINGS, "Wolta only sends quarters in which every selected sensor has a value"),
     (_TRANSLATIONS / "en.json",
