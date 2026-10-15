@@ -148,6 +148,10 @@ class _Built:
     # stream measured cleanly. None for a stream without sensors - unbounded, it never
     # limits a quarter. Field-scoped replacements judge only the streams they replace.
     complete_by_stream: dict[str, set[datetime] | None]
+    # UNIX end of the newest measured period of ANY selected sensor in the read, taken
+    # before the night discount (pure measurement); None when no sensor measured anything.
+    # Judged against the clock by _upload_stalled (spec 2026-10-15).
+    measured_until: int | None = None
 
 
 @dataclass(frozen=True)
@@ -793,6 +797,27 @@ _ENERGY_EMPTY_CYCLES_BEFORE_ISSUE = 3
 # clearing on them would give a broken setup a false all-clear. Two 5-min compile
 # periods plus margin is the smallest window where "no rows" means something.
 _ENERGY_EMPTY_MIN_WINDOW = timedelta(minutes=30)
+
+# A read stands still when the newest measured period of every selected sensor ended at
+# least this long ago (spec 2026-10-15 uppladdning-star-still §3.2). _silent_sensors
+# judges lag between the sensors, never against the clock, so sensors that all stop at
+# once - a hybrid integration delivering all five streams going down - stop the upload
+# without any repair. Home Assistant compiles 5-minute statistics at second 10 of every
+# fifth minute and the hour together with its :55 period (recorder core.py/statistics.py,
+# 2026.10.1), so a healthy read trails now by at most about an hour. Time, not a cycle
+# streak: the 60 s fast poll would reach three cycles in three minutes. At the 6 h slow
+# poll the repair shows 12-18 h after the stop, the same delay as the cycle-counted
+# siblings' third cycle.
+_UPLOAD_STALL_LAG = timedelta(hours=12)
+
+
+def _upload_stalled(measured_until: int | None, now: datetime) -> bool:
+    """True when the read's newest measured period (_Built.measured_until) ended at least
+    _UPLOAD_STALL_LAG before ``now``. Nothing measured at all is not a stall: every
+    stream is then empty, which energy_stream_no_statistics already reports."""
+    if measured_until is None:
+        return False
+    return now.timestamp() - measured_until >= _UPLOAD_STALL_LAG.total_seconds()
 
 # Measured-parameter adopt gates (conservative: the backend's observed_* are all-time figures
 # from the meter, so we only propose adopting when we're confident the entered value is wrong).
@@ -2705,6 +2730,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     by_stream[name] |= set.intersection(*(clean[e] for e in stream_ids))
             for e in sensors:
                 blame[e] += len(src_candidates - clean[e])
+        measured_until = max((s + p for s, p in newest.values()), default=None)
         asleep: set[str] = set()
         if solar and sources:
             step = min(periods)
@@ -2714,7 +2740,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         silent = _silent_sensors(sensors, newest, _ENERGY_EMPTY_MIN_WINDOW)
         incomplete = len(candidates - complete)
         return _Built(streams, complete, silent, incomplete, blame, asleep - silent,
-                      by_stream)
+                      by_stream, measured_until)
 
     def _sun_down_fn(self, period_s: int) -> Callable[[int], bool]:
         """``sun_down(period_start)`` for statistics periods of ``period_s`` at Home

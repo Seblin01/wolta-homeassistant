@@ -3537,6 +3537,65 @@ async def test_silence_is_a_lag_of_at_least_max_30_min_and_the_period(
     assert built.silent == ({"sensor.solar2"} if silent else set())
 
 
+# ---------------------------------------------------------------------------
+# Upload stalled (spec 2026-10-15): every selected sensor stops at once
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lag", "stalled"),
+    [(None, False),
+     (timedelta(hours=12) - timedelta(seconds=1), False),
+     (timedelta(hours=12), True),
+     (timedelta(hours=1, seconds=10), False)],
+)
+def test_upload_stalled_is_a_lag_of_at_least_twelve_hours(lag, stalled):
+    """The read stands still when the newest measured period of every selected sensor
+    ended at least 12 h before now. None (nothing measured) is never a stall: that is
+    energy_empty's case. 1 h 10 s is the hourly compile delay (HA compiles the hour with
+    the :55 period, at hh+1:00:10)."""
+    from custom_components.wolta.coordinator import _upload_stalled
+
+    until = None if lag is None else int((NOW - lag).timestamp())
+    assert _upload_stalled(until, NOW) is stalled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("period", "step"), [("5minute", 300), ("hour", 3600)])
+async def test_measured_until_is_the_end_of_the_newest_measured_period(
+    hass: HomeAssistant, mock_entry, period, step
+):
+    """measured_until = start + period of the newest row of ANY selected sensor; a sensor
+    that stopped earlier does not lower it."""
+    from custom_components.wolta.coordinator import (
+        _Source,
+        aggregate_5min_to_15min,
+        split_hour_to_quarters,
+    )
+
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    start, end = NOW - timedelta(hours=6), NOW
+    raw = _full_stats(start - timedelta(seconds=step), end, period)
+    raw["sensor.solar"] = [r for r in raw["sensor.solar"]
+                           if r["start"] < (NOW - timedelta(hours=3)).timestamp()]
+    agg = aggregate_5min_to_15min if period == "5minute" else split_hour_to_quarters
+    built = coordinator._build_streams(_Source(raw, agg, start, end))
+    assert built.measured_until == int(NOW.timestamp())
+
+
+@pytest.mark.asyncio
+async def test_measured_until_is_none_without_any_measured_period(
+    hass: HomeAssistant, mock_entry
+):
+    from custom_components.wolta.coordinator import _Source, aggregate_5min_to_15min
+
+    coordinator = await _make_coordinator(hass, mock_entry, _mock_client())
+    start, end = NOW - timedelta(hours=6), NOW
+    built = coordinator._build_streams(
+        _Source(dict(_EMPTY_BATT_STATS), aggregate_5min_to_15min, start, end))
+    assert built.measured_until is None
+
+
 @pytest.mark.asyncio
 async def test_coverage_fill_keeps_the_regular_reads_completeness(
     hass: HomeAssistant, mock_entry
