@@ -7,10 +7,11 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import WoltaApiClient
-from .const import CONF_CREATED_BY_HA, CONF_LINK_TOKEN, CONF_TOKEN, WOLTA_API_BASE
+from .const import CONF_CREATED_BY_HA, CONF_LINK_TOKEN, CONF_TOKEN, DOMAIN, WOLTA_API_BASE
 from .coordinator import WoltaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
+def _delete_entry_issues(hass: HomeAssistant, entry_id: str) -> None:
+    """Delete the repairs of one config entry. Every per-entry issue id ends with
+    _<entry_id>, and the issue registry does not clean up per entry, so a removed
+    plant's repairs would stand until the next restart (spec 2026-10-15 F3)."""
+    suffix = f"_{entry_id}"
+    for domain, issue_id in list(ir.async_get(hass).issues):
+        if domain == DOMAIN and issue_id.endswith(suffix):
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove a config entry – delete the Wolta profile (right-to-erasure).
 
@@ -50,6 +61,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     README and strings.  Errors are swallowed (best-effort; the profile may
     already be purged server-side).
     """
+    _delete_entry_issues(hass, entry.entry_id)
     # Linked profiles (created on wolta.se, adopted via the link flow) must survive
     # integration removal – the user's web profile incl. CSV history is not ours to
     # delete. Default True keeps the documented delete-on-remove behaviour for all

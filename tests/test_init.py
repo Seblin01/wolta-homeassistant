@@ -232,6 +232,32 @@ async def test_async_remove_entry_deletes_profile(hass: HomeAssistant):
     mock_client.delete.assert_awaited_once_with(TOKEN)
 
 
+@pytest.mark.asyncio
+async def test_async_remove_entry_deletes_only_its_own_repairs(hass: HomeAssistant):
+    """The issue registry does not clean up per config entry (spec 2026-10-15 F3): a
+    removed plant's repairs would stand until the next restart. Another entry's stay."""
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.wolta.const import CONF_CREATED_BY_HA
+
+    for issue_id in ("upload_stalled_abc", "battery_direction_abc",
+                     "upload_stalled_other"):
+        ir.async_create_issue(hass, DOMAIN, issue_id, is_fixable=False,
+                              severity=ir.IssueSeverity.WARNING,
+                              translation_key="upload_stalled")
+    mock_entry = MagicMock()
+    mock_entry.entry_id = "abc"
+    mock_entry.data = {**ENTRY_DATA, CONF_CREATED_BY_HA: False}
+
+    from custom_components.wolta import async_remove_entry
+
+    await async_remove_entry(hass, mock_entry)
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, "upload_stalled_abc") is None
+    assert reg.async_get_issue(DOMAIN, "battery_direction_abc") is None
+    assert reg.async_get_issue(DOMAIN, "upload_stalled_other") is not None
+
+
 # ---------------------------------------------------------------------------
 # Test: async_remove_entry swallows errors (best-effort delete)
 # ---------------------------------------------------------------------------
