@@ -38,6 +38,7 @@ from custom_components.wolta.const import (
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
     CONF_PREFILL_PURCHASE_DATE,
+    CONF_PLANT_ID,
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SHARE,
@@ -2191,6 +2192,9 @@ def test_extract_token_accepts_url_and_raw() -> None:
     assert extract_token("abc123") == "abc123"
     assert extract_token("https://wolta.se/optimeringsbetyg?profile=abc%2B123") == "abc+123"
     assert extract_token("  abc123  ") == "abc123"
+    # Personliga länken bär token i fragmentet sedan Woltas säkerhetsgranskning 2026-10-16
+    # (fragmentet når aldrig servern). Båda formerna ska fungera att klistra in.
+    assert extract_token("https://wolta.se/anlaggning#profile=abc%2B123") == "abc+123"
     assert extract_token("https://wolta.se/kalkylator/lonar-det-sig?profile=tok1&x=1") == "tok1"
 
 
@@ -4376,3 +4380,107 @@ async def test_options_invert_unchanged_writes_nothing(hass: HomeAssistant) -> N
     assert updated.data[CONF_INVERT_INTERVALS] == partial
     assert CONF_DIRECTION_FLIPPED_AT not in updated.data
     coordinator.async_request_refresh.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Reauth på en kontoägd anläggning (Wolta säkerhetsgranskning 2026-10-16, P2 D7)
+# ---------------------------------------------------------------------------
+
+_OWNED_PLANT_ID = "c" * 32
+
+
+def _owned_entry(hass: HomeAssistant):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    data: dict[str, Any] = {CONF_TOKEN: "dead-token", CONF_ZONE: ZONE,
+                            CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0,
+                            CONF_PLANT_ID: _OWNED_PLANT_ID}
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="uid-owned")
+    entry.add_to_hass(hass)
+    return entry, data
+
+
+async def _reauth_to_new_token_step(hass, mock_client):
+    from custom_components.wolta.api import WoltaPlantClaimed
+    entry, data = _owned_entry(hass)
+    mock_client.create_profile = AsyncMock(side_effect=WoltaPlantClaimed("plant_owned"))
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+        data=data)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    return entry, result
+
+
+@pytest.mark.asyncio
+async def test_reauth_owned_plant_asks_for_new_token(hass: HomeAssistant) -> None:
+    """Backend ger inte längre en ny token till en kontoägd anläggning bara för att HA
+    visar sitt id. Reauth ska då be om en token som ägaren skapat på webben - inte visa
+    "cannot_connect" och fastna."""
+    mock_client = _mock_client()
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": False, "plant_id_set": False})
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        entry, result = await _reauth_to_new_token_step(hass, mock_client)
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reauth_new_token"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "https://wolta.se/anlaggning#profile=NYTOKEN"})
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    # Samma identitet stämplas: adopt är idempotent för samma rad och 409:ar om tokenen
+    # tillhör en ANNAN anläggning - det är kontrollen att rätt token klistrats in.
+    mock_client.adopt_profile.assert_awaited_once_with("NYTOKEN", client_plant_id=_OWNED_PLANT_ID)
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_TOKEN] == "NYTOKEN"
+
+
+@pytest.mark.asyncio
+async def test_reauth_new_token_of_another_plant_is_rejected(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    mock_client = _mock_client()
+    mock_client.adopt_profile = AsyncMock(side_effect=WoltaApiError("409", status=409))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        entry, result = await _reauth_to_new_token_step(hass, mock_client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "ANNANTOKEN"})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"profile_input": "token_other_plant"}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_TOKEN] == "dead-token"
+
+
+@pytest.mark.asyncio
+async def test_reauth_new_token_invalid(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaAuthError
+    mock_client = _mock_client()
+    mock_client.adopt_profile = AsyncMock(side_effect=WoltaAuthError("404"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        _, result = await _reauth_to_new_token_step(hass, mock_client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "FEL"})
+
+    assert result["errors"] == {"profile_input": "invalid_token"}
+
+
+@pytest.mark.asyncio
+async def test_reauth_new_token_rejects_read_link(hass: HomeAssistant) -> None:
+    mock_client = _mock_client()
+    mock_client.adopt_profile = AsyncMock()
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        _, result = await _reauth_to_new_token_step(hass, mock_client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "https://wolta.se/anlaggning#link=wpl_zzz"})
+
+    assert result["errors"] == {"profile_input": "link_is_read_link"}
+    mock_client.adopt_profile.assert_not_called()

@@ -114,6 +114,8 @@ The integration and wolta.se show the **same profile**. The server is the source
 
 Because a linked profile belongs to your wolta.se usage, **removing the integration never deletes a linked profile** (profiles created by the integration keep the documented delete-on-remove behaviour, see Privacy). A purged/deleted profile triggers re-authentication, which creates a fresh HA-owned profile from the cached settings.
 
+**Re-authenticating a plant that belongs to a wolta.se account needs a token from the account.** Wolta does not hand out a new token for an existing plant on the strength of this installation's plant id alone when an account owns the plant (Wolta security review 2026-10-16), and the owner gets an email about the refused attempt. Re-authentication then asks you to paste a token instead: log in on wolta.se, open the plant, choose *Create new token* and paste it. The integration checks that the token belongs to this plant before it uses it, and the plant's history stays where it is. Entries created before v0.16.0 also get a fresh random plant id on their next start, replacing Home Assistant's entry id, which Home Assistant shows in its own address bar.
+
 ## Adjusting values afterwards
 
 Open the integration's **Configure** dialog (Settings → Devices & Services → Wolta → Configure) and choose **Settings** to adjust values without removing the integration. (The other menu options — **Link to a wolta.se account** and **Correct the price zone** — are covered under [Account linking](#account-linking) and [Correcting the price zone](#correcting-the-price-zone) below.) The form is grouped into **Battery**, **Economy** and **Tariffs** sections:

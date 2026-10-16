@@ -37,7 +37,13 @@ from homeassistant.util import dt as dt_util
 
 from . import stats
 from .soc_picker import MAX_SOC_SENSORS, soc_error as _soc_error  # noqa: F401 - MAX_SOC_SENSORS re-exported
-from .api import WoltaApiClient, WoltaApiError, WoltaAuthError, WoltaRateLimitError
+from .api import (
+    WoltaApiClient,
+    WoltaApiError,
+    WoltaAuthError,
+    WoltaPlantClaimed,
+    WoltaRateLimitError,
+)
 from .control_system_prefill import battery_platforms, suggest_control_system
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
@@ -252,15 +258,20 @@ def _date_selector() -> DateSelector:
 
 
 def extract_token(value: str) -> str:
-    """Accept a raw profile token OR a full wolta.se link with ?profile=."""
+    """Accept a raw profile token OR a full wolta.se link carrying it.
+
+    The personal link carries the token in the fragment (`#profile=`) since the Wolta
+    security review 2026-10-16 - a fragment never reaches a server, a log or a Referer.
+    Older links used the query (`?profile=`); both keep working."""
     value = value.strip()
     if "profile=" in value:
         from urllib.parse import parse_qs, urlparse  # noqa: PLC0415
 
-        qs = parse_qs(urlparse(value).query)
-        candidates = qs.get("profile")
-        if candidates:
-            return candidates[0].strip()
+        parsed = urlparse(value)
+        for part in (parsed.fragment, parsed.query):
+            candidates = parse_qs(part).get("profile")
+            if candidates:
+                return candidates[0].strip()
     return value
 
 
@@ -1075,6 +1086,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     control_system=entry_data.get(CONF_CONTROL_SYSTEM),
                     control_system_name=entry_data.get(CONF_CONTROL_SYSTEM_NAME),
                 )
+            except WoltaPlantClaimed:
+                # A wolta.se account owns the plant (Wolta security review 2026-10-16): the
+                # backend no longer hands out a new token for our plant id alone, so the
+                # owner creates one on the plant page and pastes it in the next step.
+                return await self.async_step_reauth_new_token()
             except WoltaApiError as err:
                 _LOGGER.error("Reauth failed – could not create Wolta profile: %s", err)
                 if getattr(err, "status", None) == 422:
@@ -1096,6 +1112,49 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema({}),
+            errors=errors,
+        )
+
+    async def async_step_reauth_new_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Reauth for a plant a wolta.se account owns: paste a token the owner created.
+
+        The pasted token is checked by stamping THIS entry's plant id on its row via adopt:
+        idempotent when the token belongs to the same plant, 409 when our id already sits on
+        another row - i.e. the token is for a different plant, and streaming into it would
+        put this home's data on someone else's plant."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if _is_read_link(user_input["profile_input"]):
+                errors["profile_input"] = "link_is_read_link"
+            else:
+                token = extract_token(user_input["profile_input"])
+                entry = self._get_reauth_entry()
+                plant_id = entry.data.get(CONF_PLANT_ID) or entry.entry_id
+                try:
+                    client = WoltaApiClient(async_get_clientsession(self.hass))
+                    await client.adopt_profile(token, client_plant_id=plant_id)
+                except WoltaAuthError:
+                    errors["profile_input"] = "invalid_token"
+                except WoltaApiError as err:
+                    if getattr(err, "status", None) == 409:
+                        errors["profile_input"] = "token_other_plant"
+                    else:
+                        errors["base"] = "cannot_connect"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry, data_updates={CONF_TOKEN: token, CONF_PLANT_ID: plant_id}
+                    )
+        return self.async_show_form(
+            step_id="reauth_new_token",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("profile_input"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    )
+                }
+            ),
             errors=errors,
         )
 
