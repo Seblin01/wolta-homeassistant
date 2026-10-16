@@ -521,7 +521,8 @@ def test_configuration_url_bar_aldrig_agar_tokenet() -> None:
     + test_profile_url_quotes_token."""
     from custom_components.wolta.const import link_url
     url = link_url("wpl_läsbar/token")
-    assert url.startswith("https://wolta.se/anlaggning?link=")
+    # Läslänken i fragmentet (Woltas C-härdning): når aldrig servern, växlas mot en kaka.
+    assert url.startswith("https://wolta.se/anlaggning#link=")
     assert "wpl_l%C3%A4sbar%2Ftoken" in url        # URL-encodat, som profile_url var
     assert "profile=" not in url
 
