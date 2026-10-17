@@ -151,6 +151,18 @@ class WoltaReplacementConflict(WoltaApiError):
         self.code = code
 
 
+class WoltaPlantClaimed(WoltaApiError):
+    """409 with `detail.error` `plant_owned` / `plant_exists` from POST /profile: the plant
+    already exists and the backend will not hand out a new token for it on the strength of
+    our plant id alone (Wolta security review 2026-10-16). `plant_owned` means a wolta.se
+    account owns it: the owner creates a new token on the plant page and pastes it here
+    (config_flow reauth_new_token). Not a WoltaAuthError: nothing was changed server-side."""
+
+    def __init__(self, code: str, message: str = "", status: int | None = 409) -> None:
+        super().__init__(message or f"Plant already claimed: {code}", status=status)
+        self.code = code
+
+
 class WoltaCopyGone(WoltaApiError):
     """404 with `detail.error == "copy_not_found"` from /copies: the copy is gone, or is no
     longer one this plant may handle. Not a WoltaAuthError: the profile token is fine."""
@@ -195,6 +207,7 @@ class WoltaApiClient:
         *,
         _replacement_errors: bool = False,
         _copy_errors: bool = False,
+        _reclaim_errors: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Issue a single HTTP request and return the parsed JSON body.
@@ -207,6 +220,8 @@ class WoltaApiClient:
         by their body first; see WoltaReplacementGone and WoltaReplacementConflict.
         With _copy_errors a 404 `copy_not_found` / 409 `busy` body becomes WoltaCopyGone /
         WoltaCopyBusy instead of a re-authentication; any other 404 is still WoltaAuthError.
+        With _reclaim_errors a 409 `plant_owned` / `plant_exists` body becomes
+        WoltaPlantClaimed.
         """
         url = f"{self._base}{path}"
         # PREPENDED to Home Assistant's own User-Agent, never a replacement.
@@ -236,6 +251,10 @@ class WoltaApiClient:
                     raise WoltaCopyGone(f"404 copy_not_found from {url}", status=404)
                 if resp.status == 409 and code == "busy":
                     raise WoltaCopyBusy(f"409 busy from {url}", status=409)
+            if _reclaim_errors and resp.status == 409:
+                code = await self._error_code(resp)
+                if code in ("plant_owned", "plant_exists"):
+                    raise WoltaPlantClaimed(code, f"409 {code} from {url}")
             if resp.status == 404:
                 raise WoltaAuthError(f"404 from {url}")
             if resp.status == 429:
@@ -353,7 +372,7 @@ class WoltaApiClient:
             payload["control_system"] = control_system
         if control_system_name is not None:
             payload["control_system_name"] = control_system_name
-        data = await self._request("POST", "/profile", json=payload)
+        data = await self._request("POST", "/profile", json=payload, _reclaim_errors=True)
         return data["profile_token"]
 
     async def patch_profile(self, token: str, **fields: Any) -> dict:

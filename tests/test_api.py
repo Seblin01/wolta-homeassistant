@@ -14,6 +14,7 @@ from custom_components.wolta.api import (
     WoltaAuthError,
     WoltaCopyBusy,
     WoltaCopyGone,
+    WoltaPlantClaimed,
     WoltaRateLimitError,
     WoltaReplacementConflict,
     WoltaReplacementGone,
@@ -1141,3 +1142,37 @@ async def test_remove_copy_returns_listing(aioclient_mock: AiohttpClientMocker):
     aioclient_mock.post(f"{BASE_URL}/api/v1/copies/12/remove", json=_LISTING)
     client = _client(aioclient_mock)
     assert await client.remove_copy("tok", 12) == _LISTING
+
+
+# ---------------------------------------------------------------------------
+# Återtagning kräver bevis (Wolta säkerhetsgranskning 2026-10-16, P2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["plant_owned", "plant_exists"])
+async def test_create_profile_409_reclaim_raises_plant_claimed(
+    aioclient_mock: AiohttpClientMocker, code: str
+):
+    """Backend nekar att ge en ny token till en anläggning som ett konto äger (eller som
+    finns utan bevis). Klienten ska kunna skilja det från ett vanligt fel - reauth-flödet
+    leder då användaren till att klistra in en ny token från webben."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=409,
+                        json={"detail": {"error": code, "message": "x"}})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaPlantClaimed) as exc:
+        await client.create_profile(zone="SE3", has_solar=False, share_profile=True,
+                                    battery_kwh=10, battery_kw=5,
+                                    client_plant_id="a" * 32)
+    assert exc.value.code == code
+    assert exc.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_create_profile_plain_409_is_not_plant_claimed(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=409, json={"detail": "annat"})
+    client = _client(aioclient_mock)
+    with pytest.raises(WoltaApiError) as exc:
+        await client.create_profile(zone="SE3", has_solar=False, share_profile=True,
+                                    battery_kwh=10, battery_kw=5)
+    assert not isinstance(exc.value, WoltaPlantClaimed)

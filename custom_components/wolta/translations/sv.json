@@ -384,6 +384,13 @@
         "title": "Lägg till i visningsläge",
         "description": "Anläggningen strömmar redan sin data till wolta.se via sin egen koppling (Sonnen-webhook eller Reduxi), så Home Assistant kommer inte att ladda upp något till den. Du får Wolta-sensorerna — betyg, batterivärde, besparing, IRR, payback — och omräkningsknappen. Allt annat hanteras på wolta.se. Skicka för att lägga till anläggningen i visningsläge."
       },
+      "reauth_new_token": {
+        "title": "Ny token för din anläggning",
+        "description": "Anläggningen är kopplad till ett konto på wolta.se, så Home Assistant behöver en token från kontots ägare för att koppla om. Logga in på wolta.se, öppna anläggningen, välj Skapa ny token och klistra in den här. Historiken ligger kvar på anläggningen.",
+        "data": {
+          "profile_input": "Profillänk eller token"
+        }
+      },
       "reauth_view_only": {
         "title": "Ny token för visningsanläggning",
         "description": "Den sparade token fungerar inte längre — den förnyades troligen på wolta.se. Klistra in en färsk profillänk eller token för anläggningen (logga in på wolta.se och skapa en på anläggningssidan). Inget skapas eller ändras på wolta.se.",
@@ -406,7 +413,8 @@
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
       "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
       "control_system_name_required": "Ange styrsystemets namn när du valt Annat.",
-      "link_is_read_link": "Det där är anläggningens läslänk. Att koppla integrationen kräver ägar-tokenet – om du har tappat det, koppla anläggningen till ett konto och skapa ett nytt token där."
+      "link_is_read_link": "Det där är anläggningens läslänk. Att koppla integrationen kräver ägar-tokenet – om du har tappat det, koppla anläggningen till ett konto och skapa ett nytt token där.",
+      "token_other_plant": "Den token hör till en annan anläggning. Klistra in den token du skapade för den här anläggningen."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",

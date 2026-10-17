@@ -145,10 +145,15 @@ def link_url(link_token: str) -> str:
     Ägar-tokenet skrivs aldrig in i configuration_url (Frencks HACS-review-notering,
     hacs/default#9039): URL:en syns på enhetssidan och följer med varje
     device-registry-export. WOLTA_API_BASE är ren sajt-bas – /api/v1 läggs på av
-    API-klienten, inte här."""
+    API-klienten, inte här.
+
+    Läslänken står i FRAGMENTET (#link=), inte i queryn (Woltas C-härdning 2026-10-16):
+    fragmentet skickas aldrig till servern (RFC 3986 §3.5) och tas bort ur Referer, och webben
+    växlar det vid inträdet mot en HttpOnly-kaka. Gamla ?link=-länkar fungerar fortfarande på
+    wolta.se, så äldre versioner av integrationen påverkas inte."""
     from urllib.parse import quote
 
-    return f"{WOLTA_API_BASE}/anlaggning?link={quote(link_token, safe='')}"
+    return f"{WOLTA_API_BASE}/anlaggning#link={quote(link_token, safe='')}"
 
 # Control systems for the plant-step selector. Values MUST match the backend's
 # CONTROL_SYSTEMS set (api/calibration.py) and the web's control-systems.ts - the

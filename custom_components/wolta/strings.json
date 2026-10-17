@@ -384,6 +384,13 @@
         "title": "Add in view-only mode",
         "description": "This plant already streams its data to wolta.se through its own connection (Sonnen webhook or Reduxi), so Home Assistant will not upload anything to it. You get the Wolta sensors — grade, battery value, savings, IRR, payback — and the recompute button. Everything else is managed on wolta.se. Submit to add the plant in view-only mode."
       },
+      "reauth_new_token": {
+        "title": "New token for your plant",
+        "description": "Your plant is linked to a wolta.se account, so Home Assistant needs a token from the account owner to reconnect. Log in on wolta.se, open the plant, choose Create new token and paste it here. Your history stays on the plant.",
+        "data": {
+          "profile_input": "Profile link or token"
+        }
+      },
       "reauth_view_only": {
         "title": "New token for view-only plant",
         "description": "The saved token no longer works — it was probably renewed on wolta.se. Paste a fresh profile link or token for the plant (log in on wolta.se and create one on the plant page). Nothing is created or changed on wolta.se.",
@@ -406,7 +413,8 @@
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
       "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
       "control_system_name_required": "Enter the control system's name when you have chosen Other.",
-      "link_is_read_link": "That is the plant's read link. Linking the integration needs the owner token – if you have lost it, link the plant to an account and create a new token there."
+      "link_is_read_link": "That is the plant's read link. Linking the integration needs the owner token – if you have lost it, link the plant to an account and create a new token there.",
+      "token_other_plant": "That token belongs to a different plant. Paste the token you created for this plant."
     },
     "abort": {
       "already_configured": "Wolta is already configured",

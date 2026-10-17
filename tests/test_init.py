@@ -17,6 +17,7 @@ from custom_components.wolta.const import (
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_LINK_TOKEN,
+    CONF_PLANT_ID,
     CONF_SOLAR,
     CONF_TOKEN,
     CONF_ZONE,
@@ -41,6 +42,9 @@ ENTRY_DATA = {
     CONF_GRID_IN: "sensor.grid_in",
     CONF_GRID_OUT: "sensor.grid_out",
     CONF_SOLAR: "sensor.solar",
+    # A modern entry (>= v0.16.0) carries its own random plant id; the legacy migration
+    # tests below build entries without one on purpose.
+    CONF_PLANT_ID: "a" * 32,
 }
 
 
@@ -402,3 +406,86 @@ async def test_view_only_entry_platforms_smoke(hass: HomeAssistant):
         _ = ent.native_value
         _ = ent.extra_state_attributes
         _ = ent.available
+
+
+# ---------------------------------------------------------------------------
+# Migrering bort från entry_id som identitet (Wolta säkerhetsgranskning 2026-10-16, D7)
+# ---------------------------------------------------------------------------
+
+
+async def _setup_with(hass, aioclient_mock, data, entry_id="01J9ZK3Q8V4X6Y2B7C5D0E1F2G"):
+    """Kör async_setup_entry med en entry som bär `data` och returnerar (adopt-anrop,
+    entry-uppdateringar)."""
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/adopt",
+                        json={"adopted": False, "plant_id_set": True})
+    mock_entry = MagicMock()
+    mock_entry.data = dict(data)
+    mock_entry.entry_id = entry_id
+    mock_entry.domain = DOMAIN
+    mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    with (
+        patch("custom_components.wolta.WoltaCoordinator", return_value=_make_mock_coordinator()),
+        patch("homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
+              new_callable=AsyncMock),
+        patch("homeassistant.config_entries.ConfigEntries.async_update_entry") as upd,
+    ):
+        from custom_components.wolta import async_setup_entry
+        assert await async_setup_entry(hass, mock_entry) is True
+    adopts = [c for c in aioclient_mock.mock_calls if str(c[1]).endswith("/profile/adopt")]
+    return adopts, upd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plant_id", [None, "01J9ZK3Q8V4X6Y2B7C5D0E1F2G"])
+async def test_setup_replaces_legacy_plant_id(hass, aioclient_mock, plant_id):
+    """Före v0.16.0 fanns inget eget id, och reauth föll tillbaka på HA:s entry_id - som HA
+    visar i adressfältet (#config_entry=<id>). Medan tokenen fortfarande gäller byter
+    setup till en färsk 128-bitars hemlighet och stämplar om raden via adopt."""
+    data = {k: v for k, v in ENTRY_DATA.items() if k != CONF_PLANT_ID}
+    if plant_id:
+        data[CONF_PLANT_ID] = plant_id
+    adopts, upd = await _setup_with(hass, aioclient_mock, data)
+
+    assert len(adopts) == 1
+    sent = adopts[0][2]["client_plant_id"]
+    assert len(sent) == 32 and int(sent, 16) >= 0
+    written = [c.kwargs["data"] for c in upd.call_args_list if CONF_PLANT_ID in c.kwargs["data"]]
+    assert written and written[-1][CONF_PLANT_ID] == sent
+
+
+@pytest.mark.asyncio
+async def test_setup_keeps_a_random_plant_id(hass, aioclient_mock):
+    adopts, _ = await _setup_with(hass, aioclient_mock, {**ENTRY_DATA, CONF_PLANT_ID: "f" * 32})
+    assert adopts == []
+
+
+@pytest.mark.asyncio
+async def test_setup_never_migrates_a_view_only_entry(hass, aioclient_mock):
+    """Visningslägets anläggning ägs av sin bindning (Sonnen/Reduxi). HA ska aldrig stämpla
+    sin identitet på den - backend 409:ar dessutom adopt för bundna rader."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+    adopts, _ = await _setup_with(hass, aioclient_mock, {**ENTRY_DATA, CONF_VIEW_ONLY: True})
+    assert adopts == []
+
+
+@pytest.mark.asyncio
+async def test_setup_survives_failed_identity_migration(hass, aioclient_mock):
+    """Migreringen är best-effort: ett fel får aldrig fälla setup, och id:t lämnas orört
+    så nästa start försöker igen."""
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/adopt", status=503)
+    mock_entry = MagicMock()
+    mock_entry.data = {k: v for k, v in ENTRY_DATA.items() if k != CONF_PLANT_ID}
+    mock_entry.entry_id = "01J9ZK3Q8V4X6Y2B7C5D0E1F2G"
+    mock_entry.domain = DOMAIN
+    mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    with (
+        patch("custom_components.wolta.WoltaCoordinator", return_value=_make_mock_coordinator()),
+        patch("homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
+              new_callable=AsyncMock),
+        patch("homeassistant.config_entries.ConfigEntries.async_update_entry") as upd,
+    ):
+        from custom_components.wolta import async_setup_entry
+        assert await async_setup_entry(hass, mock_entry) is True
+    assert not any(CONF_PLANT_ID in c.kwargs["data"] for c in upd.call_args_list)

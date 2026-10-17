@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import WoltaApiClient
-from .const import CONF_CREATED_BY_HA, CONF_LINK_TOKEN, CONF_TOKEN, DOMAIN, WOLTA_API_BASE
+from .api import WoltaApiClient, WoltaApiError
+from .const import (
+    CONF_CREATED_BY_HA,
+    CONF_LINK_TOKEN,
+    CONF_PLANT_ID,
+    CONF_TOKEN,
+    CONF_VIEW_ONLY,
+    DOMAIN,
+    WOLTA_API_BASE,
+)
 from .coordinator import WoltaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,11 +43,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_LINK_TOKEN: link_token})
 
+    await _migrate_plant_identity(hass, entry, client)
+
     coordinator = WoltaCoordinator(hass, entry)
     entry.runtime_data = coordinator
     await coordinator.async_config_entry_first_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+# What every entry since v0.16.0 sends: secrets.token_hex(16) (config_flow).
+_RANDOM_PLANT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+async def _migrate_plant_identity(
+    hass: HomeAssistant, entry: ConfigEntry, client: WoltaApiClient
+) -> None:
+    """Replace a legacy plant id with a fresh 128-bit secret while the token still works.
+
+    Before v0.16.0 an entry had no id of its own, and reauth fell back to Home Assistant's
+    entry_id - a ULID that Home Assistant itself puts in the address bar
+    (#config_entry=<id>) and that therefore shows up in screenshots. The backend treats the
+    id as a client secret on plants without a wolta.se account (Wolta security review
+    2026-10-16), so it has to be one. adopt stamps the new id on our own row - the backend
+    allows a row to change its own identity, never to take another row's.
+
+    Best-effort like mint_link above: any failure leaves entry.data untouched and the
+    next setup tries again. View-only entries are skipped: their plant belongs to its
+    Sonnen/Reduxi binding, and Home Assistant never stamps an identity on it."""
+    if entry.data.get(CONF_VIEW_ONLY):
+        return
+    current = entry.data.get(CONF_PLANT_ID)
+    if current and current != entry.entry_id and _RANDOM_PLANT_ID.fullmatch(current):
+        return
+    new_id = secrets.token_hex(16)
+    try:
+        await client.adopt_profile(entry.data[CONF_TOKEN], client_plant_id=new_id)
+    except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
+        _LOGGER.debug("Plant id migration failed; will retry on next setup: %s", err)
+        return
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_PLANT_ID: new_id})
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
