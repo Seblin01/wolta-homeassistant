@@ -1,4 +1,4 @@
-# v0.49.0 – the grade measured from your battery's data
+# v0.50.0 – the grade measured from your battery's data
 
 Works together with wolta.se switching to the data-driven benchmark. The grade is now computed against the capacity and efficiency Wolta measures from your battery's state of charge, not against the battery details you entered.
 
