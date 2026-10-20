@@ -94,3 +94,21 @@ def soc_candidates(hass: Any) -> list[str]:
         and state.attributes.get("state_class") == "measurement"
         and state.attributes.get("device_class") not in _NOT_SOC_DEVICE_CLASSES
     )
+
+
+def soc_requirement_error(hass: Any, picked: list[str] | None, absent: bool) -> str | None:
+    """Validation error key for the SoC requirement (spec 2026-10-20 §4.1), or None.
+
+    A SoC sensor is required unless the owner states the battery has none
+    (`soc_absent`). Both at once is a contradiction we refuse to read silently
+    ("soc_conflict"); neither is "soc_required". With sensors picked and no box, the
+    sensors are vetted by soc_error as before, so every picker shares one rule set.
+    """
+    ids = picked or []
+    if ids and absent:
+        return "soc_conflict"
+    if not ids and not absent:
+        return "soc_required"
+    if ids:
+        return soc_error(hass, ids)
+    return None

@@ -311,7 +311,8 @@
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
           "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
-          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
+          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)",
+          "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
@@ -376,7 +377,8 @@
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
           "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
-          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
+          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)",
+          "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
@@ -412,6 +414,8 @@
       "soc_too_many": "Välj högst 16 sensorer för laddningsnivå.",
       "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
       "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
+      "soc_required": "Välj en sensor för laddningsnivå, eller kryssa i 'Mitt batteri har ingen SoC-sensor'.",
+      "soc_conflict": "Välj antingen en sensor för laddningsnivå eller kryssa i 'Mitt batteri har ingen SoC-sensor' – inte båda.",
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",

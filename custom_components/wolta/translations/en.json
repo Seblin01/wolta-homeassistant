@@ -311,7 +311,8 @@
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
           "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
-          "soc_entities": "Battery state of charge (%, optional, one per battery)"
+          "soc_entities": "Battery state of charge (%, optional, one per battery)",
+          "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
@@ -376,7 +377,8 @@
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
           "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
-          "soc_entities": "Battery state of charge (%, optional, one per battery)"
+          "soc_entities": "Battery state of charge (%, optional, one per battery)",
+          "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
@@ -412,6 +414,8 @@
       "soc_too_many": "Pick at most 16 state-of-charge sensors.",
       "soc_unavailable": "The selected state-of-charge sensor isn't available right now. Check that it exists and has a value.",
       "soc_id_too_long": "The sensor's entity ID is longer than 128 characters. Rename the entity and try again.",
+      "soc_required": "Pick a state-of-charge sensor, or tick 'My battery has no SoC sensor'.",
+      "soc_conflict": "Either pick a state-of-charge sensor or tick 'My battery has no SoC sensor' - not both.",
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
