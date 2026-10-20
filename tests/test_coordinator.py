@@ -5221,7 +5221,7 @@ async def test_without_soc_sensors_no_soc_bookmark_and_no_statistics_read(
 
 
 # ---------------------------------------------------------------------------
-# soc_required: a SoC sensor (or the "no SoC sensor" box) is required (v0.41.0, reworked v0.51)
+# soc_required: a SoC sensor (or the "no SoC sensor" box) is required (v0.41.0, reworked v0.50.0)
 # ---------------------------------------------------------------------------
 
 _SOC_ISSUE_ID = "soc_required_test_entry_id"

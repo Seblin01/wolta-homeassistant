@@ -112,10 +112,9 @@ CONF_FLEX_COMPENSATION = "flex_compensation_entity"
 # entity ids are CLIENT-LOCAL configuration and never PATCHed to the server - only the
 # statistics read from them are uploaded, as battery_state rows through put_data.
 CONF_SOC = "soc_entities"
-# Set when the user declines the soc_missing repair (its "ignore" option): collecting SoC
-# is optional, so a no must silence the nudge for good. The coordinator suppresses the
-# repair while this is truthy; picking sensors through the repair clears it. Client-only,
-# never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
+# Legacy: set when the user declined the old soc_missing repair (its "ignore" option).
+# Nothing reads it any more (SoC is required, spec 2026-10-20-soc-krav); the constant
+# survives only so the repair and reconfigure flows can drop the stale key from entry.data.
 CONF_SOC_ISSUE_IGNORED = "soc_issue_ignored"
 # The owner's declaration that the battery has no SoC sensor to report (spec
 # 2026-10-20-soc-krav, 4.4). Unlike CONF_SOC (entity ids, client-local) this IS a profile

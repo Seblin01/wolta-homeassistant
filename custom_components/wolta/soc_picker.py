@@ -1,6 +1,6 @@
 """Validation and candidate listing for the state-of-charge sensor pickers.
 
-Shared by the setup flow, the reconfigure flow (config_flow.py) and the soc_missing
+Shared by the setup flow, the reconfigure flow (config_flow.py) and the soc_required
 repair (repairs.py): one set of rules for what counts as a usable SoC sensor, so the
 three pickers can never drift apart.
 """

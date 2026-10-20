@@ -103,7 +103,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# The SoC picker rules live in soc_picker.py, shared with the soc_missing repair.
+# The SoC picker rules live in soc_picker.py, shared with the soc_required repair.
 
 
 # ---------------------------------------------------------------------------

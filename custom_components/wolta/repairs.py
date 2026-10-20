@@ -17,8 +17,10 @@ The adopt UX differs per parameter:
   bound (the controller may never have demanded full power), so the user sets the battery's real
   maximum, likely the measured figure but higher if the hardware can do more.
 
-SocMissingRepairFlow reuses the menu for a different question: pick state-of-charge sensors,
-or decline. It adopts nothing and PATCHes nothing - the choice is client-local.
+SocRequiredRepairFlow answers a different question: pick state-of-charge sensors, or say the
+battery has none (soc_absent). Its menu has no "ignore" - the answer is required, so it does not
+inherit the adopt menu. Picking sensors is client-local; only the soc_absent answer travels to
+the server (it is mirrored back into entry.data, so it is PATCHed before it is written).
 
 BatteryNeedsInputRepairFlow (spec 2026-09-14 §7.2) is the exception to the menu rule: it fires
 when the backend could not measure a declared battery at all, so there is no configured value to
@@ -52,13 +54,17 @@ from .const import (
     CONF_POWER_ISSUE_IGNORED,
     CONF_RESERVE_PCT,
     CONF_SOC,
+    CONF_SOC_ABSENT,
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
 from . import intervals
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
 from .coordinator import desired_invert_intervals, with_desired_intervals
-from .soc_picker import soc_candidates, soc_error
+from .soc_picker import soc_candidates, soc_requirement_error
+
+# Issue id prefix the coordinator raises (coordinator._ISSUE_SOC_REQUIRED).
+_ISSUE_SOC_REQUIRED = "soc_required"
 
 
 class _AdoptRepairFlow(RepairsFlow):
@@ -227,34 +233,80 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
         )
 
 
-class SocMissingRepairFlow(_AdoptRepairFlow):
-    """Pick the battery's state-of-charge sensors - or decline, for good.
+class SocRequiredRepairFlow(RepairsFlow):
+    """The battery's state of charge is required: pick the sensors, or say there are none.
 
-    The choice is written to entry.data and the entry reloaded: the coordinator reads the
-    sensors at start and its own bookkeeping (_track_soc_selection) schedules the SoC
-    backfill. Only CONF_SOC changes, so the flow sensors' fingerprint - the one that
-    replaces the changed sensors' fields in the stored energy data - is untouched. Nothing goes to the
-    server from here; the entity ids are client-local."""
+    Two answers, no "ignore" (spec 2026-10-20-soc-krav 4.3), so this is not an
+    _AdoptRepairFlow: the base menu offers ignore.
 
-    _issue_prefix = "soc_missing"
-    _ignore_key = CONF_SOC_ISSUE_IGNORED
-    _adopt_step = "pick_sensors"
+    - pick_sensors: the choice is written to entry.data and the entry reloaded - the
+      coordinator reads the sensors at start and its own bookkeeping (_track_soc_selection)
+      schedules the SoC backfill. Only CONF_SOC changes, so the flow sensors' fingerprint is
+      untouched. The entity ids are client-local and never sent. If the owner had earlier said
+      "no sensor", that answer is withdrawn on the server first.
+    - soc_absent: PATCH soc_absent=True.
+
+    CONF_SOC_ABSENT is mirrored from the server (_PROFILE_SYNC_KEYS: a server value overwrites
+    entry.data on every sync), so a local write the server does not hold would be reverted by
+    the next sync. Both steps therefore PATCH first and write entry.data only once the PATCH
+    went through; on a failure they abort, write nothing and leave the issue open."""
+
+    def __init__(self, entry: ConfigEntry | None) -> None:
+        self._entry = entry
+
+    def _soc_issue_id(self) -> str:
+        return f"{_ISSUE_SOC_REQUIRED}_{self._entry.entry_id}"
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Same race as _AdoptRepairFlow: the entry can be removed between the issue being
+        # raised and the user opening it.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return self.async_show_menu(
+            step_id="init", menu_options=["pick_sensors", "soc_absent"])
+
+    async def _patch_soc_absent(self, value: bool) -> bool:
+        """PATCH the owner's answer. False on a connection/HTTP failure (nothing written)."""
+        coordinator = self._entry.runtime_data
+        try:
+            await coordinator.client.patch_profile(coordinator.token, soc_absent=value)
+        except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+            return False
+        return True
+
+    async def async_step_soc_absent(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if not await self._patch_soc_absent(True):
+            return self.async_abort(reason="failed")
+        new_data = {**self._entry.data, CONF_SOC_ABSENT: True}
+        new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        ir.async_delete_issue(self.hass, DOMAIN, self._soc_issue_id())
+        return self.async_create_entry(title="", data={})
 
     async def async_step_pick_sensors(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
         errors: dict[str, str] = {}
         if user_input is not None:
             picked = list(user_input.get(CONF_SOC) or [])
-            # An empty choice is not a choice: declining is the menu's other option, and
-            # it is the one that stops the repair from coming back.
-            error = soc_error(self.hass, picked) if picked else "soc_required"
+            # An empty choice is not a choice: "no SoC sensor" is the menu's other option.
+            # Validated before anything is PATCHed, so a bad pick leaves an earlier "no
+            # sensor" answer standing.
+            error = soc_requirement_error(self.hass, picked, absent=False)
             if error:
                 errors[CONF_SOC] = error
             else:
                 new_data = {**self._entry.data, CONF_SOC: picked}
-                new_data.pop(self._ignore_key, None)
+                if self._entry.data.get(CONF_SOC_ABSENT):
+                    if not await self._patch_soc_absent(False):
+                        return self.async_abort(reason="failed")
+                    new_data[CONF_SOC_ABSENT] = False
+                # The old "ignore" answered an offer, not this requirement.
+                new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
                 self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-                ir.async_delete_issue(
-                    self.hass, DOMAIN, f"{self._issue_prefix}_{self._entry.entry_id}")
+                ir.async_delete_issue(self.hass, DOMAIN, self._soc_issue_id())
                 self.hass.config_entries.async_schedule_reload(self._entry.entry_id)
                 return self.async_create_entry(title="", data={})
         # Narrowed to what can pass validation. With no candidate at all an include list
@@ -267,7 +319,8 @@ class SocMissingRepairFlow(_AdoptRepairFlow):
         return self.async_show_form(
             step_id="pick_sensors",
             # Optional, not Required: the frontend refuses to submit an empty Required
-            # field, which would hide the soc_required guidance (decline is a menu choice).
+            # field, which would hide the soc_required guidance ("no SoC sensor" is a menu
+            # choice).
             data_schema=vol.Schema({vol.Optional(CONF_SOC): EntitySelector(config)}),
             errors=errors,
         )
@@ -440,8 +493,8 @@ async def async_create_fix_flow(
             {k: v for k, v in data.items()
              if k not in ("entry_id", "form", "swap_intervals")},
             data.get("swap_intervals"))
-    if issue_id.startswith("soc_missing"):
-        return SocMissingRepairFlow(entry)
+    if issue_id.startswith(_ISSUE_SOC_REQUIRED):
+        return SocRequiredRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):
         return BatteryNeedsInputRepairFlow(entry, days=days)
     if issue_id.startswith("measured_power"):
