@@ -180,7 +180,6 @@
     },
     "control_system_required": {
       "title": "Wolta behöver veta vilket styrsystem som styr ditt batteri",
-      "description": "Wolta behöver veta vilket styrsystem som styr ditt batteri. Betyget kan bara jämföras med anläggningar på samma styrsystem. Du kan ändra valet senare på wolta.se.",
       "fix_flow": {
         "step": {
           "pick": {

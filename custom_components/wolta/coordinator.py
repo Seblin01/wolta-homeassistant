@@ -2308,6 +2308,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         new_data = dict(entry.data)
         changed = False
         for key in _PROFILE_SYNC_KEYS:
+            if key == CONF_SOC_ABSENT and key not in profile:
+                # A response without the key comes from a server that does not know the
+                # field (wrong release order, rollback). Dropping the owner's local
+                # answer then would bring the SoC repair back after every answer. A
+                # present value mirrors, None (never answered) and False included.
+                continue
             server_val = profile.get(key)
             if server_val is None:
                 if key in new_data:
@@ -3826,6 +3832,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # No grade block says nothing about the plant (a recompute in flight, an
             # old backend): leave whatever is open as it is rather than flapping.
             return
+        if self._battery_status is None and not self._view_only:
+            # The stamp is in memory only: None means no profile GET has succeeded since
+            # the start. That is no answer about the plant, and deleting an open issue
+            # here would wipe HA's Ignore with it (dismissed_version lives in the registry
+            # entry). Leave it as it is, like the missing-grade case above.
+            return
         fire = (
             not betyg.get("preliminary")
             and not self._view_only
@@ -3849,11 +3861,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         Never in view-only mode: there the plant's binding owns the profile."""
         data = self.config_entry.data
         control_system = data.get(CONF_CONTROL_SYSTEM)
+        if self._battery_status is None and not self._view_only:
+            # Profile not read since the start: no answer, so leave an open issue alone
+            # (deleting it would wipe HA's Ignore).
+            return
         missing = not control_system or control_system_name_error(
             control_system, data.get(CONF_CONTROL_SYSTEM_NAME)) is not None
         self._set_measured_issue(
             _ISSUE_CONTROL_SYSTEM_REQUIRED,
-            fire=missing and self._battery_status is not None and not self._view_only,
+            fire=missing and not self._view_only,
             translation_key=_ISSUE_CONTROL_SYSTEM_REQUIRED, placeholders={}, data={})
 
     def _evaluate_grid_fee_issue(self, results: dict) -> None:

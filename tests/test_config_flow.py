@@ -3658,6 +3658,29 @@ async def test_reconfigure_ticking_absent_patches_true(hass: HomeAssistant) -> N
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_pre_v050_entry_with_sensors_saves_without_patch(
+    hass: HomeAssistant,
+) -> None:
+    """The common path for existing users after the update: an entry from before v0.50.0
+    already has SoC sensors and no stored soc_absent. Opening Reconfigure and saving with
+    the sensors kept and the box unticked is no change in the answer (missing == False),
+    so nothing is PATCHed and no key is invented in entry.data."""
+    hass.states.async_set(SOC_ENTITY, "55", SOC_ATTRS)
+    entry = _entry_without_answer(hass, **{CONF_SOC: [SOC_ENTITY]})
+    assert CONF_SOC_ABSENT not in entry.data
+    mock_client = _mock_client()
+    result = await _reconfigure(
+        hass, entry, mock_client,
+        _reconfigure_streams(**{CONF_SOC: [SOC_ENTITY], CONF_SOC_ABSENT: False}))
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    mock_client.patch_profile.assert_not_awaited()
+    data = hass.config_entries.async_get_entry(entry.entry_id).data
+    assert CONF_SOC_ABSENT not in data
+    assert data[CONF_SOC] == [SOC_ENTITY]
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_absent_patch_failure_saves_nothing(hass: HomeAssistant) -> None:
     """Ruling: soc_absent is mirrored from the server, so it is written locally only
     after the PATCH succeeded. A failed PATCH shows cannot_connect and saves nothing -

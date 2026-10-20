@@ -180,7 +180,6 @@
     },
     "control_system_required": {
       "title": "Wolta needs your battery's control system",
-      "description": "Wolta needs to know which control system runs your battery. The grade can only be compared with plants on the same control system. You can change the choice later on wolta.se.",
       "fix_flow": {
         "step": {
           "pick": {

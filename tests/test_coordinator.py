@@ -1345,6 +1345,32 @@ async def test_profile_sync_mirrors_soc_absent_including_false(
 
 
 @pytest.mark.asyncio
+async def test_profile_sync_keeps_soc_absent_when_the_server_omits_the_key(
+    hass: HomeAssistant, mock_entry
+):
+    """A response without the soc_absent key means a server that does not know the field
+    (wrong release order, rollback): the owner's local answer must survive, or the repair
+    comes back after every answer. A present value, False included, still mirrors."""
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+
+    mock_entry.data = {**mock_entry.data, CONF_SOC_ABSENT: True}
+    assert "soc_absent" not in BASE_PROFILE
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["battery_kwh"] == 25.0
+    assert kwargs["data"][CONF_SOC_ABSENT] is True
+
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": False})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_SOC_ABSENT] is False
+
+
+@pytest.mark.asyncio
 async def test_profile_sync_zone_change_updates_title(hass: HomeAssistant, mock_entry):
     client = _mock_client()
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "zone": "SE4"})
@@ -5364,6 +5390,29 @@ async def test_soc_required_keeps_the_issue_when_a_cycle_lacks_a_grade(hass, moc
 
 
 @pytest.mark.asyncio
+async def test_soc_required_keeps_an_ignored_issue_when_the_battery_status_is_unread(
+    hass, mock_entry
+):
+    """_battery_status lives in memory: after a start or reload it is None until the first
+    profile GET succeeds. A main cycle that gets results but no profile must not delete
+    an open repair - that would wipe HA's Ignore (dismissed_version) with it."""
+    c = await _soc_coordinator(hass, mock_entry)
+    c._evaluate_soc_required_issue(_MATURE)
+    ir.async_ignore_issue(hass, DOMAIN, _SOC_ISSUE_ID, True)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID).dismissed_version
+
+    c._battery_status = None
+    c._evaluate_soc_required_issue(_MATURE)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
+    assert issue is not None and issue.dismissed_version is not None
+
+    # A real answer still clears it.
+    c._battery_status = "none"
+    c._evaluate_soc_required_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
 async def test_soc_required_never_in_view_only(hass, mock_entry):
     c = await _soc_coordinator(hass, mock_entry)
     c._view_only = True
@@ -6643,6 +6692,20 @@ async def test_cs_issue_silent_before_the_profile_has_been_read(hass, mock_entry
     c = await _cs_coordinator(hass, mock_entry, synced=False)
     c._evaluate_control_system_issue()
     assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_keeps_an_ignored_issue_when_the_profile_is_unread(hass, mock_entry):
+    """An open (and ignored) repair survives a cycle whose profile GET failed: the
+    evaluation leaves it as it is instead of deleting it and wiping HA's Ignore."""
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    ir.async_ignore_issue(hass, DOMAIN, _CS_ISSUE_ID, True)
+
+    c._battery_status = None
+    c._evaluate_control_system_issue()
+    issue = _cs_issue(hass)
+    assert issue is not None and issue.dismissed_version is not None
 
 
 @pytest.mark.asyncio

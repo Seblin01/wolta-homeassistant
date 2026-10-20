@@ -265,8 +265,9 @@ def test_control_system_required_repair_says_why_and_where_to_change_it(
     text = issue["fix_flow"]["step"]["pick"]["description"]
     for needle in needles:
         assert needle in text, (needle, text)
-    # The issue's own text is what the repairs list shows before the flow opens.
-    assert "wolta.se" in issue["description"]
+    # hassfest: a fixable issue carries its text in fix_flow only; a top-level
+    # description is mutually exclusive with fix_flow.
+    assert "description" not in issue
 
 
 @pytest.mark.parametrize("lang", ["en", "sv"])
