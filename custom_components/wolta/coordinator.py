@@ -67,6 +67,7 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SOC,
+    CONF_SOC_ABSENT,
     CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
@@ -874,6 +875,9 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
     # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
     CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
+    # The owner's "this battery has no SoC sensor" answer; also flipped on wolta.se and
+    # via the repair PATCH. A server False is stored (the loop below only drops None).
+    CONF_SOC_ABSENT,
 )
 
 

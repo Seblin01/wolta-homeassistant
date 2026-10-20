@@ -1321,6 +1321,30 @@ async def test_profile_sync_mirrors_control_system(hass: HomeAssistant, mock_ent
 
 
 @pytest.mark.asyncio
+async def test_profile_sync_mirrors_soc_absent_including_false(
+    hass: HomeAssistant, mock_entry
+):
+    """soc_absent is server-owned (the owner flips it on wolta.se). A server False is a
+    real answer ("has a sensor") and must be stored, not popped like a missing value;
+    only None (never answered) drops the key."""
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": False})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_SOC_ABSENT] is False
+
+    mock_entry.data = {**mock_entry.data, CONF_SOC_ABSENT: True}
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert CONF_SOC_ABSENT not in kwargs["data"]
+
+
+@pytest.mark.asyncio
 async def test_profile_sync_zone_change_updates_title(hass: HomeAssistant, mock_entry):
     client = _mock_client()
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "zone": "SE4"})
@@ -2783,13 +2807,14 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
         CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
+        CONF_SOC_ABSENT,
     )
 
     assert _PROFILE_SYNC_KEYS == (
         CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
-        CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
+        CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME, CONF_SOC_ABSENT,
     )
     assert CONF_FLEX_COMPENSATION not in _PROFILE_SYNC_KEYS
 

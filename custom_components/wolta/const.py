@@ -117,6 +117,12 @@ CONF_SOC = "soc_entities"
 # repair while this is truthy; picking sensors through the repair clears it. Client-only,
 # never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
 CONF_SOC_ISSUE_IGNORED = "soc_issue_ignored"
+# The owner's declaration that the battery has no SoC sensor to report (spec
+# 2026-10-20-soc-krav, 4.4). Unlike CONF_SOC (entity ids, client-local) this IS a profile
+# field synced with the server: sent in POST /profile, PATCHed from the repair, and
+# mirrored back into entry.data through _PROFILE_SYNC_KEYS, since it can also be flipped
+# on wolta.se. True = no sensor exists, False = has one, absent = never answered.
+CONF_SOC_ABSENT = "soc_absent"
 # Användaren har avböjt att vända riktningen (repairen battery_direction, bara de fixbara
 # formerna). Rensas när användaren vänder via repairen. Klientlokal nyckel, aldrig till
 # servern, och därför utanför _PROFILE_SYNC_KEYS.

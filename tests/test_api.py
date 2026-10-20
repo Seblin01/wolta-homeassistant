@@ -652,6 +652,20 @@ async def test_create_profile_declared_utan_par():
 
 
 @pytest.mark.asyncio
+async def test_create_profile_sends_soc_absent_only_when_given():
+    """soc_absent (spec 2026-10-20-soc-krav): omission is meaningful - an OMITTED field
+    leaves the server's value alone, so only an explicit True/False is sent."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"profile_token": "t"})
+    await client.create_profile(zone="SE3", has_solar=False, share_profile=True, soc_absent=True)
+    assert client._request.await_args.kwargs["json"]["soc_absent"] is True
+    await client.create_profile(zone="SE3", has_solar=False, share_profile=True, soc_absent=False)
+    assert client._request.await_args.kwargs["json"]["soc_absent"] is False
+    await client.create_profile(zone="SE3", has_solar=False, share_profile=True)
+    assert "soc_absent" not in client._request.await_args.kwargs["json"]
+
+
+@pytest.mark.asyncio
 async def test_create_profile_med_par_som_forr():
     client = WoltaApiClient(session=None)
     client._request = AsyncMock(return_value={"profile_token": "t"})
