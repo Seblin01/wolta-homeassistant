@@ -142,16 +142,16 @@
       "title": "Wolta: your grid fee looks too high",
       "description": "The grid fee you entered is above {limit} öre (or cents) per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Tariffs. If your network operator really charges this much, you can leave it as it is."
     },
-    "soc_missing": {
-      "title": "Optional: add your battery's state-of-charge sensor to Wolta",
+    "soc_required": {
+      "title": "Wolta needs your battery's state-of-charge sensor",
       "fix_flow": {
         "step": {
           "init": {
-            "title": "Add your battery's state-of-charge sensor",
-            "description": "Wolta measures your battery's real capacity and efficiency from its state of charge (the level in %), and the grade is computed against those measured figures. Without it your grade is computed on the battery details you entered and is a grade of your own, not compared with other installations. The economics keep using the details you entered either way.\n\nIf you pick a sensor, its history (up to 365 days) is uploaded with the next regular upload; your energy data is not re-sent. This is optional. If you'd rather not, choose the second option and this notice won't come back.",
+            "title": "Your battery's state of charge",
+            "description": "Wolta needs the battery's state of charge (SoC, the charge level in %) so that the grade can be compared with other plants. Without it the grade is computed on the battery details you entered and is not compared.\n\nIf you pick a sensor, up to 365 days of its history is uploaded right away.\n\nIf the battery has no SoC sensor, say so. Plants that have neither picked a SoC sensor nor said that the battery has none will stop being able to upload data in a coming version.",
             "menu_options": {
               "pick_sensors": "Pick a state-of-charge sensor",
-              "ignore": "Don't collect state of charge"
+              "soc_absent": "My battery has no SoC sensor"
             }
           },
           "pick_sensors": {
@@ -161,18 +161,19 @@
               "soc_entities": "Battery state of charge (%, one per battery)"
             },
             "data_description": {
-              "soc_entities": "Only sensors in % with state_class measurement are listed, since those are the ones with statistics to read. You can change or remove the choice later under Reconfigure."
+              "soc_entities": "Only sensors in % with state_class measurement are listed. Up to 365 days of history is uploaded right away. You can change the choice later under Reconfigure."
             }
           }
         },
         "error": {
-          "soc_required": "Pick at least one sensor, or go back and choose not to collect state of charge.",
+          "soc_required": "Pick at least one sensor. If the battery has none, close this and choose 'My battery has no SoC sensor'.",
           "soc_unavailable": "The selected state-of-charge sensor isn't available right now. Check that it exists and has a value.",
           "soc_not_measurement": "Pick sensors in % with state_class measurement - others have no statistics to read.",
           "soc_id_too_long": "The sensor's entity ID is longer than 128 characters. Rename the entity and try again.",
           "soc_too_many": "Pick at most 16 state-of-charge sensors."
         },
         "abort": {
+          "failed": "The answer could not be saved at Wolta right now. Try again later.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -311,13 +312,13 @@
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
           "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
-          "soc_entities": "Battery state of charge (%, optional, one per battery)",
+          "soc_entities": "Battery state of charge (%, one per battery)",
           "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
           "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
-          "soc_entities": "Optional. Lets Wolta measure your battery's real capacity and efficiency, which the grade is computed against. Without it the grade is not compared with other installations. Adding a SoC sensor uploads its history (up to 365 days) with the next regular upload; your energy data is not re-sent. Removing one just stops collecting it."
+          "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
         }
       },
       "reauth_confirm": {
@@ -377,13 +378,13 @@
           "solar": "Solar production energy (optional)",
           "external_control_entity": "External control active (binary sensor, optional)",
           "flex_compensation_entity": "Flex compensation, monthly (sensor, optional)",
-          "soc_entities": "Battery state of charge (%, optional, one per battery)",
+          "soc_entities": "Battery state of charge (%, one per battery)",
           "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
           "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
-          "soc_entities": "Optional. Lets Wolta measure your battery's real capacity and efficiency, which the grade is computed against. Without it the grade is not compared with other installations. Adding a SoC sensor uploads its history (up to 365 days) with the next regular upload; your energy data is not re-sent. Removing one just stops collecting it."
+          "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
         }
       },
       "view_only": {
@@ -415,7 +416,7 @@
       "soc_unavailable": "The selected state-of-charge sensor isn't available right now. Check that it exists and has a value.",
       "soc_id_too_long": "The sensor's entity ID is longer than 128 characters. Rename the entity and try again.",
       "soc_required": "Pick a state-of-charge sensor, or tick 'My battery has no SoC sensor'.",
-      "soc_conflict": "Either pick a state-of-charge sensor or tick 'My battery has no SoC sensor' - not both.",
+      "soc_conflict": "Pick a state-of-charge sensor or tick 'My battery has no SoC sensor'. You can't do both.",
       "unknown": "Unexpected error",
       "invalid_token": "Unknown or deleted profile token – check the link and try again.",
       "profile_no_battery": "This profile has no battery – the integration requires a battery profile. Solar-only profiles are not supported.",
