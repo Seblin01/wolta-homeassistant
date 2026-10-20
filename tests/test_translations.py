@@ -236,3 +236,43 @@ def test_grid_fee_field_says_without_vat_and_energy_tax(lang: str, needle: str) 
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
     text = data["options"]["step"]["settings"]["sections"]["tariffs"]["data_description"]["grid_var_ore"]
     assert needle in text, text
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_control_system_required_repair_has_the_pick_step_and_aborts(path: Path) -> None:
+    """The fix flow opens on the form (repairs.ControlSystemRequiredRepairFlow): its two
+    fields, the error it returns, and the two aborts it can end in all render as text.
+    A fix flow reads errors from its own block, not config.error."""
+    issue = _load(path)["issues"]["control_system_required"]
+    assert issue["title"]
+    pick = issue["fix_flow"]["step"]["pick"]
+    assert pick["title"] and pick["description"]
+    assert pick["data"]["control_system"] and pick["data"]["control_system_name"]
+    assert pick["data_description"]["control_system_name"]
+    assert issue["fix_flow"]["error"]["control_system_name_required"]
+    assert {"failed", "entry_not_found"} <= set(issue["fix_flow"]["abort"])
+    # No menu and no ignore: the answer is required (HA's own Ignore stays).
+    assert "init" not in issue["fix_flow"]["step"]
+
+
+@pytest.mark.parametrize("lang, needles", [
+    ("en", ("same control system", "wolta.se")),
+    ("sv", ("samma styrsystem", "wolta.se"))])
+def test_control_system_required_repair_says_why_and_where_to_change_it(
+        lang: str, needles: tuple[str, ...]) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    issue = data["issues"]["control_system_required"]
+    text = issue["fix_flow"]["step"]["pick"]["description"]
+    for needle in needles:
+        assert needle in text, (needle, text)
+    # The issue's own text is what the repairs list shows before the flow opens.
+    assert "wolta.se" in issue["description"]
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_control_system_required_repair_reuses_the_onboarding_name_error(lang: str) -> None:
+    """One rule, one wording: the repair's name error is the setup step's."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    errors = data["issues"]["control_system_required"]["fix_flow"]["error"]
+    assert errors["control_system_name_required"] == data["config"]["error"][
+        "control_system_name_required"]

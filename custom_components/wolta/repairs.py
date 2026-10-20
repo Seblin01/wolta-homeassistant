@@ -22,6 +22,11 @@ battery has none (soc_absent). Its menu has no "ignore" - the answer is required
 inherit the adopt menu. Picking sensors is client-local; only the soc_absent answer travels to
 the server (it is mirrored back into entry.data, so it is PATCHed before it is written).
 
+ControlSystemRequiredRepairFlow asks for the control system with onboarding's picker (spec
+2026-10-20-soc-krav 4.6). It is a plain form with no menu and no "ignore" of its own, for the
+same reason as the SoC flow, and it PATCHes before it writes entry.data, since the control
+system is mirrored from the server too.
+
 BatteryNeedsInputRepairFlow (spec 2026-09-14 §7.2) is the exception to the menu rule: it fires
 when the backend could not measure a declared battery at all, so there is no configured value to
 keep and nothing to ignore — without the nameplate pair the plant has no grade.
@@ -29,6 +34,7 @@ keep and nothing to ignore — without the nameplate pair the plant has no grade
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import aiohttp
@@ -42,9 +48,13 @@ from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BATT_IN,
+    CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
@@ -60,11 +70,31 @@ from .const import (
 )
 from . import intervals
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
+from .control_system_prefill import (
+    async_control_system_suggestion,
+    battery_platforms,
+    control_system_name_error,
+    control_system_name_selector,
+    control_system_selector,
+)
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .soc_picker import soc_candidates, soc_requirement_error
 
-# Issue id prefix the coordinator raises (coordinator._ISSUE_SOC_REQUIRED).
+_LOGGER = logging.getLogger(__name__)
+
+# Issue id prefixes the coordinator raises (coordinator._ISSUE_SOC_REQUIRED and
+# coordinator._ISSUE_CONTROL_SYSTEM_REQUIRED).
 _ISSUE_SOC_REQUIRED = "soc_required"
+_ISSUE_CONTROL_SYSTEM_REQUIRED = "control_system_required"
+
+
+def _as_list(value: Any) -> list[str]:
+    """entry.data holds sensor ids as a list, or as a plain string in entries from v0.1.0."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value:
+        return [value]
+    return []
 
 
 class _AdoptRepairFlow(RepairsFlow):
@@ -326,6 +356,99 @@ class SocRequiredRepairFlow(RepairsFlow):
         )
 
 
+class ControlSystemRequiredRepairFlow(RepairsFlow):
+    """The control system is required: pick it with the same picker as in setup.
+
+    The list, the suggestion from the battery sensors' integration and the rule that
+    "other" needs a name are onboarding's (control_system_prefill), not copies. No menu and
+    no "ignore" (HA's own Ignore stays), so this is not an _AdoptRepairFlow.
+
+    CONF_CONTROL_SYSTEM and CONF_CONTROL_SYSTEM_NAME are mirrored from the server
+    (_PROFILE_SYNC_KEYS: a server value overwrites entry.data on every sync), so the answer
+    is PATCHed first and entry.data is written only once the PATCH went through. Without
+    that write a failed profile read right after would see the old entry.data and raise the
+    issue again. On a failure the flow aborts, writes nothing and leaves the issue open."""
+
+    def __init__(self, entry: ConfigEntry | None) -> None:
+        self._entry = entry
+        # The suggestion is looked up once per flow, not on every re-show after an error.
+        self._suggested: str | None = None
+        self._suggestion_looked_up = False
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Same race as _AdoptRepairFlow: the entry can be removed between the issue being
+        # raised and the user opening it.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return await self.async_step_pick()
+
+    async def _default_choice(self) -> str | None:
+        """The control system the form starts on: what the entry has (an "other" that only
+        lacks its name), else onboarding's suggestion, else nothing (no guess)."""
+        current = self._entry.data.get(CONF_CONTROL_SYSTEM)
+        if current:
+            return current
+        if not self._suggestion_looked_up:
+            self._suggestion_looked_up = True
+            coordinator = self._entry.runtime_data
+            batt = [
+                entity_id
+                for key in (CONF_BATT_IN, CONF_BATT_OUT)
+                for entity_id in _as_list(self._entry.data.get(key))
+            ]
+            try:
+                self._suggested = await async_control_system_suggestion(
+                    coordinator.client, battery_platforms(self.hass, batt))
+            except Exception:  # noqa: BLE001 - a suggestion is optional, never blocks the form
+                _LOGGER.debug("control_system suggestion failed; no default", exc_info=True)
+        return self._suggested
+
+    async def async_step_pick(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            control_system = user_input[CONF_CONTROL_SYSTEM]
+            name = (user_input.get(CONF_CONTROL_SYSTEM_NAME) or "").strip()
+            error = control_system_name_error(control_system, name)
+            if error:
+                errors[CONF_CONTROL_SYSTEM_NAME] = error
+            else:
+                # The name only means something together with "other" (as in setup).
+                payload: dict[str, Any] = {CONF_CONTROL_SYSTEM: control_system}
+                if control_system == "other":
+                    payload[CONF_CONTROL_SYSTEM_NAME] = name
+                coordinator = self._entry.runtime_data
+                try:
+                    await coordinator.client.patch_profile(coordinator.token, **payload)
+                except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+                    return self.async_abort(reason="failed")
+                new_data = {**self._entry.data, **payload}
+                if control_system != "other":
+                    new_data.pop(CONF_CONTROL_SYSTEM_NAME, None)
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                ir.async_delete_issue(
+                    self.hass, DOMAIN,
+                    f"{_ISSUE_CONTROL_SYSTEM_REQUIRED}_{self._entry.entry_id}")
+                await coordinator.async_request_refresh()
+                return self.async_create_entry(title="", data={})
+        default = await self._default_choice()
+        cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=default)
+                    if default else vol.Required(CONF_CONTROL_SYSTEM))
+        schema = vol.Schema({
+            cs_field: control_system_selector(),
+            vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
+        })
+        # After an error the form keeps what was typed; the first time it offers the stored name.
+        shown = user_input if errors else {
+            CONF_CONTROL_SYSTEM_NAME: self._entry.data.get(CONF_CONTROL_SYSTEM_NAME)}
+        return self.async_show_form(
+            step_id="pick",
+            data_schema=self.add_suggested_values_to_schema(schema, shown),
+            errors=errors,
+        )
+
+
 class BatteryNeedsInputRepairFlow(RepairsFlow):
     """Backend kunde inte mäta batteriets storlek (spec 2026-09-14 §7.2): be om märkskyltens
     värden. Ingen ignore-meny – utan värden finns inget betyg. PATCH:ar båda; backend härleder
@@ -495,6 +618,8 @@ async def async_create_fix_flow(
             data.get("swap_intervals"))
     if issue_id.startswith(_ISSUE_SOC_REQUIRED):
         return SocRequiredRepairFlow(entry)
+    if issue_id.startswith(_ISSUE_CONTROL_SYSTEM_REQUIRED):
+        return ControlSystemRequiredRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):
         return BatteryNeedsInputRepairFlow(entry, days=days)
     if issue_id.startswith("measured_power"):

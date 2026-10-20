@@ -48,7 +48,13 @@ from .api import (
     WoltaPlantClaimed,
     WoltaRateLimitError,
 )
-from .control_system_prefill import battery_platforms, suggest_control_system
+from .control_system_prefill import (
+    async_control_system_suggestion,
+    battery_platforms,
+    control_system_name_error,
+    control_system_name_selector,
+    control_system_selector,
+)
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
@@ -90,7 +96,6 @@ from .const import (
     CONF_TOKEN,
     CONF_VIEW_ONLY,
     CONF_ZONE,
-    CONTROL_SYSTEMS,
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
@@ -221,18 +226,6 @@ def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSele
     ]
     return SelectSelector(
         SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
-    )
-
-
-def _control_system_selector() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value=cs_id, label=label)
-                for cs_id, label in CONTROL_SYSTEMS
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
     )
 
 
@@ -483,11 +476,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         if user_input is not None:
-            # "other" without a free-text name gives zero segmentation signal -
-            # same rule as the web guide (lib/guide.ts canAdvance).
-            if (user_input.get(CONF_CONTROL_SYSTEM) == "other"
-                    and not (user_input.get(CONF_CONTROL_SYSTEM_NAME) or "").strip()):
-                errors[CONF_CONTROL_SYSTEM_NAME] = "control_system_name_required"
+            # Same rule as the repair (control_system_prefill.control_system_name_error).
+            name_error = control_system_name_error(
+                user_input.get(CONF_CONTROL_SYSTEM), user_input.get(CONF_CONTROL_SYSTEM_NAME))
+            if name_error:
+                errors[CONF_CONTROL_SYSTEM_NAME] = name_error
             if not errors:
                 self._plant_data = user_input
                 return await self._create_profile_and_entry()
@@ -531,10 +524,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # guess is surfaced by moving that zone to the TOP of the list with a
                 # label (and repeated as text in the description) instead.
                 vol.Required(CONF_ZONE): _zone_selector(guess, lang),
-                cs_field: _control_system_selector(),
-                vol.Optional(CONF_CONTROL_SYSTEM_NAME): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.TEXT)
-                ),
+                cs_field: control_system_selector(),
+                vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
                 # Visas ALLTID (beslut 2026-09-14), förbockad vid misstanke ur
                 # historiken (stadigt ur > in = omkastade batterisensorer).
                 vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
@@ -709,18 +700,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                             self.hass,
                             list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
                         )
-                        mapping = await WoltaApiClient(
-                            async_get_clientsession(self.hass)
-                        ).get_control_systems()
-                        suggestion = suggest_control_system(platforms, mapping)
-                        # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
-                        # ett id vi inte känner igen som default hade förvalt ett värde som
-                        # SelectSelector själv avvisar → MultipleInvalid i sista
-                        # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
-                        self._cs_suggest = (
-                            suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
-                            else None
-                        )
+                        # Okänt id ⇒ inget förslag (se async_control_system_suggestion):
+                        # annars MultipleInvalid i sista onboarding-steget.
+                        self._cs_suggest = await async_control_system_suggestion(
+                            WoltaApiClient(async_get_clientsession(self.hass)), platforms)
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug(
                             "control_system prefill failed; no suggestion", exc_info=True

@@ -78,6 +78,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from .control_system_prefill import control_system_name_error
 from . import intervals
 from .stats import (
     aggregate_5min_to_15min,
@@ -779,6 +780,10 @@ _ISSUE_STATISTICS_MISSING = "statistics_missing"
 # "I have no SoC sensor" (CONF_SOC_ABSENT). The grade needs the SoC to be comparable, so
 # the answer is required, not offered. Fixable: the repair opens the picker or the box.
 _ISSUE_SOC_REQUIRED = "soc_required"
+# The profile has no control system, or "other" without a name (spec 2026-10-20-soc-krav 4.6).
+# The grade can only be compared with plants on the same control system, so the answer is
+# required, not offered. Fixable: the repair opens onboarding's picker.
+_ISSUE_CONTROL_SYSTEM_REQUIRED = "control_system_required"
 # The id of the earlier, ignorable form. HA keeps dismissed_version when an existing id is
 # re-created, so an owner who ignored it would never see the requirement: the new issue has
 # its own id and this one is deleted on every evaluation.
@@ -2480,6 +2485,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._clear_failure()
             self._evaluate_measured_params(results)
             self._evaluate_soc_required_issue(results)
+            self._evaluate_control_system_issue()
             self._evaluate_grid_fee_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
@@ -3830,6 +3836,25 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._set_measured_issue(
             _ISSUE_SOC_REQUIRED, fire=fire, translation_key=_ISSUE_SOC_REQUIRED,
             placeholders={}, data={})
+
+    def _evaluate_control_system_issue(self) -> None:
+        """Require a control system (spec 2026-10-20-soc-krav 4.6).
+
+        Fires when the mirrored profile has none, or "other" without a name (the onboarding
+        rule, control_system_prefill.control_system_name_error). entry.data is only the
+        mirror of the server (_PROFILE_SYNC_KEYS), so the answer is read from it only once a
+        profile GET has succeeded: that is when _take_battery_state has stored the server's
+        battery stamp, and None means no profile has been read since the start. Before that
+        an entry without the key may simply not have been mirrored yet.
+        Never in view-only mode: there the plant's binding owns the profile."""
+        data = self.config_entry.data
+        control_system = data.get(CONF_CONTROL_SYSTEM)
+        missing = not control_system or control_system_name_error(
+            control_system, data.get(CONF_CONTROL_SYSTEM_NAME)) is not None
+        self._set_measured_issue(
+            _ISSUE_CONTROL_SYSTEM_REQUIRED,
+            fire=missing and self._battery_status is not None and not self._view_only,
+            translation_key=_ISSUE_CONTROL_SYSTEM_REQUIRED, placeholders={}, data={})
 
     def _evaluate_grid_fee_issue(self, results: dict) -> None:
         """Warn when the server finds the owner's grid fee implausible (results.tariff_check).

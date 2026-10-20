@@ -10,3 +10,4 @@ Works together with wolta.se switching to the data-driven benchmark. The grade i
 - **What to expect.** Plants that have neither picked a sensor nor ticked the box will stop being able to upload data in a coming version. No date is set.
 - **What to do.** Pick your battery's state-of-charge sensor under Reconfigure (three-dot menu on the Wolta integration), or tick the box if the battery has none.
 - **The control system follows wolta.se.** If you change or backdate your control system on wolta.se, the integration now picks up the change. Before, it kept the value from setup, and re-authenticating sent that old value back, which could undo a switch you had declared on wolta.se.
+- **New repair: "Wolta needs your battery's control system".** It appears on plants that have no control system set at Wolta, or Other without a name. Pick one in the repair; you can change it later on wolta.se.

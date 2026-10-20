@@ -178,6 +178,33 @@
         }
       }
     },
+    "control_system_required": {
+      "title": "Wolta needs your battery's control system",
+      "description": "Wolta needs to know which control system runs your battery. The grade can only be compared with plants on the same control system. You can change the choice later on wolta.se.",
+      "fix_flow": {
+        "step": {
+          "pick": {
+            "title": "Your battery's control system",
+            "description": "The grade can only be compared with plants on the same control system. Pick the one that runs your battery. If yours is not in the list, pick Other and enter its name. You can change the choice later on wolta.se.",
+            "data": {
+              "control_system": "Control system",
+              "control_system_name": "Control system name (when Other)"
+            },
+            "data_description": {
+              "control_system": "Prefilled from your battery sensors' integration when Wolta recognises it. Change it if it is wrong.",
+              "control_system_name": "Required when you pick Other."
+            }
+          }
+        },
+        "error": {
+          "control_system_name_required": "Enter the control system's name when you have chosen Other."
+        },
+        "abort": {
+          "failed": "The answer could not be saved at Wolta right now. Try again later.",
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+        }
+      }
+    },
     "energy_balance_solar_low": {
       "title": "Wolta: your solar sensor probably reads too low",
       "description": "For a large part of your data, the battery takes in more energy than solar and grid import deliver in the same interval, so the sensors don't describe the whole house. Your grade is still shown to you, but it is kept out of the comparison with other installations.\n\nIt happens mostly while the sun produces, so your solar sensor ({solar}) probably reads too low. If the battery sits on the DC side of your inverter, the solar sensor must show solar production before the battery (the inverter's DC input), not the inverter's AC output. If you have several inverters or strings, all of them must be included.\n\nChange the sensor under Reconfigure. This warning clears itself once Wolta's grading window no longer contains the mismatched data."

@@ -178,6 +178,33 @@
         }
       }
     },
+    "control_system_required": {
+      "title": "Wolta behöver veta vilket styrsystem som styr ditt batteri",
+      "description": "Wolta behöver veta vilket styrsystem som styr ditt batteri. Betyget kan bara jämföras med anläggningar på samma styrsystem. Du kan ändra valet senare på wolta.se.",
+      "fix_flow": {
+        "step": {
+          "pick": {
+            "title": "Batteriets styrsystem",
+            "description": "Betyget kan bara jämföras med anläggningar på samma styrsystem. Välj det som styr ditt batteri. Finns det inte i listan väljer du Annat och anger systemets namn. Du kan ändra valet senare på wolta.se.",
+            "data": {
+              "control_system": "Styrsystem",
+              "control_system_name": "Styrsystemets namn (vid Annat)"
+            },
+            "data_description": {
+              "control_system": "Förifylld ur batterisensorernas integration när Wolta känner igen den. Ändra om den är fel.",
+              "control_system_name": "Krävs när du har valt Annat."
+            }
+          }
+        },
+        "error": {
+          "control_system_name_required": "Ange styrsystemets namn när du valt Annat."
+        },
+        "abort": {
+          "failed": "Svaret kunde inte sparas hos Wolta just nu. Försök igen senare.",
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
+        }
+      }
+    },
     "energy_balance_solar_low": {
       "title": "Wolta: solsensorn visar troligen för lite",
       "description": "Energin går inte ihop i din data: under en stor del av tiden laddar batteriet mer än solen och elnätet tillsammans levererar, så sensorerna beskriver inte hela huset. Du ser fortfarande ditt betyg, men det ingår inte i jämförelsen med andra anläggningar.\n\nDet händer mest när solen producerar, så solsensorn ({solar}) visar troligen för lite. Sitter batteriet på växelriktarens DC-sida ska solsensorn visa solproduktionen före batteriet (växelriktarens DC-ingång), inte växelriktarens AC-utgång. Har du flera växelriktare eller strängar ska alla räknas med.\n\nByt sensor under Konfigurera om. Varningen rensar sig själv när Woltas betygsfönster inte längre innehåller den felaktiga datan."

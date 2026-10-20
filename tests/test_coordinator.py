@@ -6579,3 +6579,110 @@ async def test_grid_fee_implausible_not_in_view_only(hass, mock_entry):
     c._view_only = True
     c._evaluate_grid_fee_issue(_tariff_check(True))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# control_system_required (spec 2026-10-20-soc-krav 4.6): the control system must be set
+# ---------------------------------------------------------------------------
+
+_CS_ISSUE_ID = "control_system_required_test_entry_id"
+
+
+async def _cs_coordinator(hass, mock_entry, *, synced=True, **entry_over):
+    """A coordinator whose profile has been read once (the battery stamp is set only by a
+    successful profile GET, _take_battery_state); `synced=False` is a fresh start."""
+    c = await _cap_coordinator(hass, mock_entry, **entry_over)
+    c._battery_status = "measured" if synced else None
+    return c
+
+
+def _cs_issue(hass):
+    return ir.async_get(hass).async_get_issue(DOMAIN, _CS_ISSUE_ID)
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_fires_when_profile_synced_without_control_system(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    issue = _cs_issue(hass)
+    assert issue is not None
+    assert issue.translation_key == "control_system_required"
+    assert issue.is_fixable is True
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.data["entry_id"] == "test_entry_id"
+    assert issue.is_persistent is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "", "   "])
+async def test_cs_issue_fires_for_other_without_a_name(hass, mock_entry, name):
+    from custom_components.wolta.const import CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME
+    over = {CONF_CONTROL_SYSTEM: "other"}
+    if name is not None:
+        over[CONF_CONTROL_SYSTEM_NAME] = name
+    c = await _cs_coordinator(hass, mock_entry, **over)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", [
+    {"control_system": "tibber"},
+    {"control_system": "other", "control_system_name": "Egen styrning"},
+])
+async def test_cs_issue_silent_when_the_control_system_is_set(hass, mock_entry, over):
+    c = await _cs_coordinator(hass, mock_entry, **over)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_silent_before_the_profile_has_been_read(hass, mock_entry):
+    """entry.data is only a mirror of the server: before the first profile read an entry
+    without the key may simply not have been mirrored yet."""
+    c = await _cs_coordinator(hass, mock_entry, synced=False)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_never_in_view_only(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c._view_only = True
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_clears_once_the_control_system_is_mirrored(hass, mock_entry):
+    from custom_components.wolta.const import CONF_CONTROL_SYSTEM
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is not None
+    mock_entry.data = {**mock_entry.data, CONF_CONTROL_SYSTEM: "tibber"}
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_is_evaluated_in_the_upload_cycle(hass, mock_entry):
+    """The main cycle reads the profile first, so the mirror and the evaluation agree: a
+    server without a control system raises it, a server with one does not."""
+    client = _mock_client(results=RESULTS_PAYLOAD)
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_status": "measured"})
+    await _sync_refresh(hass, mock_entry, client)
+    assert _cs_issue(hass) is not None
+
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_not_raised_when_the_server_has_a_control_system(hass, mock_entry):
+    client = _mock_client(results=RESULTS_PAYLOAD)
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_status": "measured", "control_system": "tibber"})
+    # The mirror writes entry.data; the mock entry is not registered, so apply the write.
+    with patch.object(hass.config_entries, "async_update_entry",
+                      side_effect=lambda e, **kw: setattr(e, "data", kw["data"]) or True):
+        await _sync_refresh(hass, mock_entry, client)
+    assert mock_entry.data["control_system"] == "tibber"
+    assert _cs_issue(hass) is None
