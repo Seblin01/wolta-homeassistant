@@ -68,7 +68,6 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_SOC,
     CONF_SOC_ABSENT,
-    CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -776,10 +775,14 @@ _ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
 # empty and energy_stream_no_statistics never sees it. Same threshold and minimum
 # window as energy_empty below.
 _ISSUE_STATISTICS_MISSING = "statistics_missing"
-# A graded battery plant that has no state-of-charge sensor picked. The field is optional
-# and was only added in v0.40.0, so every earlier install has it empty without ever having
-# been asked. Fixable: the repair opens the picker (or records a no).
-_ISSUE_SOC_MISSING = "soc_missing"
+# A graded battery plant that has no state-of-charge sensor picked and has not ticked
+# "I have no SoC sensor" (CONF_SOC_ABSENT). The grade needs the SoC to be comparable, so
+# the answer is required, not offered. Fixable: the repair opens the picker or the box.
+_ISSUE_SOC_REQUIRED = "soc_required"
+# The id of the earlier, ignorable form. HA keeps dismissed_version when an existing id is
+# re-created, so an owner who ignored it would never see the requirement: the new issue has
+# its own id and this one is deleted on every evaluation.
+_ISSUE_SOC_MISSING_LEGACY = "soc_missing"
 # The owner's grid fee is above the server's plausibility limit (results.tariff_check, server
 # api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
 # energy tax is counted twice. Non-fixable: only the owner knows the right figure.
@@ -2476,7 +2479,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             results = await self.client.results(self.token)
             await self._clear_failure()
             self._evaluate_measured_params(results)
-            self._evaluate_soc_missing_issue(results)
+            self._evaluate_soc_required_issue(results)
             self._evaluate_grid_fee_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
@@ -3799,15 +3802,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
 
-    def _evaluate_soc_missing_issue(self, results: dict) -> None:
-        """Nudge to pick a state-of-charge sensor (README: State of charge monitoring).
+    def _evaluate_soc_required_issue(self, results: dict) -> None:
+        """Require a state-of-charge sensor, or the "no SoC sensor" answer (spec 4.2).
 
         Fires only where the question has an answer and is not noise: the server knows the
         plant has a battery (stamp measured/nameplate - not none, not still being measured,
-        not a stamp we never received), the grade is settled (a new install was offered the
-        field in setup a moment ago), no sensor is picked and the user has not said no.
+        not a stamp we never received), the grade is settled (a new install was asked in
+        setup a moment ago), and neither a sensor is picked nor CONF_SOC_ABSENT is set.
+        The old ignore flag is not read: it answered an offer, not this requirement.
         Never in view-only mode: that entry uploads nothing, and the plant's binding
         delivers its own SoC."""
+        # Before the grade check: a grade-less cycle must not leave the old issue behind.
+        ir.async_delete_issue(
+            self.hass, DOMAIN, f"{_ISSUE_SOC_MISSING_LEGACY}_{self.config_entry.entry_id}")
         betyg = results.get("betyg")
         if not isinstance(betyg, dict) or not betyg:
             # No grade block says nothing about the plant (a recompute in flight, an
@@ -3817,11 +3824,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             not betyg.get("preliminary")
             and not self._view_only
             and not self._soc_entities
-            and not self.config_entry.data.get(CONF_SOC_ISSUE_IGNORED)
+            and not self.config_entry.data.get(CONF_SOC_ABSENT)
             and self._battery_status in (BATTERY_STATUS_MEASURED, BATTERY_STATUS_NAMEPLATE)
         )
         self._set_measured_issue(
-            _ISSUE_SOC_MISSING, fire=fire, translation_key=_ISSUE_SOC_MISSING,
+            _ISSUE_SOC_REQUIRED, fire=fire, translation_key=_ISSUE_SOC_REQUIRED,
             placeholders={}, data={})
 
     def _evaluate_grid_fee_issue(self, results: dict) -> None:
