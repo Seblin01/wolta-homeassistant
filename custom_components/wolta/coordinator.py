@@ -45,6 +45,8 @@ from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_COST_SEK,
@@ -868,6 +870,10 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+    # The control system is declared on wolta.se and can be switched and backdated there.
+    # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
+    # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
+    CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
 )
 
 

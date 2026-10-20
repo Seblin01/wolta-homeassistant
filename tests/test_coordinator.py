@@ -1303,6 +1303,24 @@ async def test_profile_sync_updates_entry_data(hass: HomeAssistant, mock_entry):
 
 
 @pytest.mark.asyncio
+async def test_profile_sync_mirrors_control_system(hass: HomeAssistant, mock_entry):
+    """The control system is changed on wolta.se (a declared switch). entry.data must follow:
+    reauth echoes entry.data, and an install-time value there used to rewrite the owner's
+    latest timeline entry on the server (Wolta B4, 2026-10-20). The name follows its
+    "other" and is dropped when the server has none."""
+    mock_entry.data = {**mock_entry.data, "control_system": "other",
+                       "control_system_name": "Egen styrning"}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "control_system": "emhass", "control_system_name": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["control_system"] == "emhass"
+    assert "control_system_name" not in kwargs["data"]
+
+
+@pytest.mark.asyncio
 async def test_profile_sync_zone_change_updates_title(hass: HomeAssistant, mock_entry):
     client = _mock_client()
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "zone": "SE4"})
@@ -2764,13 +2782,14 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_BATTERY_KW, CONF_BATTERY_KWH, CONF_COST_SEK, CONF_EFF,
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
-        CONF_SURCHARGE_ORE, CONF_ZONE,
+        CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
     )
 
     assert _PROFILE_SYNC_KEYS == (
         CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+        CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
     )
     assert CONF_FLEX_COMPENSATION not in _PROFILE_SYNC_KEYS
 

@@ -1082,7 +1082,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
                     # Entries from before v0.29.0 have no stored field -> None is
                     # OMITTED by the client, and the backend (>= 0.79.0) preserves the
-                    # stored value on omission instead of clobbering it to null.
+                    # stored value on omission instead of clobbering it to null. Since
+                    # v0.50.0 the value is mirrored from the server (coordinator
+                    # _PROFILE_SYNC_KEYS), and the backend (>= 0.110.1) only uses it to
+                    # fill an empty column - it never rewrites the owner's declaration.
                     control_system=entry_data.get(CONF_CONTROL_SYSTEM),
                     control_system_name=entry_data.get(CONF_CONTROL_SYSTEM_NAME),
                 )
