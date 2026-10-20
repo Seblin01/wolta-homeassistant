@@ -1238,3 +1238,61 @@ def test_battery_value_ignores_reversed_measurement():
     assert _battery_value(results) == 1500.0
     results["betyg"]["battery_direction"]["state"] = "verified"
     assert _measured_battery_value(results) == 2000.0
+
+
+# ---------------------------------------------------------------------------
+# Data mode (backend spec 2026-10-16 §8.2, R14). After the flip the grade card's own
+# `annual` and holistic.measured_period_sek follow the data benchmark's period, while
+# the economics stay anchored on the legacy window, carried in the public block
+# betyg.economy = {annual, measured_period_sek, score_on}. The server's anchor
+# (warm.measured_battery_annual_from) reads that block first; the sensor must read in
+# the same order or the two surfaces publish different battery values.
+# ---------------------------------------------------------------------------
+
+
+def _data_mode_betyg(**economy) -> dict:
+    return {
+        "holistic": {"score_on": 0.9, "measured_period_sek": 100.0},
+        "annual": {"basis": "extrapolated", "factor": 3.0},
+        "economy": {
+            "annual": {"basis": "extrapolated", "factor": 2.0},
+            "measured_period_sek": 300.0,
+            "score_on": 0.7,
+            **economy,
+        },
+    }
+
+
+def test_measured_battery_value_reads_economy_block_in_data_mode():
+    """economy present -> its period x its factor (300 x 2), never the grade card's
+    own figures (100 x 3) and never a mix of the two."""
+    assert _measured_battery_value({"betyg": _data_mode_betyg()}) == pytest.approx(600.0)
+
+
+def test_measured_battery_value_economy_gate_does_not_fall_back_to_top_level():
+    """The gate applies to the economy block itself: economy.annual missing means the
+    legacy window is too short to annualise, and the top-level annual (the benchmark's
+    period) must not stand in for it - the server returns no anchor in that case."""
+    assert _measured_battery_value({"betyg": _data_mode_betyg(annual=None)}) is None
+    assert _measured_battery_value({"betyg": _data_mode_betyg(score_on=None)}) is None
+
+
+def test_measured_battery_value_economy_respects_reversed_direction():
+    betyg = {**_data_mode_betyg(), "battery_direction": {"state": "reversed"}}
+    assert _measured_battery_value({"betyg": betyg}) is None
+
+
+def test_optimeringsbetyg_exposes_benchmark_class():
+    """The backend's public benchmark block (method, comparable, reasons) is derived in
+    one place server-side and handed over verbatim, like external_control."""
+    block = {"method": "data", "comparable": False, "reasons": ["no_soc"]}
+    results = {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "benchmark": block}}
+    attrs = _sensor("optimeringsbetyg", results).extra_state_attributes
+    assert attrs.get("benchmark") == block
+
+
+def test_optimeringsbetyg_omits_benchmark_when_absent():
+    """Legacy mode and older caches carry no benchmark block -> no attribute, no error."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    assert "benchmark" not in s.extra_state_attributes
+    assert s.native_value is not None

@@ -109,9 +109,27 @@ def test_soc_missing_repair_translates_every_error_its_flow_returns(lang: str) -
         assert errors[key] == data["config"]["error"][key], key
 
 
+# Data mode (backend spec 2026-10-16): the grade is computed against the capacity and
+# efficiency measured from the state of charge, and a plant without one gets a grade of
+# its own that is not compared with others. The old "does not change your grade" was true
+# only while the SoC was merely collected; it must not come back.
+_SOC_STALE_SV = ("påverkar inte ditt betyg", "Ändrar inte ditt betyg")
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_soc_texts_no_longer_claim_the_grade_is_unaffected(lang: str) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    texts = [data["issues"]["soc_missing"]["fix_flow"]["step"]["init"]["description"],
+             data["config"]["step"]["entities"]["data_description"]["soc_entities"],
+             data["config"]["step"]["reconfigure"]["data_description"]["soc_entities"]]
+    for text in texts:
+        assert "not change your grade" not in text, text
+        assert not any(n in text for n in _SOC_STALE_SV), text
+
+
 @pytest.mark.parametrize("lang, needle", [
-    ("en", "does not change your grade"), ("sv", "påverkar inte ditt betyg")])
-def test_soc_missing_repair_says_it_does_not_change_the_grade(lang: str, needle: str) -> None:
+    ("en", "not compared with other"), ("sv", "inte jämförs med andra")])
+def test_soc_missing_repair_says_what_happens_without_it(lang: str, needle: str) -> None:
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
     text = data["issues"]["soc_missing"]["fix_flow"]["step"]["init"]["description"]
     assert needle in text, text

@@ -144,7 +144,7 @@
         "step": {
           "init": {
             "title": "Lägg till sensorn för batteriets laddningsnivå",
-            "description": "Wolta kan samla in batteriets laddningsnivå (nivån i %) tillsammans med energidatan. Den är underlag för att längre fram mäta batteriets verkliga kapacitet ur data. Än så länge samlas den bara in, och den påverkar inte ditt betyg eller ekonomin.\n\nVäljer du en sensor laddas dess historik (upp till 365 dygn) upp med nästa ordinarie uppladdning; energidatan skickas inte om. Det här är frivilligt. Vill du inte, välj det andra alternativet så kommer meddelandet inte tillbaka.",
+            "description": "Wolta mäter batteriets verkliga kapacitet och verkningsgrad ur laddningsnivån (nivån i %), och betyget räknas mot de uppmätta talen. Utan den räknas betyget på de uppgifter du angett och blir ett eget betyg som inte jämförs med andra anläggningar. Ekonomin räknar på dina uppgifter i båda fallen.\n\nVäljer du en sensor laddas dess historik (upp till 365 dygn) upp med nästa ordinarie uppladdning; energidatan skickas inte om. Det här är frivilligt. Vill du inte, välj det andra alternativet så kommer meddelandet inte tillbaka.",
             "menu_options": {
               "pick_sensors": "Välj sensor för laddningsnivå",
               "ignore": "Samla inte in laddningsnivå"
@@ -312,7 +312,7 @@
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
+          "soc_entities": "Valfri. Låter Wolta mäta batteriets verkliga kapacitet och verkningsgrad, som betyget räknas mot. Utan den jämförs betyget inte med andra anläggningar. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "reauth_confirm": {
@@ -377,7 +377,7 @@
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta samla in batteriets laddningsnivå för att senare mäta dess kapacitet. Ändrar inte ditt betyg. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
+          "soc_entities": "Valfri. Låter Wolta mäta batteriets verkliga kapacitet och verkningsgrad, som betyget räknas mot. Utan den jämförs betyget inte med andra anläggningar. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
         }
       },
       "view_only": {

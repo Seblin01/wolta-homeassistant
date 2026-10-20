@@ -151,16 +151,31 @@ def _measured_battery_value(results: dict) -> float | None:
     Reversed charge/discharge fields (backend spec 2026-10-12): when the server reports
     battery_direction.state == "reversed" the measured value was measured the wrong way
     round, so this returns None and _battery_value falls back to the modelled decision
-    value - the same figure the economics then use."""
+    value - the same figure the economics then use.
+
+    Data mode (backend spec 2026-10-16 §8.2, R14): once the grade is computed against the
+    data-driven benchmark, the grade card's own `annual` and holistic.measured_period_sek
+    follow the benchmark's period, while the economics stay anchored on the legacy window.
+    The backend carries those legacy figures in the public block betyg.economy =
+    {annual, measured_period_sek, score_on}, and its own anchor
+    (warm.measured_battery_annual_from) reads that block first. This reads in the same
+    order, with the same gate applied to the block itself - never a mix of the two, and no
+    fallback to the top level when the block is present but immature. Without the block
+    (legacy mode, older caches) the top-level fields apply as before."""
     betyg = results.get("betyg") or {}
     direction = betyg.get("battery_direction")
     if isinstance(direction, dict) and direction.get("state") == "reversed":
         return None
-    holistic = betyg.get("holistic") or {}
-    annual = betyg.get("annual")
-    if not annual or annual.get("factor") is None or holistic.get("score_on") is None:
+    economy = betyg.get("economy")
+    if isinstance(economy, dict):
+        annual, score_on, period = (economy.get("annual"), economy.get("score_on"),
+                                    economy.get("measured_period_sek"))
+    else:
+        holistic = betyg.get("holistic") or {}
+        annual, score_on, period = (betyg.get("annual"), holistic.get("score_on"),
+                                    holistic.get("measured_period_sek"))
+    if not annual or annual.get("factor") is None or score_on is None:
         return None
-    period = holistic.get("measured_period_sek")
     return round(period * annual["factor"], 2) if period is not None else None
 
 
@@ -250,6 +265,20 @@ def _external_control_attr(results: dict) -> dict[str, Any]:
     if ext is None:
         return {}
     return {"external_control": ext}
+
+
+def _benchmark_attr(results: dict) -> dict[str, Any]:
+    """benchmark (backend spec 2026-10-16 §8.2): the public block on results.betyg,
+    {method, comparable, reasons}, saying whether the grade is compared with other plants
+    (comparable) or is a grade of the plant's own, and why. Derived in one place by the
+    backend worker and handed over verbatim - the sensor never re-derives the class.
+    Present only in data mode; omitted entirely (not None) in legacy mode and for every
+    payload cached before the flip, the same absent-vs-None contract as
+    _external_control_attr."""
+    block = (results.get("betyg") or {}).get("benchmark")
+    if block is None:
+        return {}
+    return {"benchmark": block}
 
 
 def _flex_compensation_attr(results: dict) -> dict[str, Any]:
@@ -382,6 +411,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
                 **_measured_params_attr(data.results),
                 **_external_control_attr(data.results),
                 **_flex_compensation_attr(data.results),
+                **_benchmark_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}
