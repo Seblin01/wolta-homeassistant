@@ -6432,3 +6432,54 @@ async def test_copies_issue_untouched_on_malformed_listing(hass, mock_entry):
         after = ir.async_get(hass).async_get_issue(DOMAIN, _COPIES_ISSUE_ID)
         assert after is not None and after.data == before.data
         assert c._state["copies_seen_ids"] == [12]
+
+
+# ---------------------------------------------------------------------------
+# grid_fee_implausible: the owner's grid fee is above the server's plausibility limit
+# (server results.tariff_check, api 0.110.0). Likely VAT and energy tax included, which
+# Wolta adds itself - the energy tax is then counted twice.
+# ---------------------------------------------------------------------------
+
+_GRID_ISSUE_ID = "grid_fee_implausible_test_entry_id"
+
+
+def _tariff_check(flag: bool) -> dict:
+    return {"tariff_check": {"grid_var_implausible": flag, "grid_var_limit_ore": 60.0}}
+
+
+@pytest.mark.asyncio
+async def test_grid_fee_implausible_fires_from_the_server_flag(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_tariff_check(True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == "grid_fee_implausible"
+    assert issue.is_fixable is False
+    # The limit travels from the server; the client never holds its own.
+    assert issue.translation_placeholders == {"limit": "60"}
+
+
+@pytest.mark.asyncio
+async def test_grid_fee_implausible_clears_when_the_server_says_plausible(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_tariff_check(True))
+    c._evaluate_grid_fee_issue(_tariff_check(False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_fee_implausible_left_alone_without_the_block(hass, mock_entry):
+    """An older server sends no tariff_check: say nothing new, change nothing open."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_tariff_check(True))
+    c._evaluate_grid_fee_issue({})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_grid_fee_implausible_not_in_view_only(hass, mock_entry):
+    """View-only: the plant's tariff is set on wolta.se, not under Configure here."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._view_only = True
+    c._evaluate_grid_fee_issue(_tariff_check(True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None

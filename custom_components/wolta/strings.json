@@ -138,6 +138,10 @@
         }
       }
     },
+    "grid_fee_implausible": {
+      "title": "Wolta: your grid fee looks too high",
+      "description": "The grid fee you entered is above {limit} öre (or cents) per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Tariffs. If your network operator really charges this much, you can leave it as it is."
+    },
     "soc_missing": {
       "title": "Optional: add your battery's state-of-charge sensor to Wolta",
       "fix_flow": {
@@ -479,7 +483,7 @@
               "export_extra_pct": "Export compensation, percent of spot (% of spot)"
             },
             "data_description": {
-              "grid_var_ore": "Your variable grid fee, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
+              "grid_var_ore": "Your variable grid fee (transfer fee), excluding VAT and energy tax, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Wolta adds VAT and energy tax itself. Clear the field to revert to your country's standard tariff.",
               "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
               "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff.",
               "grid_var_pct": "The variable part of your grid fee as a percent of the spot price. Clear the field to remove the percent component.",
