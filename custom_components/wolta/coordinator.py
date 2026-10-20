@@ -777,6 +777,10 @@ _ISSUE_STATISTICS_MISSING = "statistics_missing"
 # and was only added in v0.40.0, so every earlier install has it empty without ever having
 # been asked. Fixable: the repair opens the picker (or records a no).
 _ISSUE_SOC_MISSING = "soc_missing"
+# The owner's grid fee is above the server's plausibility limit (results.tariff_check, server
+# api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
+# energy tax is counted twice. Non-fixable: only the owner knows the right figure.
+_ISSUE_GRID_FEE_IMPLAUSIBLE = "grid_fee_implausible"
 # The server's archive of replaced rows is full (429 on open): a correction of the stored
 # history waits until Retry-After. Non-fixable, one per entry; the translation key says
 # which correction waits (_direction / _entities), the placeholder when it is retried.
@@ -2463,6 +2467,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             await self._clear_failure()
             self._evaluate_measured_params(results)
             self._evaluate_soc_missing_issue(results)
+            self._evaluate_grid_fee_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
                 datetime.fromisoformat(last_uploaded_str)
@@ -3808,6 +3813,30 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._set_measured_issue(
             _ISSUE_SOC_MISSING, fire=fire, translation_key=_ISSUE_SOC_MISSING,
             placeholders={}, data={})
+
+    def _evaluate_grid_fee_issue(self, results: dict) -> None:
+        """Warn when the server finds the owner's grid fee implausible (results.tariff_check).
+
+        The server owns both the flag and the limit (simulate/tariff.grid_var_implausible);
+        this only shows them, so the integration never holds a threshold of its own. A
+        response without the block (a server before api 0.110.0) leaves whatever is open as
+        it is. Never in view-only mode: there the plant's tariff is set on wolta.se, not
+        under Configure here, so the advice would point at a field the user does not have."""
+        check = results.get("tariff_check")
+        if not isinstance(check, dict):
+            return
+        issue_id = f"{_ISSUE_GRID_FEE_IMPLAUSIBLE}_{self.config_entry.entry_id}"
+        if not check.get("grid_var_implausible") or self._view_only:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        limit = check.get("grid_var_limit_ore")
+        ir.async_create_issue(
+            self.hass, DOMAIN, issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_GRID_FEE_IMPLAUSIBLE,
+            translation_placeholders={"limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
+        )
 
     @staticmethod
     def _direction_reversed(betyg: dict) -> bool:

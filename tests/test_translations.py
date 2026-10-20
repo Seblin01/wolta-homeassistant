@@ -180,3 +180,18 @@ def test_replacement_waiting_says_nothing_needs_to_be_done(
         text = _load(path)["issues"][key]["description"]
         for needle in needles:
             assert needle in text, (key, needle)
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_grid_fee_implausible_issue_names_the_limit(path: Path) -> None:
+    issue = _load(path)["issues"]["grid_fee_implausible"]
+    assert issue["title"]
+    assert "{limit}" in issue["description"]
+
+
+@pytest.mark.parametrize("lang, needle", [
+    ("en", "excluding VAT and energy tax"), ("sv", "exklusive moms och energiskatt")])
+def test_grid_fee_field_says_without_vat_and_energy_tax(lang: str, needle: str) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    text = data["options"]["step"]["settings"]["sections"]["tariffs"]["data_description"]["grid_var_ore"]
+    assert needle in text, text
