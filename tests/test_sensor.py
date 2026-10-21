@@ -1296,3 +1296,107 @@ def test_optimeringsbetyg_omits_benchmark_when_absent():
     s = _sensor("optimeringsbetyg", RESULTS_FULL)
     assert "benchmark" not in s.extra_state_attributes
     assert s.native_value is not None
+
+
+# ---------------------------------------------------------------------------
+# Grade window (backend spec 2026-10-21 §4.5): the grade sensor shows the owner's
+# window grade when results.betyg.window exists, else the comparison grade; a second
+# sensor always shows the comparison grade with its percentile.
+# ---------------------------------------------------------------------------
+
+_WINDOW = {
+    "score_on": 0.72,
+    "score_pct": 72.0,
+    "period_start": "2025-03-01",
+    "period_end": "2025-05-31",
+    "preliminary": False,
+    "n_days": 92,
+    "start_date": "2025-03-01",
+    "rolling_days": None,
+    "clipped": False,
+}
+
+
+def _with_window(window: dict | None = None) -> dict:
+    return {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "window": window or _WINDOW}}
+
+
+def test_grade_sensor_prefers_window():
+    """window.score_on (0.72) wins over holistic.score_on (0.82); the percentile belongs
+    to the comparison grade and is therefore absent while the window grade is shown."""
+    s = _sensor("optimeringsbetyg", _with_window())
+    assert s.native_value == pytest.approx(72.0, abs=0.01)
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "window"
+    assert attrs["period_start"] == "2025-03-01"
+    assert attrs["period_end"] == "2025-05-31"
+    assert "peer_percentile" not in attrs
+    assert "peer_n" not in attrs
+
+
+def test_grade_sensor_window_maturity_follows_the_window():
+    """preliminary / n_days describe the grade shown, so they come from the window."""
+    window = {**_WINDOW, "preliminary": True, "n_days": 12}
+    attrs = _sensor("optimeringsbetyg", _with_window(window)).extra_state_attributes
+    assert attrs["preliminary"] is True
+    assert attrs["n_days"] == 12
+
+
+def test_grade_sensor_window_available_without_comparison_grade():
+    """A window grade stands on its own: available even when holistic is missing."""
+    results = {**RESULTS_FULL, "betyg": {"window": _WINDOW}}
+    s = _sensor("optimeringsbetyg", results)
+    assert s.available is True
+    assert s.native_value == pytest.approx(72.0, abs=0.01)
+
+
+def test_grade_sensor_window_without_score_falls_back_to_comparison():
+    """A window block with no score_on is not a grade: fall back, basis comparison."""
+    s = _sensor("optimeringsbetyg", _with_window({**_WINDOW, "score_on": None}))
+    assert s.native_value == pytest.approx(82.0, abs=0.01)
+    assert s.extra_state_attributes["basis"] == "comparison"
+
+
+def test_grade_sensor_comparison_without_window():
+    """No window block (legacy mode, no owner window): the comparison grade, with its
+    percentile, labelled as such."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    assert s.native_value == pytest.approx(82.0, abs=0.01)
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "comparison"
+    assert attrs["peer_percentile"] == 68
+    assert attrs["peer_n"] == 312
+    assert "period_start" not in attrs
+    assert "period_end" not in attrs
+
+
+def test_grade_sensor_keeps_benchmark_attribute_with_window():
+    block = {"method": "data", "comparable": True, "reasons": []}
+    results = _with_window()
+    results["betyg"]["benchmark"] = block
+    assert _sensor("optimeringsbetyg", results).extra_state_attributes["benchmark"] == block
+
+
+def test_comparison_sensor_always_comparison():
+    """The comparison sensor ignores the window: holistic.score_on x 100 with the
+    percentile attributes."""
+    results = {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "window": _WINDOW}}
+    results["betyg"]["holistic"] = {**results["betyg"]["holistic"], "score_on": 0.61}
+    s = _sensor("jamforelsebetyg", results)
+    assert s.native_value == pytest.approx(61.0, abs=0.01)
+    assert s.native_unit_of_measurement == "%"
+    attrs = s.extra_state_attributes
+    assert attrs["peer_percentile"] == 68
+    assert attrs["peer_n"] == 312
+    assert s.unique_id == f"{ENTRY_ID}_jamforelsebetyg"
+
+
+def test_comparison_sensor_unavailable_without_comparison_grade():
+    results = {**RESULTS_FULL, "betyg": {"window": _WINDOW}}
+    s = _sensor("jamforelsebetyg", results)
+    assert s.available is False
+
+
+def test_comparison_sensor_translation_key():
+    description = next(d for d in SENSOR_DESCRIPTIONS if d.key == "jamforelsebetyg")
+    assert description.translation_key == "jamforelsebetyg"

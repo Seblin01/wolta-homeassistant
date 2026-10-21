@@ -567,6 +567,9 @@
       "optimeringsbetyg": {
         "name": "Optimisation grade"
       },
+      "jamforelsebetyg": {
+        "name": "Comparison grade"
+      },
       "batterivarde_ar": {
         "name": "Battery value per year"
       },

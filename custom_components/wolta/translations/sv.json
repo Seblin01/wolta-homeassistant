@@ -567,6 +567,9 @@
       "optimeringsbetyg": {
         "name": "Optimeringsbetyg"
       },
+      "jamforelsebetyg": {
+        "name": "Jämförelsebetyg"
+      },
       "batterivarde_ar": {
         "name": "Batterivärde per år"
       },
