@@ -119,12 +119,40 @@ def _comparison_available(results: dict) -> bool:
     return _comparison_score(results) is not None
 
 
-def _grade_basis_attr(results: dict) -> dict[str, Any]:
-    """Which grade the grade sensor shows (basis: window | comparison) and, for a window
-    grade, the dates it actually covers. The percentile and its sample size belong to the
-    comparison grade only, so they are added here only for basis == comparison. preliminary
-    and n_days follow the grade shown: the window's own when the window grade is shown."""
+def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
+    """Attributes that describe the COMPARISON grade (holistic.score_on): its percentile and
+    sample size, its period (betyg.period_start/period_end at the top level of the betyg
+    block), its maturity, and the details of how it was computed (annual basis, measured
+    period figures, price skill, components, external control, benchmark class). Rule:
+    an attribute that describes a specific grade follows that grade, so these live on the
+    comparison grade sensor always, and on the grade sensor only while it shows the
+    comparison grade."""
     betyg = results.get("betyg") or {}
+    peer = betyg.get("peer") or {}
+    holistic = betyg.get("holistic") or {}
+    return {
+        "peer_percentile": peer.get("percentile"),
+        "peer_n": peer.get("n"),
+        "period_start": betyg.get("period_start"),
+        "period_end": betyg.get("period_end"),
+        "preliminary": betyg.get("preliminary"),
+        "n_days": betyg.get("n_days"),
+        "annual_basis": (betyg.get("annual") or {}).get("basis"),
+        "measured_period_sek": holistic.get("measured_period_sek"),
+        "measured_wear_sek": holistic.get("measured_wear_sek"),
+        "price_skill": betyg.get("price_skill"),
+        "components": betyg.get("components"),
+        **_external_control_attr(results),
+        **_benchmark_attr(results),
+    }
+
+
+def _grade_basis_attr(results: dict) -> dict[str, Any]:
+    """Which grade the grade sensor shows (basis: window | comparison) and the attributes of
+    that grade. A window grade carries only its own dates and maturity; everything else that
+    describes a grade (percentile, annual basis, measured figures, components, benchmark
+    class ...) belongs to the comparison grade and is added only for basis == comparison
+    (it is always on the comparison grade sensor)."""
     window = _window_block(results)
     if window is not None:
         return {
@@ -134,14 +162,7 @@ def _grade_basis_attr(results: dict) -> dict[str, Any]:
             "preliminary": window.get("preliminary"),
             "n_days": window.get("n_days"),
         }
-    peer = betyg.get("peer") or {}
-    return {
-        "basis": "comparison",
-        "peer_percentile": peer.get("percentile"),
-        "peer_n": peer.get("n"),
-        "preliminary": betyg.get("preliminary"),
-        "n_days": betyg.get("n_days"),
-    }
+    return {"basis": "comparison", **_comparison_grade_attrs(results)}
 
 
 def _decision_available(results: dict) -> bool:
@@ -437,28 +458,13 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         attr_fn=lambda data: (
             {
                 **_grade_basis_attr(data.results),
-                "annual_basis": (
-                    (data.results.get("betyg") or {}).get("annual") or {}
-                ).get("basis"),
-                "measured_period_sek": (
-                    (data.results.get("betyg") or {}).get("holistic") or {}
-                ).get("measured_period_sek"),
-                "measured_wear_sek": (
-                    (data.results.get("betyg") or {}).get("holistic") or {}
-                ).get("measured_wear_sek"),
-                "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
-                "components": (data.results.get("betyg") or {}).get("components"),
-                # Preliminary grade (backend api 0.43.0): scored from 7 days, flagged until
-                # 30. An attribute (not its own sensor) so dashboards/automations can mark
-                # the uncertainty without the grade entity changing identity. Set by
-                # _grade_basis_attr above, from the grade that is shown.
+                # Owner-field attributes (the owner's inputs vs the data, not a grade) stay
+                # whichever grade is shown.
                 **_applied_tariff_attr(data.results),
                 **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),
                 **_measured_params_attr(data.results),
-                **_external_control_attr(data.results),
                 **_flex_compensation_attr(data.results),
-                **_benchmark_attr(data.results),
             }
             if _betyg_available(data.results)
             else {"reason": "not enough data for a grade yet"}
@@ -475,15 +481,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_comparison_available,
         attr_fn=lambda data: (
             {
-                "peer_percentile": (
-                    (data.results.get("betyg") or {}).get("peer") or {}
-                ).get("percentile"),
-                "peer_n": (
-                    (data.results.get("betyg") or {}).get("peer") or {}
-                ).get("n"),
-                "preliminary": (data.results.get("betyg") or {}).get("preliminary"),
-                "n_days": (data.results.get("betyg") or {}).get("n_days"),
-                **_benchmark_attr(data.results),
+                **_comparison_grade_attrs(data.results),
             }
             if _comparison_available(data.results)
             else {"reason": "not enough data for a grade yet"}
