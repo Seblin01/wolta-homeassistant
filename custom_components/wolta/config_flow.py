@@ -720,6 +720,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             defaults = user_input
         else:
             defaults = await _energy_dashboard_defaults(self.hass)
+            # Linking an existing profile: start the "no SoC sensor" box on the owner's
+            # answer from wolta.se, so they are not asked a question they already answered.
+            if self._link_profile is not None and self._link_profile.get(CONF_SOC_ABSENT):
+                defaults = {**defaults, CONF_SOC_ABSENT: True}
 
         schema = vol.Schema(
             {
@@ -916,8 +920,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             defaults[CONF_SOC_ABSENT] = bool(user_input.get(CONF_SOC_ABSENT, False))
             if errors.get("base") == "cannot_connect":
                 # The soc_absent PATCH failed after the whole form validated: keep every
-                # choice, so a retry does not silently drop the other edits.
-                defaults.update({k: user_input.get(k) for k in defaults if k in user_input})
+                # choice, so a retry does not silently drop the other edits. HA leaves a
+                # cleared Optional picker out of user_input, so a missing key means "cleared",
+                # not "unchanged": read every field from the submit, not only present keys.
+                defaults.update({k: user_input.get(k) for k in defaults if k != CONF_SOC_ABSENT})
         schema = vol.Schema(
             {
                 vol.Required(CONF_BATT_IN, default=defaults[CONF_BATT_IN]): _energy_entity_selector(),

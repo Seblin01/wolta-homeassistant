@@ -4867,3 +4867,43 @@ async def test_reauth_new_token_rejects_read_link(hass: HomeAssistant) -> None:
 
     assert result["errors"] == {"profile_input": "link_is_read_link"}
     mock_client.adopt_profile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_patch_failure_keeps_a_cleared_picker_cleared(hass: HomeAssistant) -> None:
+    """HA leaves a cleared Optional picker out of user_input. After a failed soc_absent
+    PATCH the re-shown form must keep it cleared, or the retry silently saves the stored
+    sensor back (code review 2026-10-21)."""
+    from custom_components.wolta.api import WoltaApiError
+
+    # External control uses suggested_value (no default=), so clearing it really omits
+    # the key; the solar field has default= and cannot be cleared in the form at all.
+    entry = _entry_without_answer(hass, **{CONF_EXTERNAL_CONTROL: "binary_sensor.old_flex"})
+    mock_client = _mock_client()
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+    streams = _reconfigure_streams(**{CONF_SOC_ABSENT: True})
+    streams.pop(CONF_EXTERNAL_CONTROL, None)
+    result = await _reconfigure(hass, entry, mock_client, streams)
+    assert result["errors"] == {"base": "cannot_connect"}
+    marker = _schema_marker(result, CONF_EXTERNAL_CONTROL)
+    assert not (marker.description or {}).get("suggested_value")
+
+
+@pytest.mark.asyncio
+async def test_link_flow_box_starts_on_the_servers_answer(hass: HomeAssistant) -> None:
+    """An owner who already answered "no SoC sensor" on wolta.se sees the box ticked when
+    linking, instead of being asked again (code review 2026-10-21)."""
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value={**LINK_PROFILE, CONF_SOC_ABSENT: True})
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+
+    assert result["step_id"] == "entities"
+    assert _schema_marker(result, CONF_SOC_ABSENT).default() is True

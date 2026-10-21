@@ -65,6 +65,7 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_SOC,
     CONF_SOC_ABSENT,
+    CONTROL_SYSTEMS,
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
@@ -77,15 +78,16 @@ from .control_system_prefill import (
     control_system_name_selector,
     control_system_selector,
 )
-from .coordinator import desired_invert_intervals, with_desired_intervals
+from .coordinator import (
+    _ISSUE_CONTROL_SYSTEM_REQUIRED,
+    _ISSUE_SOC_REQUIRED,
+    desired_invert_intervals,
+    with_desired_intervals,
+)
 from .soc_picker import soc_candidates, soc_requirement_error
 
 _LOGGER = logging.getLogger(__name__)
 
-# Issue id prefixes the coordinator raises (coordinator._ISSUE_SOC_REQUIRED and
-# coordinator._ISSUE_CONTROL_SYSTEM_REQUIRED).
-_ISSUE_SOC_REQUIRED = "soc_required"
-_ISSUE_CONTROL_SYSTEM_REQUIRED = "control_system_required"
 
 
 def _as_list(value: Any) -> list[str]:
@@ -386,7 +388,9 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
         """The control system the form starts on: what the entry has (an "other" that only
         lacks its name), else onboarding's suggestion, else nothing (no guess)."""
         current = self._entry.data.get(CONF_CONTROL_SYSTEM)
-        if current:
+        # Same guard as the suggestion: an id this client does not list (added on the
+        # server later) would be a default outside the selector's options, which HA rejects.
+        if current in {c for c, _ in CONTROL_SYSTEMS}:
             return current
         if not self._suggestion_looked_up:
             self._suggestion_looked_up = True
@@ -430,7 +434,9 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
                 ir.async_delete_issue(
                     self.hass, DOMAIN,
                     f"{_ISSUE_CONTROL_SYSTEM_REQUIRED}_{self._entry.entry_id}")
-                await coordinator.async_request_refresh()
+                # Not awaited: entry.data already holds the answer and the issue is gone, so
+                # the dialog need not wait for a whole update cycle (upload, profile, results).
+                self.hass.async_create_task(coordinator.async_request_refresh())
                 return self.async_create_entry(title="", data={})
         default = await self._default_choice()
         cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=default)

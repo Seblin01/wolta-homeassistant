@@ -190,7 +190,7 @@
               "control_system_name": "Control system name (when Other)"
             },
             "data_description": {
-              "control_system": "Prefilled from your battery sensors' integration when Wolta recognises it. Change it if it is wrong.",
+              "control_system": "Your current choice, or a suggestion from your battery sensors' integration when Wolta recognises it. Change it if it is wrong.",
               "control_system_name": "Required when you pick Other."
             }
           }

@@ -1259,3 +1259,36 @@ async def test_fix_flow_dispatch_control_system_required(hass: HomeAssistant):
     hass.config_entries.async_get_entry = MagicMock(return_value=entry)
     flow = await async_create_fix_flow(hass, "control_system_required_e1", {"entry_id": "e1"})
     assert isinstance(flow, ControlSystemRequiredRepairFlow)
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_unknown_stored_id_is_not_a_default(hass: HomeAssistant):
+    """An id this client does not list (added on the server later) must not become the
+    selector's default, or HA rejects the form (code review 2026-10-21)."""
+    flow, _, _ = _cs_flow(hass, **{CONF_CONTROL_SYSTEM: "brand_new_system"})
+    form = await flow.async_step_pick()
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
+    """The answer is written and the issue closed before the dialog returns; the profile
+    refresh runs afterwards instead of holding the dialog (code review 2026-10-21)."""
+    import asyncio
+
+    flow, _, coordinator = _cs_flow(hass)
+    coordinator.client.patch_profile = AsyncMock()
+    release = asyncio.Event()
+    finished = []
+
+    async def _slow_refresh():
+        await release.wait()
+        finished.append(True)
+
+    coordinator.async_request_refresh = _slow_refresh
+    result = await flow.async_step_pick({CONF_CONTROL_SYSTEM: "tibber"})
+    assert result["type"] == "create_entry"
+    assert finished == []            # the dialog returned while the refresh was still running
+    release.set()
+    await hass.async_block_till_done()
+    assert finished == [True]

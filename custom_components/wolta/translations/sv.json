@@ -190,7 +190,7 @@
               "control_system_name": "Styrsystemets namn (vid Annat)"
             },
             "data_description": {
-              "control_system": "Förifylld ur batterisensorernas integration när Wolta känner igen den. Ändra om den är fel.",
+              "control_system": "Ditt nuvarande val, eller ett förslag ur batterisensorernas integration när Wolta känner igen den. Ändra om den är fel.",
               "control_system_name": "Krävs när du har valt Annat."
             }
           }
