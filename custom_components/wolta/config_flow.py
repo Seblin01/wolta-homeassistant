@@ -36,7 +36,11 @@ from homeassistant.helpers.selector import (
 from homeassistant.util import dt as dt_util
 
 from . import stats
-from .soc_picker import MAX_SOC_SENSORS, soc_error as _soc_error  # noqa: F401 - MAX_SOC_SENSORS re-exported
+from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-exported
+    MAX_SOC_SENSORS,
+    soc_error as _soc_error,
+    soc_requirement_error,
+)
 from .api import (
     WoltaApiClient,
     WoltaApiError,
@@ -44,7 +48,13 @@ from .api import (
     WoltaPlantClaimed,
     WoltaRateLimitError,
 )
-from .control_system_prefill import battery_platforms, suggest_control_system
+from .control_system_prefill import (
+    async_control_system_suggestion,
+    battery_platforms,
+    control_system_name_error,
+    control_system_name_selector,
+    control_system_selector,
+)
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
@@ -79,12 +89,13 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_SHARE,
     CONF_SOC,
+    CONF_SOC_ABSENT,
+    CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_VIEW_ONLY,
     CONF_ZONE,
-    CONTROL_SYSTEMS,
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
@@ -97,7 +108,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# The SoC picker rules live in soc_picker.py, shared with the soc_missing repair.
+# The SoC picker rules live in soc_picker.py, shared with the soc_required repair.
 
 
 # ---------------------------------------------------------------------------
@@ -215,18 +226,6 @@ def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSele
     ]
     return SelectSelector(
         SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
-    )
-
-
-def _control_system_selector() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value=cs_id, label=label)
-                for cs_id, label in CONTROL_SYSTEMS
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
     )
 
 
@@ -477,11 +476,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         if user_input is not None:
-            # "other" without a free-text name gives zero segmentation signal -
-            # same rule as the web guide (lib/guide.ts canAdvance).
-            if (user_input.get(CONF_CONTROL_SYSTEM) == "other"
-                    and not (user_input.get(CONF_CONTROL_SYSTEM_NAME) or "").strip()):
-                errors[CONF_CONTROL_SYSTEM_NAME] = "control_system_name_required"
+            # Same rule as the repair (control_system_prefill.control_system_name_error).
+            name_error = control_system_name_error(
+                user_input.get(CONF_CONTROL_SYSTEM), user_input.get(CONF_CONTROL_SYSTEM_NAME))
+            if name_error:
+                errors[CONF_CONTROL_SYSTEM_NAME] = name_error
             if not errors:
                 self._plant_data = user_input
                 return await self._create_profile_and_entry()
@@ -525,10 +524,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # guess is surfaced by moving that zone to the TOP of the list with a
                 # label (and repeated as text in the description) instead.
                 vol.Required(CONF_ZONE): _zone_selector(guess, lang),
-                cs_field: _control_system_selector(),
-                vol.Optional(CONF_CONTROL_SYSTEM_NAME): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.TEXT)
-                ),
+                cs_field: control_system_selector(),
+                vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
                 # Visas ALLTID (beslut 2026-09-14), förbockad vid misstanke ur
                 # historiken (stadigt ur > in = omkastade batterisensorer).
                 vol.Required(CONF_INVERT_BATTERY, default=invert_default): BooleanSelector(
@@ -573,6 +570,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             (self._plant_data.get(CONF_CONTROL_SYSTEM_NAME) or "").strip() or None
             if control_system == "other" else None
         )
+        # The answer to the SoC requirement (spec 2026-10-20 §4.1), sent either way: a
+        # picked sensor is an answer too ("has one"). The entry stores it because the
+        # server has it from this POST - the coordinator mirrors it from here on.
+        soc_absent = bool(self._entities_data.get(CONF_SOC_ABSENT, False))
 
         try:
             session = async_get_clientsession(self.hass)
@@ -589,6 +590,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 client_plant_id=self._plant_id,
                 control_system=control_system,
                 control_system_name=control_system_name,
+                soc_absent=soc_absent,
             )
         except WoltaApiError as err:
             _LOGGER.error("Failed to create Wolta profile: %s", err)
@@ -616,6 +618,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_INVERT_BATTERY: bool(
                 self._plant_data.get(CONF_INVERT_BATTERY, False)
             ),
+            CONF_SOC_ABSENT: soc_absent,
         }
         if solar:
             entry_data[CONF_SOLAR] = solar
@@ -655,9 +658,20 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 val = user_input.get(key)
                 if not val:  # None, missing, or empty list
                     errors[key] = "required_sensor"
-            soc_error = _soc_error(self.hass, user_input.get(CONF_SOC))
+            soc_error = soc_requirement_error(
+                self.hass, user_input.get(CONF_SOC),
+                absent=bool(user_input.get(CONF_SOC_ABSENT, False)),
+            )
             if soc_error:
                 errors[CONF_SOC] = soc_error
+
+            if not errors and self._link_token is not None:
+                # A linked profile already exists, so no POST carries the answer: PATCH it
+                # when it differs from the server's. Only then may the entry store it -
+                # the coordinator mirrors soc_absent from the server and would wipe a
+                # local-only value on the first sync.
+                await self._async_sync_link_soc_absent(
+                    bool(user_input.get(CONF_SOC_ABSENT, False)), errors)
 
             if not errors:
                 self._entities_data = user_input
@@ -686,18 +700,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                             self.hass,
                             list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
                         )
-                        mapping = await WoltaApiClient(
-                            async_get_clientsession(self.hass)
-                        ).get_control_systems()
-                        suggestion = suggest_control_system(platforms, mapping)
-                        # Backendens lista ligger FÖRE den lokala (se const.CONTROL_SYSTEMS):
-                        # ett id vi inte känner igen som default hade förvalt ett värde som
-                        # SelectSelector själv avvisar → MultipleInvalid i sista
-                        # onboarding-steget, utan väg framåt. Okänt ⇒ inget förslag.
-                        self._cs_suggest = (
-                            suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS}
-                            else None
-                        )
+                        # Okänt id ⇒ inget förslag (se async_control_system_suggestion):
+                        # annars MultipleInvalid i sista onboarding-steget.
+                        self._cs_suggest = await async_control_system_suggestion(
+                            WoltaApiClient(async_get_clientsession(self.hass)), platforms)
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug(
                             "control_system prefill failed; no suggestion", exc_info=True
@@ -714,6 +720,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             defaults = user_input
         else:
             defaults = await _energy_dashboard_defaults(self.hass)
+            # Linking an existing profile: start the "no SoC sensor" box on the owner's
+            # answer from wolta.se, so they are not asked a question they already answered.
+            if self._link_profile is not None and self._link_profile.get(CONF_SOC_ABSENT):
+                defaults = {**defaults, CONF_SOC_ABSENT: True}
 
         schema = vol.Schema(
             {
@@ -767,6 +777,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # Multi-select, but `suggested_value` rather than `default=` for the same
                 # reason as the pickers above: clearing the field must actually clear it,
                 # and a `default=` would re-fill the list from the previous submission.
+                #
+                # Required in effect (a sensor or the box below), but vol.Optional on
+                # purpose: the frontend's checkAllRequiredFields (step-flow-form.ts)
+                # blocks a submit with an empty Required field behind its generic
+                # not_all_required_fields, so our soc_required explanation would never
+                # show. The requirement lives in soc_requirement_error instead.
                 vol.Optional(
                     CONF_SOC,
                     description=(
@@ -774,6 +790,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults.get(CONF_SOC) else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor", multiple=True)),
+                vol.Optional(
+                    CONF_SOC_ABSENT,
+                    default=bool(defaults.get(CONF_SOC_ABSENT, False)),
+                ): bool,
             }
         )
 
@@ -782,6 +802,27 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
         )
+
+    async def _async_sync_link_soc_absent(
+        self, absent: bool, errors: dict[str, str]
+    ) -> None:
+        """PATCH soc_absent on a linked profile when it differs from the server's.
+
+        On success the cached GET snapshot is updated, so _create_linked_entry copies
+        the value the server now holds (and nothing when the server holds none). A
+        failed PATCH sets cannot_connect and the entities form is shown again."""
+        prof = self._link_profile if self._link_profile is not None else {}
+        if absent == bool(prof.get(CONF_SOC_ABSENT)):
+            return
+        try:
+            await WoltaApiClient(async_get_clientsession(self.hass)).patch_profile(
+                self._link_token, soc_absent=absent)
+        except WoltaApiError as err:
+            _LOGGER.error("Failed to patch soc_absent on the linked profile: %s", err)
+            errors["base"] = "cannot_connect"
+            return
+        prof[CONF_SOC_ABSENT] = absent
+        self._link_profile = prof
 
     # ------------------------------------------------------------------
     # Reconfigure: change entity selections without delete + re-add
@@ -804,12 +845,28 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
                 if not user_input.get(key):
                     errors[key] = "required_sensor"
-            soc_error = _soc_error(self.hass, user_input.get(CONF_SOC))
+            soc_absent = bool(user_input.get(CONF_SOC_ABSENT, False))
+            soc_error = soc_requirement_error(
+                self.hass, user_input.get(CONF_SOC), absent=soc_absent)
             if soc_error:
                 errors[CONF_SOC] = soc_error
             if not errors:
                 await self.async_set_unique_id(entry.unique_id)
                 self._abort_if_unique_id_mismatch()
+                # soc_absent is mirrored from the server (coordinator _PROFILE_SYNC_KEYS),
+                # so a changed answer is PATCHed first and stored only once the server has
+                # it. A failed PATCH saves nothing from this submit: the form shows
+                # cannot_connect and the user retries.
+                soc_absent_changed = soc_absent != bool(entry.data.get(CONF_SOC_ABSENT))
+                if soc_absent_changed:
+                    try:
+                        await WoltaApiClient(
+                            async_get_clientsession(self.hass)
+                        ).patch_profile(entry.data[CONF_TOKEN], soc_absent=soc_absent)
+                    except WoltaApiError as err:
+                        _LOGGER.error("Failed to patch soc_absent: %s", err)
+                        errors["base"] = "cannot_connect"
+            if not errors:
                 data_updates: dict[str, Any] = {
                     CONF_BATT_IN: user_input[CONF_BATT_IN],
                     CONF_BATT_OUT: user_input[CONF_BATT_OUT],
@@ -822,6 +879,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # collecting SoC.
                     CONF_SOC: list(user_input.get(CONF_SOC) or []),
                 }
+                if soc_absent_changed:
+                    # Unchanged, the entry keeps the server's mirrored value as it is.
+                    data_updates[CONF_SOC_ABSENT] = soc_absent
+                new_data = {**entry.data, **data_updates}
+                # The old "ignore" of the soc_missing repair answered an offer, not the
+                # requirement (spec 2026-10-20 §4.2): it is never read again, and any
+                # save drops it.
+                new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
                 # Changed battery sensors replace the stored battery fields (an entity job),
                 # so an open direction repair rests on the old grade: stamp as for a flip
                 # so it is not raised again until the server has recounted.
@@ -831,18 +896,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         != sorted(_as_list(entry.data.get(CONF_BATT_IN)))
                         or sorted(_as_list(user_input[CONF_BATT_OUT]))
                         != sorted(_as_list(entry.data.get(CONF_BATT_OUT)))):
-                    data_updates[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
+                    new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
                     ir.async_delete_issue(
                         self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
-                    if CONF_DIRECTION_ISSUE_IGNORED in entry.data:
-                        # None-värden skrivs inte bort av data_updates; ta bort flaggan direkt.
-                        self.hass.config_entries.async_update_entry(
-                            entry,
-                            data={k: v for k, v in entry.data.items()
-                                  if k != CONF_DIRECTION_ISSUE_IGNORED})
+                    new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
                 # Reload: the coordinator sees a new entity fingerprint and an entity job
                 # replaces only the changed sensors' fields in the stored history.
-                return self.async_update_reload_and_abort(entry, data_updates=data_updates)
+                # `data=` (whole dict), not `data_updates=`: the ignore flags above must
+                # be removed, which a merge cannot do.
+                return self.async_update_reload_and_abort(entry, data=new_data)
 
         defaults = {
             k: entry.data.get(k)
@@ -851,9 +913,17 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_EXTERNAL_CONTROL, CONF_FLEX_COMPENSATION, CONF_SOC,
             )
         }
+        defaults[CONF_SOC_ABSENT] = bool(entry.data.get(CONF_SOC_ABSENT))
         # A failed submit re-shows what the user chose, not the stored value.
         if errors and user_input is not None:
             defaults[CONF_SOC] = user_input.get(CONF_SOC)
+            defaults[CONF_SOC_ABSENT] = bool(user_input.get(CONF_SOC_ABSENT, False))
+            if errors.get("base") == "cannot_connect":
+                # The soc_absent PATCH failed after the whole form validated: keep every
+                # choice, so a retry does not silently drop the other edits. HA leaves a
+                # cleared Optional picker out of user_input, so a missing key means "cleared",
+                # not "unchanged": read every field from the submit, not only present keys.
+                defaults.update({k: user_input.get(k) for k in defaults if k != CONF_SOC_ABSENT})
         schema = vol.Schema(
             {
                 vol.Required(CONF_BATT_IN, default=defaults[CONF_BATT_IN]): _energy_entity_selector(),
@@ -887,7 +957,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
                 # Multi-select with `suggested_value` (see the setup step): a `default=`
-                # would make the list un-clearable.
+                # would make the list un-clearable. vol.Optional although it is required
+                # in effect - same reason as in the setup step (the frontend's generic
+                # not_all_required_fields would hide soc_required).
                 vol.Optional(
                     CONF_SOC,
                     description=(
@@ -895,6 +967,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         if defaults[CONF_SOC] else None
                     ),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor", multiple=True)),
+                # A boolean always has a value, so `default=` is safe here (unlike the
+                # pickers): unticking sends False.
+                vol.Optional(CONF_SOC_ABSENT, default=defaults[CONF_SOC_ABSENT]): bool,
             }
         )
         return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
@@ -929,12 +1004,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             entry_data[CONF_FLEX_COMPENSATION] = self._entities_data[CONF_FLEX_COMPENSATION]
         if self._entities_data.get(CONF_SOC):
             entry_data[CONF_SOC] = list(self._entities_data[CONF_SOC])
+        # CONF_SOC_ABSENT: what the server holds, which async_step_entities has just
+        # PATCHed to the user's answer when the two differed.
         for key in (
             CONF_ZONE, CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW,
             CONF_NAMEPLATE_KW, CONF_EFF,
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
-            CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+            CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_SOC_ABSENT,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -1088,6 +1165,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # fill an empty column - it never rewrites the owner's declaration.
                     control_system=entry_data.get(CONF_CONTROL_SYSTEM),
                     control_system_name=entry_data.get(CONF_CONTROL_SYSTEM_NAME),
+                    # The SoC answer survives the new profile. An entry from before
+                    # v0.50.0 has none -> None is omitted by the client, so whatever an
+                    # older server row holds is kept.
+                    soc_absent=entry_data.get(CONF_SOC_ABSENT),
                 )
             except WoltaPlantClaimed:
                 # A wolta.se account owns the plant (Wolta security review 2026-10-16): the

@@ -322,6 +322,7 @@ class WoltaApiClient:
         client_plant_id: str | None = None,
         control_system: str | None = None,
         control_system_name: str | None = None,
+        soc_absent: bool | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -372,6 +373,10 @@ class WoltaApiClient:
             payload["control_system"] = control_system
         if control_system_name is not None:
             payload["control_system_name"] = control_system_name
+        # `is not None`: False ("has a SoC sensor") is an answer and must be sent; an
+        # omitted field leaves the server's value untouched (spec 2026-10-20-soc-krav).
+        if soc_absent is not None:
+            payload["soc_absent"] = soc_absent
         data = await self._request("POST", "/profile", json=payload, _reclaim_errors=True)
         return data["profile_token"]
 

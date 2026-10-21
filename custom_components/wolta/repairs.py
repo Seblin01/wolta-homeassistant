@@ -17,8 +17,15 @@ The adopt UX differs per parameter:
   bound (the controller may never have demanded full power), so the user sets the battery's real
   maximum, likely the measured figure but higher if the hardware can do more.
 
-SocMissingRepairFlow reuses the menu for a different question: pick state-of-charge sensors,
-or decline. It adopts nothing and PATCHes nothing - the choice is client-local.
+SocRequiredRepairFlow answers a different question: pick state-of-charge sensors, or say the
+battery has none (soc_absent). Its menu has no "ignore" - the answer is required, so it does not
+inherit the adopt menu. Picking sensors is client-local; only the soc_absent answer travels to
+the server (it is mirrored back into entry.data, so it is PATCHed before it is written).
+
+ControlSystemRequiredRepairFlow asks for the control system with onboarding's picker (spec
+2026-10-20-soc-krav 4.6). It is a plain form with no menu and no "ignore" of its own, for the
+same reason as the SoC flow, and it PATCHes before it writes entry.data, since the control
+system is mirrored from the server too.
 
 BatteryNeedsInputRepairFlow (spec 2026-09-14 §7.2) is the exception to the menu rule: it fires
 when the backend could not measure a declared battery at all, so there is no configured value to
@@ -27,6 +34,7 @@ keep and nothing to ignore — without the nameplate pair the plant has no grade
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import aiohttp
@@ -40,9 +48,13 @@ from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BATT_IN,
+    CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
@@ -52,13 +64,39 @@ from .const import (
     CONF_POWER_ISSUE_IGNORED,
     CONF_RESERVE_PCT,
     CONF_SOC,
+    CONF_SOC_ABSENT,
+    CONTROL_SYSTEMS,
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
 from . import intervals
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
-from .coordinator import desired_invert_intervals, with_desired_intervals
-from .soc_picker import soc_candidates, soc_error
+from .control_system_prefill import (
+    async_control_system_suggestion,
+    battery_platforms,
+    control_system_name_error,
+    control_system_name_selector,
+    control_system_selector,
+)
+from .coordinator import (
+    _ISSUE_CONTROL_SYSTEM_REQUIRED,
+    _ISSUE_SOC_REQUIRED,
+    desired_invert_intervals,
+    with_desired_intervals,
+)
+from .soc_picker import soc_candidates, soc_requirement_error
+
+_LOGGER = logging.getLogger(__name__)
+
+
+
+def _as_list(value: Any) -> list[str]:
+    """entry.data holds sensor ids as a list, or as a plain string in entries from v0.1.0."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value:
+        return [value]
+    return []
 
 
 class _AdoptRepairFlow(RepairsFlow):
@@ -227,34 +265,80 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
         )
 
 
-class SocMissingRepairFlow(_AdoptRepairFlow):
-    """Pick the battery's state-of-charge sensors - or decline, for good.
+class SocRequiredRepairFlow(RepairsFlow):
+    """The battery's state of charge is required: pick the sensors, or say there are none.
 
-    The choice is written to entry.data and the entry reloaded: the coordinator reads the
-    sensors at start and its own bookkeeping (_track_soc_selection) schedules the SoC
-    backfill. Only CONF_SOC changes, so the flow sensors' fingerprint - the one that
-    replaces the changed sensors' fields in the stored energy data - is untouched. Nothing goes to the
-    server from here; the entity ids are client-local."""
+    Two answers, no "ignore" (spec 2026-10-20-soc-krav 4.3), so this is not an
+    _AdoptRepairFlow: the base menu offers ignore.
 
-    _issue_prefix = "soc_missing"
-    _ignore_key = CONF_SOC_ISSUE_IGNORED
-    _adopt_step = "pick_sensors"
+    - pick_sensors: the choice is written to entry.data and the entry reloaded - the
+      coordinator reads the sensors at start and its own bookkeeping (_track_soc_selection)
+      schedules the SoC backfill. Only CONF_SOC changes, so the flow sensors' fingerprint is
+      untouched. The entity ids are client-local and never sent. If the owner had earlier said
+      "no sensor", that answer is withdrawn on the server first.
+    - soc_absent: PATCH soc_absent=True.
+
+    CONF_SOC_ABSENT is mirrored from the server (_PROFILE_SYNC_KEYS: a server value overwrites
+    entry.data on every sync), so a local write the server does not hold would be reverted by
+    the next sync. Both steps therefore PATCH first and write entry.data only once the PATCH
+    went through; on a failure they abort, write nothing and leave the issue open."""
+
+    def __init__(self, entry: ConfigEntry | None) -> None:
+        self._entry = entry
+
+    def _soc_issue_id(self) -> str:
+        return f"{_ISSUE_SOC_REQUIRED}_{self._entry.entry_id}"
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Same race as _AdoptRepairFlow: the entry can be removed between the issue being
+        # raised and the user opening it.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return self.async_show_menu(
+            step_id="init", menu_options=["pick_sensors", "soc_absent"])
+
+    async def _patch_soc_absent(self, value: bool) -> bool:
+        """PATCH the owner's answer. False on a connection/HTTP failure (nothing written)."""
+        coordinator = self._entry.runtime_data
+        try:
+            await coordinator.client.patch_profile(coordinator.token, soc_absent=value)
+        except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+            return False
+        return True
+
+    async def async_step_soc_absent(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if not await self._patch_soc_absent(True):
+            return self.async_abort(reason="failed")
+        new_data = {**self._entry.data, CONF_SOC_ABSENT: True}
+        new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        ir.async_delete_issue(self.hass, DOMAIN, self._soc_issue_id())
+        return self.async_create_entry(title="", data={})
 
     async def async_step_pick_sensors(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
         errors: dict[str, str] = {}
         if user_input is not None:
             picked = list(user_input.get(CONF_SOC) or [])
-            # An empty choice is not a choice: declining is the menu's other option, and
-            # it is the one that stops the repair from coming back.
-            error = soc_error(self.hass, picked) if picked else "soc_required"
+            # An empty choice is not a choice: "no SoC sensor" is the menu's other option.
+            # Validated before anything is PATCHed, so a bad pick leaves an earlier "no
+            # sensor" answer standing.
+            error = soc_requirement_error(self.hass, picked, absent=False)
             if error:
                 errors[CONF_SOC] = error
             else:
                 new_data = {**self._entry.data, CONF_SOC: picked}
-                new_data.pop(self._ignore_key, None)
+                if self._entry.data.get(CONF_SOC_ABSENT):
+                    if not await self._patch_soc_absent(False):
+                        return self.async_abort(reason="failed")
+                    new_data[CONF_SOC_ABSENT] = False
+                # The old "ignore" answered an offer, not this requirement.
+                new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
                 self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-                ir.async_delete_issue(
-                    self.hass, DOMAIN, f"{self._issue_prefix}_{self._entry.entry_id}")
+                ir.async_delete_issue(self.hass, DOMAIN, self._soc_issue_id())
                 self.hass.config_entries.async_schedule_reload(self._entry.entry_id)
                 return self.async_create_entry(title="", data={})
         # Narrowed to what can pass validation. With no candidate at all an include list
@@ -267,8 +351,106 @@ class SocMissingRepairFlow(_AdoptRepairFlow):
         return self.async_show_form(
             step_id="pick_sensors",
             # Optional, not Required: the frontend refuses to submit an empty Required
-            # field, which would hide the soc_required guidance (decline is a menu choice).
+            # field, which would hide the soc_required guidance ("no SoC sensor" is a menu
+            # choice).
             data_schema=vol.Schema({vol.Optional(CONF_SOC): EntitySelector(config)}),
+            errors=errors,
+        )
+
+
+class ControlSystemRequiredRepairFlow(RepairsFlow):
+    """The control system is required: pick it with the same picker as in setup.
+
+    The list, the suggestion from the battery sensors' integration and the rule that
+    "other" needs a name are onboarding's (control_system_prefill), not copies. No menu and
+    no "ignore" (HA's own Ignore stays), so this is not an _AdoptRepairFlow.
+
+    CONF_CONTROL_SYSTEM and CONF_CONTROL_SYSTEM_NAME are mirrored from the server
+    (_PROFILE_SYNC_KEYS: a server value overwrites entry.data on every sync), so the answer
+    is PATCHed first and entry.data is written only once the PATCH went through. Without
+    that write a failed profile read right after would see the old entry.data and raise the
+    issue again. On a failure the flow aborts, writes nothing and leaves the issue open."""
+
+    def __init__(self, entry: ConfigEntry | None) -> None:
+        self._entry = entry
+        # The suggestion is looked up once per flow, not on every re-show after an error.
+        self._suggested: str | None = None
+        self._suggestion_looked_up = False
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        # Same race as _AdoptRepairFlow: the entry can be removed between the issue being
+        # raised and the user opening it.
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        return await self.async_step_pick()
+
+    async def _default_choice(self) -> str | None:
+        """The control system the form starts on: what the entry has (an "other" that only
+        lacks its name), else onboarding's suggestion, else nothing (no guess)."""
+        current = self._entry.data.get(CONF_CONTROL_SYSTEM)
+        # Same guard as the suggestion: an id this client does not list (added on the
+        # server later) would be a default outside the selector's options, which HA rejects.
+        if current in {c for c, _ in CONTROL_SYSTEMS}:
+            return current
+        if not self._suggestion_looked_up:
+            self._suggestion_looked_up = True
+            coordinator = self._entry.runtime_data
+            batt = [
+                entity_id
+                for key in (CONF_BATT_IN, CONF_BATT_OUT)
+                for entity_id in _as_list(self._entry.data.get(key))
+            ]
+            try:
+                self._suggested = await async_control_system_suggestion(
+                    coordinator.client, battery_platforms(self.hass, batt))
+            except Exception:  # noqa: BLE001 - a suggestion is optional, never blocks the form
+                _LOGGER.debug("control_system suggestion failed; no default", exc_info=True)
+        return self._suggested
+
+    async def async_step_pick(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            control_system = user_input[CONF_CONTROL_SYSTEM]
+            name = (user_input.get(CONF_CONTROL_SYSTEM_NAME) or "").strip()
+            error = control_system_name_error(control_system, name)
+            if error:
+                errors[CONF_CONTROL_SYSTEM_NAME] = error
+            else:
+                # The name only means something together with "other" (as in setup).
+                payload: dict[str, Any] = {CONF_CONTROL_SYSTEM: control_system}
+                if control_system == "other":
+                    payload[CONF_CONTROL_SYSTEM_NAME] = name
+                coordinator = self._entry.runtime_data
+                try:
+                    await coordinator.client.patch_profile(coordinator.token, **payload)
+                except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+                    return self.async_abort(reason="failed")
+                new_data = {**self._entry.data, **payload}
+                if control_system != "other":
+                    new_data.pop(CONF_CONTROL_SYSTEM_NAME, None)
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                ir.async_delete_issue(
+                    self.hass, DOMAIN,
+                    f"{_ISSUE_CONTROL_SYSTEM_REQUIRED}_{self._entry.entry_id}")
+                # Not awaited: entry.data already holds the answer and the issue is gone, so
+                # the dialog need not wait for a whole update cycle (upload, profile, results).
+                self.hass.async_create_task(coordinator.async_request_refresh())
+                return self.async_create_entry(title="", data={})
+        default = await self._default_choice()
+        cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=default)
+                    if default else vol.Required(CONF_CONTROL_SYSTEM))
+        schema = vol.Schema({
+            cs_field: control_system_selector(),
+            vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
+        })
+        # After an error the form keeps what was typed; the first time it offers the stored name.
+        shown = user_input if errors else {
+            CONF_CONTROL_SYSTEM_NAME: self._entry.data.get(CONF_CONTROL_SYSTEM_NAME)}
+        return self.async_show_form(
+            step_id="pick",
+            data_schema=self.add_suggested_values_to_schema(schema, shown),
             errors=errors,
         )
 
@@ -440,8 +622,10 @@ async def async_create_fix_flow(
             {k: v for k, v in data.items()
              if k not in ("entry_id", "form", "swap_intervals")},
             data.get("swap_intervals"))
-    if issue_id.startswith("soc_missing"):
-        return SocMissingRepairFlow(entry)
+    if issue_id.startswith(_ISSUE_SOC_REQUIRED):
+        return SocRequiredRepairFlow(entry)
+    if issue_id.startswith(_ISSUE_CONTROL_SYSTEM_REQUIRED):
+        return ControlSystemRequiredRepairFlow(entry)
     if issue_id.startswith("battery_needs_input"):
         return BatteryNeedsInputRepairFlow(entry, days=days)
     if issue_id.startswith("measured_power"):

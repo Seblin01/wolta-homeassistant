@@ -427,13 +427,18 @@ async def test_fix_flow_dispatch_battery_needs_input(hass: HomeAssistant):
 
 
 # ---------------------------------------------------------------------------
-# soc_missing (v0.41.0): pick state-of-charge sensors, or decline
+# soc_required (spec 2026-10-20-soc-krav, 4.3): pick a SoC sensor, or say there is none
 # ---------------------------------------------------------------------------
 
 from homeassistant.helpers import issue_registry as ir  # noqa: E402
 
-from custom_components.wolta.const import CONF_SOC, CONF_SOC_ISSUE_IGNORED  # noqa: E402
-from custom_components.wolta.repairs import SocMissingRepairFlow  # noqa: E402
+from custom_components.wolta.api import WoltaApiError  # noqa: E402
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_SOC,
+    CONF_SOC_ABSENT,
+    CONF_SOC_ISSUE_IGNORED,
+)
+from custom_components.wolta.repairs import SocRequiredRepairFlow  # noqa: E402
 
 
 def _soc_flow(hass, **data):
@@ -441,8 +446,9 @@ def _soc_flow(hass, **data):
     entry.data = {**entry.data, **data}
     hass.config_entries.async_update_entry = MagicMock()
     hass.config_entries.async_schedule_reload = MagicMock()
-    flow = SocMissingRepairFlow(entry)
+    flow = SocRequiredRepairFlow(entry)
     flow.hass = hass
+    flow.issue_id = "soc_required_e1"
     return flow, entry, coordinator
 
 
@@ -454,23 +460,33 @@ def _soc_sensor(hass, entity_id="sensor.batt_soc", *, unit="%", state_class="mea
 
 
 def _create_soc_issue(hass):
-    ir.async_create_issue(hass, "wolta", "soc_missing_e1", is_fixable=True,
-                          severity=ir.IssueSeverity.WARNING, translation_key="soc_missing")
+    ir.async_create_issue(hass, "wolta", "soc_required_e1", is_fixable=True,
+                          severity=ir.IssueSeverity.WARNING, translation_key="soc_required")
+
+
+def _soc_issue_open(hass):
+    return ir.async_get(hass).async_get_issue("wolta", "soc_required_e1") is not None
+
+
+_NET_ERRORS = [WoltaApiError("boom"), aiohttp.ClientError("down"), TimeoutError()]
 
 
 @pytest.mark.asyncio
-async def test_soc_repair_menu_offers_pick_and_ignore(hass: HomeAssistant):
+async def test_soc_repair_menu_has_no_ignore(hass: HomeAssistant):
+    """A SoC answer is required, so there is nothing to dismiss: the menu offers the two
+    answers and no 'ignore'."""
     flow, _, _ = _soc_flow(hass)
     menu = await flow.async_step_init()
     assert menu["type"] == "menu"
-    assert set(menu["menu_options"]) == {"pick_sensors", "ignore"}
+    assert menu["menu_options"] == ["pick_sensors", "soc_absent"]
+    assert not hasattr(flow, "async_step_ignore")
 
 
 @pytest.mark.asyncio
 async def test_soc_repair_saves_choice_and_reloads(hass: HomeAssistant):
     """Picking sensors stores them in entry.data and reloads the entry - the coordinator
-    reads the choice at start and schedules the SoC backfill itself. Nothing is PATCHed:
-    the entity ids are client-local."""
+    reads the choice at start and schedules the SoC backfill itself. Nothing is PATCHed
+    (the entity ids are client-local) unless the owner had said there is no sensor."""
     _soc_sensor(hass)
     flow, entry, coordinator = _soc_flow(hass)
     form = await flow.async_step_pick_sensors()
@@ -498,14 +514,108 @@ async def test_soc_repair_keeps_the_flow_sensors_untouched(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_soc_repair_clears_issue_and_ignore_flag_on_pick(hass: HomeAssistant):
+async def test_soc_repair_pick_clears_issue_and_stale_ignore_flag(hass: HomeAssistant):
     _soc_sensor(hass)
     flow, _, _ = _soc_flow(hass, **{CONF_SOC_ISSUE_IGNORED: True})
     _create_soc_issue(hass)
     await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
     new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
     assert CONF_SOC_ISSUE_IGNORED not in new_data
-    assert ir.async_get(hass).async_get_issue("wolta", "soc_missing_e1") is None
+    assert not _soc_issue_open(hass)
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_pick_withdraws_an_earlier_absent_answer(hass: HomeAssistant):
+    """CONF_SOC_ABSENT is mirrored from the server (a server value overwrites entry.data on
+    every sync), so picking a sensor after 'no sensor' PATCHes soc_absent=False first and
+    only then saves the sensors."""
+    _soc_sensor(hass)
+    flow, entry, coordinator = _soc_flow(hass, **{CONF_SOC_ABSENT: True})
+    _create_soc_issue(hass)
+    order: list[str] = []
+    coordinator.client.patch_profile.side_effect = (
+        lambda *a, **k: order.append("patch") or {})
+    hass.config_entries.async_update_entry.side_effect = (
+        lambda *a, **k: order.append("update"))
+
+    result = await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", soc_absent=False)
+    assert order == ["patch", "update"]
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_SOC] == ["sensor.batt_soc"]
+    assert not new_data.get(CONF_SOC_ABSENT)
+    hass.config_entries.async_schedule_reload.assert_called_once_with("e1")
+    assert not _soc_issue_open(hass)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", _NET_ERRORS)
+async def test_soc_repair_pick_aborts_without_writing_when_the_patch_fails(
+        hass: HomeAssistant, error):
+    """The server still says 'no sensor': saving the sensors locally would be overwritten by
+    the next profile sync. Abort, write nothing, leave the issue open."""
+    _soc_sensor(hass)
+    flow, _, coordinator = _soc_flow(hass, **{CONF_SOC_ABSENT: True})
+    coordinator.client.patch_profile.side_effect = error
+    _create_soc_issue(hass)
+    result = await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+    assert result["type"] == "abort" and result["reason"] == "failed"
+    hass.config_entries.async_update_entry.assert_not_called()
+    hass.config_entries.async_schedule_reload.assert_not_called()
+    assert _soc_issue_open(hass)
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_pick_validates_before_patching(hass: HomeAssistant):
+    """A bad pick must not withdraw the earlier 'no sensor' answer."""
+    _soc_sensor(hass, unit="kWh")
+    flow, _, coordinator = _soc_flow(hass, **{CONF_SOC_ABSENT: True})
+    result = await flow.async_step_pick_sensors({CONF_SOC: ["sensor.batt_soc"]})
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_SOC: "soc_not_measurement"}
+    coordinator.client.patch_profile.assert_not_called()
+    hass.config_entries.async_update_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_soc_repair_absent_patches_then_writes_flag_and_closes(hass: HomeAssistant):
+    """'No SoC sensor': PATCH soc_absent=True first, then entry.data, then the issue is
+    deleted. No reload (the coordinator reads the flag live) and no ignore flag."""
+    flow, entry, coordinator = _soc_flow(hass, **{CONF_SOC_ISSUE_IGNORED: True})
+    _create_soc_issue(hass)
+    order: list[str] = []
+    coordinator.client.patch_profile.side_effect = (
+        lambda *a, **k: order.append("patch") or {})
+    hass.config_entries.async_update_entry.side_effect = (
+        lambda *a, **k: order.append("update"))
+
+    result = await flow.async_step_soc_absent()
+
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", soc_absent=True)
+    assert order == ["patch", "update"]
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_SOC_ABSENT] is True
+    assert CONF_SOC_ISSUE_IGNORED not in new_data
+    hass.config_entries.async_schedule_reload.assert_not_called()
+    assert not _soc_issue_open(hass)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", _NET_ERRORS)
+async def test_soc_repair_absent_aborts_without_writing_when_the_patch_fails(
+        hass: HomeAssistant, error):
+    """A network error must not leave a local flag the server does not hold (the next
+    profile sync would flip it back). Abort, write nothing, keep the issue open."""
+    flow, _, coordinator = _soc_flow(hass)
+    coordinator.client.patch_profile.side_effect = error
+    _create_soc_issue(hass)
+    result = await flow.async_step_soc_absent()
+    assert result["type"] == "abort" and result["reason"] == "failed"
+    hass.config_entries.async_update_entry.assert_not_called()
+    assert _soc_issue_open(hass)
 
 
 @pytest.mark.asyncio
@@ -516,8 +626,8 @@ async def test_soc_repair_clears_issue_and_ignore_flag_on_pick(hass: HomeAssista
     (["sensor.gone"], {}, "soc_unavailable"),
 ])
 async def test_soc_repair_rejects_bad_choice(hass: HomeAssistant, picked, sensor_kw, error):
-    """Same rules as the setup and reconfigure pickers (config_flow._soc_error), plus:
-    an empty choice is not a choice - declining is the menu's other option."""
+    """Same rules as the setup and reconfigure pickers (soc_requirement_error): an empty
+    choice is not a choice - 'no SoC sensor' is the menu's other option."""
     _soc_sensor(hass, **sensor_kw)
     flow, _, _ = _soc_flow(hass)
     result = await flow.async_step_pick_sensors({CONF_SOC: picked})
@@ -534,7 +644,7 @@ def _picker(form):
 @pytest.mark.asyncio
 async def test_soc_repair_field_is_optional_so_an_empty_submit_reaches_the_guidance(hass: HomeAssistant):
     """vol.Required would make the frontend refuse an empty submit, and the soc_required
-    text (which points at the decline option) could never show."""
+    text (which points at the 'no SoC sensor' option) could never show."""
     flow, _, _ = _soc_flow(hass)
     form = await flow.async_step_pick_sensors()
     key = next(k for k in form["data_schema"].schema if k == CONF_SOC)
@@ -575,32 +685,29 @@ async def test_soc_repair_unfiltered_when_nothing_qualifies(hass: HomeAssistant)
 
 
 @pytest.mark.asyncio
-async def test_soc_repair_ignore_persists_flag_and_clears_issue(hass: HomeAssistant):
-    flow, _, _ = _soc_flow(hass)
-    _create_soc_issue(hass)
-    result = await flow.async_step_ignore()
-    assert result["type"] == "create_entry"
-    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
-    assert new_data[CONF_SOC_ISSUE_IGNORED] is True
-    assert CONF_SOC not in new_data
-    assert ir.async_get(hass).async_get_issue("wolta", "soc_missing_e1") is None
-    hass.config_entries.async_schedule_reload.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_soc_repair_aborts_when_entry_missing(hass: HomeAssistant):
-    flow = SocMissingRepairFlow(None)
+    flow = SocRequiredRepairFlow(None)
     flow.hass = hass
     result = await flow.async_step_init()
     assert result["type"] == "abort" and result["reason"] == "entry_not_found"
 
 
 @pytest.mark.asyncio
-async def test_fix_flow_dispatch_soc_missing(hass: HomeAssistant):
+async def test_fix_flow_dispatch_soc_required(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(hass, "soc_required_e1", {"entry_id": "e1"})
+    assert isinstance(flow, SocRequiredRepairFlow)
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_dispatch_no_longer_knows_soc_missing(hass: HomeAssistant):
+    """The legacy issue is deleted by the coordinator; a stale soc_missing id must not
+    open the SoC flow (it falls through to the default dispatch)."""
     entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
     hass.config_entries.async_get_entry = MagicMock(return_value=entry)
     flow = await async_create_fix_flow(hass, "soc_missing_e1", {"entry_id": "e1"})
-    assert isinstance(flow, SocMissingRepairFlow)
+    assert not isinstance(flow, SocRequiredRepairFlow)
 
 
 # ---------------------------------------------------------------------------
@@ -940,3 +1047,248 @@ async def test_create_fix_flow_dispatches_house_copies(hass: HomeAssistant):
         hass, "house_copies_e1",
         {"entry_id": "e1", "ids": [12], "lines": "- 2026-03-02", "purge_days": 30})
     assert isinstance(flow, HouseCopiesRepairFlow)
+
+
+# ---------------------------------------------------------------------------
+# control_system_required (spec 2026-10-20-soc-krav 4.6): pick the control system
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch  # noqa: E402
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_BATT_IN,
+    CONF_BATT_OUT,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
+    CONTROL_SYSTEMS,
+)
+from custom_components.wolta.repairs import ControlSystemRequiredRepairFlow  # noqa: E402
+
+
+def _cs_flow(hass, *, mapping=None, **data):
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    entry.data = {**entry.data, CONF_BATT_IN: ["sensor.batt_in"],
+                  CONF_BATT_OUT: ["sensor.batt_out"], **data}
+    coordinator.client.get_control_systems = AsyncMock(return_value=mapping or [])
+    hass.config_entries.async_update_entry = MagicMock()
+    flow = ControlSystemRequiredRepairFlow(entry)
+    flow.hass = hass
+    flow.issue_id = "control_system_required_e1"
+    return flow, entry, coordinator
+
+
+def _create_cs_issue(hass):
+    ir.async_create_issue(hass, "wolta", "control_system_required_e1", is_fixable=True,
+                          severity=ir.IssueSeverity.WARNING,
+                          translation_key="control_system_required")
+
+
+def _cs_issue_open(hass):
+    return ir.async_get(hass).async_get_issue("wolta", "control_system_required_e1") is not None
+
+
+def _cs_key(form, name):
+    return next(k for k in form["data_schema"].schema if k == name)
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_opens_straight_on_the_form_without_ignore(hass: HomeAssistant):
+    """The answer is required: no menu, and nothing to dismiss."""
+    flow, _, _ = _cs_flow(hass)
+    form = await flow.async_step_init()
+    assert form["type"] == "form" and form["step_id"] == "pick"
+    assert not hasattr(flow, "async_step_ignore")
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_uses_the_onboarding_picker(hass: HomeAssistant):
+    """Same option list as the setup step: const.CONTROL_SYSTEMS, no list of its own."""
+    flow, _, _ = _cs_flow(hass)
+    form = await flow.async_step_pick()
+    selector = form["data_schema"].schema[_cs_key(form, CONF_CONTROL_SYSTEM)]
+    assert [o["value"] for o in selector.config["options"]] == [c for c, _ in CONTROL_SYSTEMS]
+    assert isinstance(_cs_key(form, CONF_CONTROL_SYSTEM), vol.Required)
+    assert isinstance(_cs_key(form, CONF_CONTROL_SYSTEM_NAME), vol.Optional)
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_suggests_from_the_battery_integration(hass: HomeAssistant):
+    """The suggestion is onboarding's: battery sensors' integration domain looked up against
+    the backend's mapping. It is only a default; the owner confirms by submitting."""
+    flow, _, coordinator = _cs_flow(hass, mapping=[
+        {"id": "huawei", "label": "Huawei", "ha_domains": ["huawei_solar"]}])
+    with patch("custom_components.wolta.repairs.battery_platforms",
+               return_value=["huawei_solar", "huawei_solar"]) as platforms:
+        form = await flow.async_step_pick()
+    platforms.assert_called_once_with(hass, ["sensor.batt_in", "sensor.batt_out"])
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default() == "huawei"
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_has_no_default_without_a_suggestion(hass: HomeAssistant):
+    flow, _, _ = _cs_flow(hass)
+    form = await flow.async_step_pick()
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_ignores_a_suggestion_the_picker_does_not_offer(hass: HomeAssistant):
+    """The backend's list leads the local one: a default the selector rejects would leave
+    the form unsubmittable (same rule as onboarding)."""
+    flow, _, _ = _cs_flow(hass, mapping=[
+        {"id": "brandnew", "label": "Brand New", "ha_domains": ["brandnew_battery"]}])
+    with patch("custom_components.wolta.repairs.battery_platforms",
+               return_value=["brandnew_battery"]):
+        form = await flow.async_step_pick()
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_survives_a_failing_suggestion_lookup(hass: HomeAssistant):
+    flow, _, coordinator = _cs_flow(hass)
+    coordinator.client.get_control_systems = AsyncMock(side_effect=aiohttp.ClientError("down"))
+    form = await flow.async_step_pick()
+    assert form["type"] == "form"
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_keeps_an_existing_other_as_the_default(hass: HomeAssistant):
+    """An entry with 'other' and no name is asked for the name: the choice stays, the name
+    is what is missing."""
+    flow, _, coordinator = _cs_flow(hass, **{CONF_CONTROL_SYSTEM: "other"})
+    form = await flow.async_step_pick()
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default() == "other"
+    coordinator.client.get_control_systems.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_patches_and_closes(hass: HomeAssistant):
+    flow, entry, coordinator = _cs_flow(hass)
+    _create_cs_issue(hass)
+    result = await flow.async_step_pick({CONF_CONTROL_SYSTEM: "tibber"})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", control_system="tibber")
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_CONTROL_SYSTEM] == "tibber"
+    assert CONF_CONTROL_SYSTEM_NAME not in new_data
+    assert not _cs_issue_open(hass)
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_other_sends_the_trimmed_name(hass: HomeAssistant):
+    flow, _, coordinator = _cs_flow(hass)
+    result = await flow.async_step_pick(
+        {CONF_CONTROL_SYSTEM: "other", CONF_CONTROL_SYSTEM_NAME: "  Egen styrning  "})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with(
+        "tok", control_system="other", control_system_name="Egen styrning")
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert new_data[CONF_CONTROL_SYSTEM] == "other"
+    assert new_data[CONF_CONTROL_SYSTEM_NAME] == "Egen styrning"
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_a_brand_drops_a_stray_name(hass: HomeAssistant):
+    """The name only means something together with 'other' (onboarding's rule)."""
+    flow, _, coordinator = _cs_flow(hass)
+    await flow.async_step_pick(
+        {CONF_CONTROL_SYSTEM: "tibber", CONF_CONTROL_SYSTEM_NAME: "left over"})
+    assert "control_system_name" not in coordinator.client.patch_profile.call_args.kwargs
+    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert CONF_CONTROL_SYSTEM_NAME not in new_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "", "   "])
+async def test_cs_flow_other_requires_name(hass: HomeAssistant, name):
+    """Onboarding's rule (config_flow.async_step_plant), nothing PATCHed or written."""
+    flow, _, coordinator = _cs_flow(hass)
+    _create_cs_issue(hass)
+    user_input = {CONF_CONTROL_SYSTEM: "other"}
+    if name is not None:
+        user_input[CONF_CONTROL_SYSTEM_NAME] = name
+    result = await flow.async_step_pick(user_input)
+    assert result["type"] == "form" and result["step_id"] == "pick"
+    assert result["errors"] == {"control_system_name": "control_system_name_required"}
+    coordinator.client.patch_profile.assert_not_called()
+    hass.config_entries.async_update_entry.assert_not_called()
+    assert _cs_issue_open(hass)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", _NET_ERRORS)
+async def test_cs_flow_aborts_without_writing_when_the_patch_fails(hass: HomeAssistant, error):
+    """The server is the source of truth and mirrors back into entry.data: a local value it
+    does not hold would be reverted by the next sync. Abort, write nothing, keep the issue."""
+    flow, _, coordinator = _cs_flow(hass)
+    coordinator.client.patch_profile.side_effect = error
+    _create_cs_issue(hass)
+    result = await flow.async_step_pick({CONF_CONTROL_SYSTEM: "tibber"})
+    assert result["type"] == "abort" and result["reason"] == "failed"
+    hass.config_entries.async_update_entry.assert_not_called()
+    coordinator.async_request_refresh.assert_not_called()
+    assert _cs_issue_open(hass)
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_patches_before_it_writes(hass: HomeAssistant):
+    flow, _, coordinator = _cs_flow(hass)
+    order: list[str] = []
+    coordinator.client.patch_profile.side_effect = (
+        lambda *a, **k: order.append("patch") or {})
+    hass.config_entries.async_update_entry.side_effect = (
+        lambda *a, **k: order.append("update"))
+    await flow.async_step_pick({CONF_CONTROL_SYSTEM: "tibber"})
+    assert order == ["patch", "update"]
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_aborts_when_entry_missing(hass: HomeAssistant):
+    flow = ControlSystemRequiredRepairFlow(None)
+    flow.hass = hass
+    for step in (flow.async_step_init(), flow.async_step_pick()):
+        result = await step
+        assert result["type"] == "abort" and result["reason"] == "entry_not_found"
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_dispatch_control_system_required(hass: HomeAssistant):
+    entry, _ = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(hass, "control_system_required_e1", {"entry_id": "e1"})
+    assert isinstance(flow, ControlSystemRequiredRepairFlow)
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_unknown_stored_id_is_not_a_default(hass: HomeAssistant):
+    """An id this client does not list (added on the server later) must not become the
+    selector's default, or HA rejects the form (code review 2026-10-21)."""
+    flow, _, _ = _cs_flow(hass, **{CONF_CONTROL_SYSTEM: "brand_new_system"})
+    form = await flow.async_step_pick()
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
+async def test_cs_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
+    """The answer is written and the issue closed before the dialog returns; the profile
+    refresh runs afterwards instead of holding the dialog (code review 2026-10-21)."""
+    import asyncio
+
+    flow, _, coordinator = _cs_flow(hass)
+    coordinator.client.patch_profile = AsyncMock()
+    release = asyncio.Event()
+    finished = []
+
+    async def _slow_refresh():
+        await release.wait()
+        finished.append(True)
+
+    coordinator.async_request_refresh = _slow_refresh
+    result = await flow.async_step_pick({CONF_CONTROL_SYSTEM: "tibber"})
+    assert result["type"] == "create_entry"
+    assert finished == []            # the dialog returned while the refresh was still running
+    release.set()
+    await hass.async_block_till_done()
+    assert finished == [True]

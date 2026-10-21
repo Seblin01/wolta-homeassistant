@@ -142,16 +142,16 @@
       "title": "Wolta: nätavgiften ser för hög ut",
       "description": "Nätavgiften du angett är över {limit} öre per kWh, mer än någon rörlig nätavgift vi har sett. Den innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Tariffer. Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
     },
-    "soc_missing": {
-      "title": "Frivilligt: lägg till batteriets laddningsnivå i Wolta",
+    "soc_required": {
+      "title": "Wolta behöver sensorn för batteriets laddningsnivå",
       "fix_flow": {
         "step": {
           "init": {
-            "title": "Lägg till sensorn för batteriets laddningsnivå",
-            "description": "Wolta mäter batteriets verkliga kapacitet och verkningsgrad ur laddningsnivån (nivån i %), och betyget räknas mot de uppmätta talen. Utan den räknas betyget på de uppgifter du angett och blir ett eget betyg som inte jämförs med andra anläggningar. Ekonomin räknar på dina uppgifter i båda fallen.\n\nVäljer du en sensor laddas dess historik (upp till 365 dygn) upp med nästa ordinarie uppladdning; energidatan skickas inte om. Det här är frivilligt. Vill du inte, välj det andra alternativet så kommer meddelandet inte tillbaka.",
+            "title": "Batteriets laddningsnivå",
+            "description": "Wolta behöver batteriets laddningsnivå (SoC, nivån i %) för att betyget ska kunna jämföras med andra anläggningar. Utan den räknas betyget på de batteriuppgifter du har angett och jämförs inte.\n\nVäljer du en sensor laddas upp till 365 dagars historik upp direkt.\n\nHar batteriet ingen SoC-sensor anger du det. Anläggningar som varken har valt en SoC-sensor eller angett att batteriet saknar en kommer i en kommande version inte längre att kunna ladda upp data.",
             "menu_options": {
               "pick_sensors": "Välj sensor för laddningsnivå",
-              "ignore": "Samla inte in laddningsnivå"
+              "soc_absent": "Mitt batteri har ingen SoC-sensor"
             }
           },
           "pick_sensors": {
@@ -161,18 +161,45 @@
               "soc_entities": "Batteriets laddningsnivå (%, en per batteri)"
             },
             "data_description": {
-              "soc_entities": "Bara sensorer i % med state_class measurement visas, eftersom det är de som har statistik att läsa. Du kan ändra eller ta bort valet senare under Konfigurera om."
+              "soc_entities": "Bara sensorer i % med state_class measurement visas. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
             }
           }
         },
         "error": {
-          "soc_required": "Välj minst en sensor, eller gå tillbaka och välj att inte samla in laddningsnivå.",
+          "soc_required": "Välj minst en sensor. Har batteriet ingen, stäng den här rutan och välj ”Mitt batteri har ingen SoC-sensor”.",
           "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
           "soc_not_measurement": "Välj sensorer i % med state_class measurement – andra saknar statistik att läsa.",
           "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
           "soc_too_many": "Välj högst 16 sensorer för laddningsnivå."
         },
         "abort": {
+          "failed": "Svaret kunde inte sparas hos Wolta just nu. Försök igen senare.",
+          "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
+        }
+      }
+    },
+    "control_system_required": {
+      "title": "Wolta behöver veta vilket styrsystem som styr ditt batteri",
+      "fix_flow": {
+        "step": {
+          "pick": {
+            "title": "Batteriets styrsystem",
+            "description": "Betyget kan bara jämföras med anläggningar på samma styrsystem. Välj det som styr ditt batteri. Finns det inte i listan väljer du Annat och anger systemets namn. Du kan ändra valet senare på wolta.se.",
+            "data": {
+              "control_system": "Styrsystem",
+              "control_system_name": "Styrsystemets namn (vid Annat)"
+            },
+            "data_description": {
+              "control_system": "Ditt nuvarande val, eller ett förslag ur batterisensorernas integration när Wolta känner igen den. Ändra om den är fel.",
+              "control_system_name": "Krävs när du har valt Annat."
+            }
+          }
+        },
+        "error": {
+          "control_system_name_required": "Ange styrsystemets namn när du valt Annat."
+        },
+        "abort": {
+          "failed": "Svaret kunde inte sparas hos Wolta just nu. Försök igen senare.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -311,12 +338,13 @@
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
           "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
-          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
+          "soc_entities": "Batteriets laddningsnivå (%, en per batteri)",
+          "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta mäta batteriets verkliga kapacitet och verkningsgrad, som betyget räknas mot. Utan den jämförs betyget inte med andra anläggningar. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
+          "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
         }
       },
       "reauth_confirm": {
@@ -376,12 +404,13 @@
           "solar": "Solproduktionsenergi (valfri)",
           "external_control_entity": "Extern styrning aktiv (binary sensor, valfri)",
           "flex_compensation_entity": "Flexersättning per månad (sensor, valfri)",
-          "soc_entities": "Batteriets laddningsnivå (%, valfri, en per batteri)"
+          "soc_entities": "Batteriets laddningsnivå (%, en per batteri)",
+          "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
-          "soc_entities": "Valfri. Låter Wolta mäta batteriets verkliga kapacitet och verkningsgrad, som betyget räknas mot. Utan den jämförs betyget inte med andra anläggningar. Att lägga till en sensor laddar upp dess historik (upp till 365 dagar) med nästa vanliga uppladdning; energidatan skickas inte om. Tar du bort en slutar den bara samlas in."
+          "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
         }
       },
       "view_only": {
@@ -412,6 +441,8 @@
       "soc_too_many": "Välj högst 16 sensorer för laddningsnivå.",
       "soc_unavailable": "Den valda sensorn för laddningsnivå är inte tillgänglig just nu. Kontrollera att den finns och har ett värde.",
       "soc_id_too_long": "Sensorns entitets-id är längre än 128 tecken. Byt namn på entiteten och försök igen.",
+      "soc_required": "Välj en sensor för laddningsnivå, eller kryssa i ”Mitt batteri har ingen SoC-sensor”.",
+      "soc_conflict": "Välj en sensor för laddningsnivå eller kryssa i ”Mitt batteri har ingen SoC-sensor”. Du kan inte göra båda.",
       "unknown": "Oväntat fel",
       "invalid_token": "Okänd eller raderad profil-token – kontrollera länken och försök igen.",
       "profile_no_battery": "Profilen saknar batteri – integrationen kräver en batteriprofil. Enbart sol stöds inte.",
