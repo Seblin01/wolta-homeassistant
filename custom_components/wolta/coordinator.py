@@ -4047,7 +4047,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         op = betyg.get("observed_power") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_BATTERY_KW)
         measured = float(op["kw"]) if op and op.get("kw") else None
-        # Physical-ceiling gate (Jan Hinders, 2026-08-04): observed_power has only spike
+        # Physical-ceiling gate (user report, 2026-08-04): observed_power has only spike
         # protection (3rd-highest interval), no hard ceiling. Chronic sensor jumps in a
         # cumulative HA statistic can inflate it far above the hardware maximum (a 9.9 kW battery
         # "measured" at 27.5 kW). A battery can't sustain charge/discharge above its inverter

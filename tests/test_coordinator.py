@@ -1798,7 +1798,7 @@ async def test_capacity_issue_cleared_when_no_observed(hass, mock_entry):
 
 @pytest.mark.asyncio
 async def test_capacity_issue_suppressed_when_low_efficiency_and_up(hass, mock_entry):
-    """Issue #1 (Emaldo/Leif): vid låg round-trip-verkningsgrad är observed_capacity uppblåst
+    """Issue #1 (Emaldo): vid låg round-trip-verkningsgrad är observed_capacity uppblåst
     (0.95-laddantagandet stämmer inte, parasitförluster) → erbjud INTE att HÖJA kapaciteten
     till det opålitliga värdet, trots att glappet passerar 15 %."""
     from custom_components.wolta.const import CONF_BATTERY_KWH as _K
