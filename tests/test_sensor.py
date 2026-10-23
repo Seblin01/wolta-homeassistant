@@ -1238,3 +1238,282 @@ def test_battery_value_ignores_reversed_measurement():
     assert _battery_value(results) == 1500.0
     results["betyg"]["battery_direction"]["state"] = "verified"
     assert _measured_battery_value(results) == 2000.0
+
+
+# ---------------------------------------------------------------------------
+# Data mode (backend spec 2026-10-16 §8.2, R14). After the flip the grade card's own
+# `annual` and holistic.measured_period_sek follow the data benchmark's period, while
+# the economics stay anchored on the legacy window, carried in the public block
+# betyg.economy = {annual, measured_period_sek, score_on}. The server's anchor
+# (warm.measured_battery_annual_from) reads that block first; the sensor must read in
+# the same order or the two surfaces publish different battery values.
+# ---------------------------------------------------------------------------
+
+
+def _data_mode_betyg(**economy) -> dict:
+    return {
+        "holistic": {"score_on": 0.9, "measured_period_sek": 100.0},
+        "annual": {"basis": "extrapolated", "factor": 3.0},
+        "economy": {
+            "annual": {"basis": "extrapolated", "factor": 2.0},
+            "measured_period_sek": 300.0,
+            "score_on": 0.7,
+            **economy,
+        },
+    }
+
+
+def test_measured_battery_value_reads_economy_block_in_data_mode():
+    """economy present -> its period x its factor (300 x 2), never the grade card's
+    own figures (100 x 3) and never a mix of the two."""
+    assert _measured_battery_value({"betyg": _data_mode_betyg()}) == pytest.approx(600.0)
+
+
+def test_measured_battery_value_economy_gate_does_not_fall_back_to_top_level():
+    """The gate applies to the economy block itself: economy.annual missing means the
+    legacy window is too short to annualise, and the top-level annual (the benchmark's
+    period) must not stand in for it - the server returns no anchor in that case."""
+    assert _measured_battery_value({"betyg": _data_mode_betyg(annual=None)}) is None
+    assert _measured_battery_value({"betyg": _data_mode_betyg(score_on=None)}) is None
+
+
+def test_measured_battery_value_economy_respects_reversed_direction():
+    betyg = {**_data_mode_betyg(), "battery_direction": {"state": "reversed"}}
+    assert _measured_battery_value({"betyg": betyg}) is None
+
+
+def test_optimeringsbetyg_exposes_benchmark_class():
+    """The backend's public benchmark block (method, comparable, reasons) is derived in
+    one place server-side and handed over verbatim, like external_control."""
+    block = {"method": "data", "comparable": False, "reasons": ["no_soc"]}
+    results = {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "benchmark": block}}
+    attrs = _sensor("optimeringsbetyg", results).extra_state_attributes
+    assert attrs.get("benchmark") == block
+
+
+def test_optimeringsbetyg_omits_benchmark_when_absent():
+    """Legacy mode and older caches carry no benchmark block -> no attribute, no error."""
+    s = _sensor("optimeringsbetyg", RESULTS_FULL)
+    assert "benchmark" not in s.extra_state_attributes
+    assert s.native_value is not None
+
+
+# ---------------------------------------------------------------------------
+# Grade window (backend spec 2026-10-21 §4.5): the grade sensor shows the owner's
+# window grade when results.betyg.window exists, else the comparison grade; a second
+# sensor always shows the comparison grade with its percentile.
+# ---------------------------------------------------------------------------
+
+_WINDOW = {
+    "score_on": 0.72,
+    "score_pct": 72.0,
+    "period_start": "2025-03-01",
+    "period_end": "2025-05-31",
+    "preliminary": False,
+    "n_days": 92,
+    "start_date": "2025-03-01",
+    "rolling_days": None,
+    "clipped": False,
+}
+
+
+def _with_window(window: dict | None = None) -> dict:
+    return {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "window": window or _WINDOW}}
+
+
+def test_grade_sensor_prefers_window():
+    """window.score_on (0.72) wins over holistic.score_on (0.82); the percentile belongs
+    to the comparison grade and is therefore absent while the window grade is shown."""
+    s = _sensor("optimeringsbetyg", _with_window())
+    assert s.native_value == pytest.approx(72.0, abs=0.01)
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "window"
+    assert attrs["period_start"] == "2025-03-01"
+    assert attrs["period_end"] == "2025-05-31"
+    assert "peer_percentile" not in attrs
+    assert "peer_n" not in attrs
+
+
+def test_grade_sensor_window_maturity_follows_the_window():
+    """preliminary / n_days describe the grade shown, so they come from the window."""
+    window = {**_WINDOW, "preliminary": True, "n_days": 12}
+    attrs = _sensor("optimeringsbetyg", _with_window(window)).extra_state_attributes
+    assert attrs["preliminary"] is True
+    assert attrs["n_days"] == 12
+
+
+def test_grade_sensor_window_available_without_comparison_grade():
+    """A window grade stands on its own: available even when holistic is missing."""
+    results = {**RESULTS_FULL, "betyg": {"window": _WINDOW}}
+    s = _sensor("optimeringsbetyg", results)
+    assert s.available is True
+    assert s.native_value == pytest.approx(72.0, abs=0.01)
+
+
+def test_grade_sensor_window_without_score_falls_back_to_comparison():
+    """A window block with no score_on is not a grade: fall back, basis comparison."""
+    s = _sensor("optimeringsbetyg", _with_window({**_WINDOW, "score_on": None}))
+    assert s.native_value == pytest.approx(82.0, abs=0.01)
+    assert s.extra_state_attributes["basis"] == "comparison"
+
+
+# Distinct, non-None values for every attribute that describes the comparison grade, all
+# different from the window's own values (_WINDOW) and from each other, so a test that
+# asserts the exact value fails if an attribute is wired to the wrong field.
+_COMPARISON_COMPONENTS = [
+    {"key": "timing", "label": "Laddtidpunkt", "captured": 0.55, "possible": 0.9, "possible_on": 0.8},
+]
+_COMPARISON_EXTERNAL_CONTROL = {"n_intervals": 7, "share": 0.13}
+_COMPARISON_BENCHMARK = {"method": "data", "comparable": True, "reasons": ["ok_sample"]}
+
+
+def _with_comparison_details(base: dict) -> dict:
+    """base plus distinct values for every comparison-grade detail (period, maturity,
+    annual basis, measured figures, price skill, components, external control, benchmark,
+    peer). Window-free base -> comparison grade only; _with_window() base -> both."""
+    betyg = {
+        **base["betyg"],
+        "holistic": {
+            **base["betyg"]["holistic"],
+            "measured_period_sek": 7654.0,
+            "measured_wear_sek": 123.0,
+        },
+        "annual": {"basis": "estimated", "factor": 1.0},
+        "price_skill": 0.61,
+        "components": _COMPARISON_COMPONENTS,
+        "peer": {"n": 211, "percentile": 41},
+        "period_start": "2024-10-01",
+        "period_end": "2025-09-30",
+        "preliminary": True,
+        "n_days": 211,
+        "benchmark": _COMPARISON_BENCHMARK,
+        "external_control": _COMPARISON_EXTERNAL_CONTROL,
+    }
+    return {**base, "betyg": betyg}
+
+
+# Attributes that describe a specific grade follow that grade.
+_COMPARISON_ONLY_ATTRS = (
+    "peer_percentile", "peer_n", "annual_basis", "measured_period_sek",
+    "measured_wear_sek", "price_skill", "components", "external_control", "benchmark",
+)
+
+# Exact values the comparison grade sensor (and the grade sensor with basis comparison)
+# must publish for _with_comparison_details(...).
+_EXPECTED_COMPARISON_ATTRS = {
+    "peer_percentile": 41,
+    "peer_n": 211,
+    "period_start": "2024-10-01",
+    "period_end": "2025-09-30",
+    "preliminary": True,
+    "n_days": 211,
+    "annual_basis": "estimated",
+    "measured_period_sek": 7654.0,
+    "measured_wear_sek": 123.0,
+    "price_skill": 0.61,
+    "components": _COMPARISON_COMPONENTS,
+    "external_control": _COMPARISON_EXTERNAL_CONTROL,
+    "benchmark": _COMPARISON_BENCHMARK,
+}
+
+
+def _assert_comparison_attrs(attrs: dict) -> None:
+    for key, expected in _EXPECTED_COMPARISON_ATTRS.items():
+        assert key in attrs, key
+        assert attrs[key] == expected, key
+
+
+def test_grade_sensor_comparison_without_window():
+    """No window block (legacy mode, no owner window): the comparison grade, with its
+    percentile, its period and every detail attribute at its exact value, labelled as such."""
+    s = _sensor("optimeringsbetyg", _with_comparison_details(RESULTS_FULL))
+    assert s.native_value == pytest.approx(82.0, abs=0.01)
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "comparison"
+    _assert_comparison_attrs(attrs)
+
+
+def test_grade_sensor_window_omits_comparison_grade_attributes():
+    """With a window grade shown, attributes that describe the comparison grade are
+    absent from the grade sensor (they live on the comparison grade sensor), and the
+    period and maturity are the window's own, not the comparison grade's."""
+    results = _with_comparison_details(_with_window())
+    attrs = _sensor("optimeringsbetyg", results).extra_state_attributes
+    assert attrs["basis"] == "window"
+    for key in _COMPARISON_ONLY_ATTRS:
+        assert key not in attrs, key
+    assert attrs["period_start"] == "2025-03-01"
+    assert attrs["period_end"] == "2025-05-31"
+    assert attrs["preliminary"] is False
+    assert attrs["n_days"] == 92
+
+
+def test_grade_sensor_window_keeps_owner_field_attributes():
+    """Owner-field attributes describe the owner's inputs against the data, not a grade,
+    so they stay on the grade sensor whichever grade it shows."""
+    results = _with_window()
+    results["applied_tariff"] = {
+        "source": "user", "grid_var_ore": 40.0, "surcharge_ore": 8.0,
+        "export_extra_ore": 5.0, "currency": "SEK",
+    }
+    results["betyg"]["capacity_hint"] = {
+        "entered_kwh": 15.0, "observed_usable_kwh": 10.45, "suggested_kwh": 10.5,
+    }
+    results["betyg"]["observed_capacity"] = {"kwh": 19.8, "plateau_days": 12, "n_days": 150}
+    results["betyg"]["observed_capacity_status"] = "ok"
+    attrs = _sensor("optimeringsbetyg", results).extra_state_attributes
+    assert attrs["basis"] == "window"
+    assert attrs.get("capacity_hint") == results["betyg"]["capacity_hint"]
+    assert attrs.get("measured_capacity_kwh") == 19.8
+    assert attrs.get("measured_capacity_status") == "ok"
+    assert "applied_tariff" in attrs
+
+
+def test_grade_sensor_comparison_benchmark_attribute_kept():
+    block = {"method": "data", "comparable": False, "reasons": ["no_soc"]}
+    results = {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "benchmark": block}}
+    attrs = _sensor("optimeringsbetyg", results).extra_state_attributes
+    assert attrs["basis"] == "comparison"
+    assert attrs["benchmark"] == block
+
+
+def test_comparison_sensor_always_comparison():
+    """The comparison sensor ignores the window: holistic.score_on x 100 with the
+    percentile attributes."""
+    results = {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], "window": _WINDOW}}
+    results["betyg"]["holistic"] = {**results["betyg"]["holistic"], "score_on": 0.61}
+    s = _sensor("jamforelsebetyg", results)
+    assert s.native_value == pytest.approx(61.0, abs=0.01)
+    assert s.native_unit_of_measurement == "%"
+    attrs = s.extra_state_attributes
+    assert attrs["peer_percentile"] == 68
+    assert attrs["peer_n"] == 312
+    assert s.unique_id == f"{ENTRY_ID}_jamforelsebetyg"
+
+
+def test_comparison_sensor_unavailable_without_comparison_grade():
+    results = {**RESULTS_FULL, "betyg": {"window": _WINDOW}}
+    s = _sensor("jamforelsebetyg", results)
+    assert s.available is False
+
+
+def test_comparison_sensor_translation_key():
+    description = next(d for d in SENSOR_DESCRIPTIONS if d.key == "jamforelsebetyg")
+    assert description.translation_key == "jamforelsebetyg"
+
+
+def test_comparison_sensor_carries_all_comparison_attributes_with_window():
+    """The comparison grade sensor carries every attribute that describes the comparison
+    grade at its exact value, also while the owner has a window, and the period and
+    maturity are the comparison grade's, not the window's."""
+    results = _with_comparison_details(_with_window())
+    attrs = _sensor("jamforelsebetyg", results).extra_state_attributes
+    _assert_comparison_attrs(attrs)
+    assert "basis" not in attrs
+
+
+def test_comparison_sensor_carries_all_comparison_attributes_without_window():
+    results = _with_comparison_details(RESULTS_FULL)
+    attrs = _sensor("jamforelsebetyg", results).extra_state_attributes
+    _assert_comparison_attrs(attrs)
+    assert "basis" not in attrs

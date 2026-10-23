@@ -45,6 +45,8 @@ from .const import (
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
     CONF_CAPACITY_ISSUE_IGNORED,
+    CONF_CONTROL_SYSTEM,
+    CONF_CONTROL_SYSTEM_NAME,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_COST_SEK,
@@ -65,7 +67,7 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_RESERVE_PCT,
     CONF_SOC,
-    CONF_SOC_ISSUE_IGNORED,
+    CONF_SOC_ABSENT,
     CONF_SOLAR,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
@@ -76,6 +78,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from .control_system_prefill import control_system_name_error
 from . import intervals
 from .stats import (
     aggregate_5min_to_15min,
@@ -773,10 +776,18 @@ _ISSUE_ENERGY_NO_STATS = "energy_stream_no_statistics"
 # empty and energy_stream_no_statistics never sees it. Same threshold and minimum
 # window as energy_empty below.
 _ISSUE_STATISTICS_MISSING = "statistics_missing"
-# A graded battery plant that has no state-of-charge sensor picked. The field is optional
-# and was only added in v0.40.0, so every earlier install has it empty without ever having
-# been asked. Fixable: the repair opens the picker (or records a no).
-_ISSUE_SOC_MISSING = "soc_missing"
+# A graded battery plant that has no state-of-charge sensor picked and has not ticked
+# "I have no SoC sensor" (CONF_SOC_ABSENT). The grade needs the SoC to be comparable, so
+# the answer is required, not offered. Fixable: the repair opens the picker or the box.
+_ISSUE_SOC_REQUIRED = "soc_required"
+# The profile has no control system, or "other" without a name (spec 2026-10-20-soc-krav 4.6).
+# The grade can only be compared with plants on the same control system, so the answer is
+# required, not offered. Fixable: the repair opens onboarding's picker.
+_ISSUE_CONTROL_SYSTEM_REQUIRED = "control_system_required"
+# The id of the earlier, ignorable form. HA keeps dismissed_version when an existing id is
+# re-created, so an owner who ignored it would never see the requirement: the new issue has
+# its own id and this one is deleted on every evaluation.
+_ISSUE_SOC_MISSING_LEGACY = "soc_missing"
 # The owner's grid fee is above the server's plausibility limit (results.tariff_check, server
 # api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
 # energy tax is counted twice. Non-fixable: only the owner knows the right figure.
@@ -868,6 +879,13 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+    # The control system is declared on wolta.se and can be switched and backdated there.
+    # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
+    # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
+    CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
+    # The owner's "this battery has no SoC sensor" answer; also flipped on wolta.se and
+    # via the repair PATCH. A server False is stored (the loop below only drops None).
+    CONF_SOC_ABSENT,
 )
 
 
@@ -2290,6 +2308,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         new_data = dict(entry.data)
         changed = False
         for key in _PROFILE_SYNC_KEYS:
+            if key == CONF_SOC_ABSENT and key not in profile:
+                # A response without the key comes from a server that does not know the
+                # field (wrong release order, rollback). Dropping the owner's local
+                # answer then would bring the SoC repair back after every answer. A
+                # present value mirrors, None (never answered) and False included.
+                continue
             server_val = profile.get(key)
             if server_val is None:
                 if key in new_data:
@@ -2466,7 +2490,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             results = await self.client.results(self.token)
             await self._clear_failure()
             self._evaluate_measured_params(results)
-            self._evaluate_soc_missing_issue(results)
+            self._evaluate_soc_required_issue(results)
+            self._evaluate_control_system_issue()
             self._evaluate_grid_fee_issue(results)
             last_uploaded_str = self._state.get("last_uploaded_ts")
             last_uploaded = (
@@ -3789,30 +3814,63 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
 
-    def _evaluate_soc_missing_issue(self, results: dict) -> None:
-        """Nudge to pick a state-of-charge sensor (README: State of charge monitoring).
+    def _evaluate_soc_required_issue(self, results: dict) -> None:
+        """Require a state-of-charge sensor, or the "no SoC sensor" answer (spec 4.2).
 
         Fires only where the question has an answer and is not noise: the server knows the
         plant has a battery (stamp measured/nameplate - not none, not still being measured,
-        not a stamp we never received), the grade is settled (a new install was offered the
-        field in setup a moment ago), no sensor is picked and the user has not said no.
+        not a stamp we never received), the grade is settled (a new install was asked in
+        setup a moment ago), and neither a sensor is picked nor CONF_SOC_ABSENT is set.
+        The old ignore flag is not read: it answered an offer, not this requirement.
         Never in view-only mode: that entry uploads nothing, and the plant's binding
         delivers its own SoC."""
+        # Before the grade check: a grade-less cycle must not leave the old issue behind.
+        ir.async_delete_issue(
+            self.hass, DOMAIN, f"{_ISSUE_SOC_MISSING_LEGACY}_{self.config_entry.entry_id}")
         betyg = results.get("betyg")
         if not isinstance(betyg, dict) or not betyg:
             # No grade block says nothing about the plant (a recompute in flight, an
             # old backend): leave whatever is open as it is rather than flapping.
             return
+        if self._battery_status is None and not self._view_only:
+            # The stamp is in memory only: None means no profile GET has succeeded since
+            # the start. That is no answer about the plant, and deleting an open issue
+            # here would wipe HA's Ignore with it (dismissed_version lives in the registry
+            # entry). Leave it as it is, like the missing-grade case above.
+            return
         fire = (
             not betyg.get("preliminary")
             and not self._view_only
             and not self._soc_entities
-            and not self.config_entry.data.get(CONF_SOC_ISSUE_IGNORED)
+            and not self.config_entry.data.get(CONF_SOC_ABSENT)
             and self._battery_status in (BATTERY_STATUS_MEASURED, BATTERY_STATUS_NAMEPLATE)
         )
         self._set_measured_issue(
-            _ISSUE_SOC_MISSING, fire=fire, translation_key=_ISSUE_SOC_MISSING,
+            _ISSUE_SOC_REQUIRED, fire=fire, translation_key=_ISSUE_SOC_REQUIRED,
             placeholders={}, data={})
+
+    def _evaluate_control_system_issue(self) -> None:
+        """Require a control system (spec 2026-10-20-soc-krav 4.6).
+
+        Fires when the mirrored profile has none, or "other" without a name (the onboarding
+        rule, control_system_prefill.control_system_name_error). entry.data is only the
+        mirror of the server (_PROFILE_SYNC_KEYS), so the answer is read from it only once a
+        profile GET has succeeded: that is when _take_battery_state has stored the server's
+        battery stamp, and None means no profile has been read since the start. Before that
+        an entry without the key may simply not have been mirrored yet.
+        Never in view-only mode: there the plant's binding owns the profile."""
+        data = self.config_entry.data
+        control_system = data.get(CONF_CONTROL_SYSTEM)
+        if self._battery_status is None and not self._view_only:
+            # Profile not read since the start: no answer, so leave an open issue alone
+            # (deleting it would wipe HA's Ignore).
+            return
+        missing = not control_system or control_system_name_error(
+            control_system, data.get(CONF_CONTROL_SYSTEM_NAME)) is not None
+        self._set_measured_issue(
+            _ISSUE_CONTROL_SYSTEM_REQUIRED,
+            fire=missing and not self._view_only,
+            translation_key=_ISSUE_CONTROL_SYSTEM_REQUIRED, placeholders={}, data={})
 
     def _evaluate_grid_fee_issue(self, results: dict) -> None:
         """Warn when the server finds the owner's grid fee implausible (results.tariff_check).

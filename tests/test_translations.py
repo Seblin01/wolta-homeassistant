@@ -77,14 +77,19 @@ def test_soc_picker_errors_are_translated(lang: str, key: str, text: str) -> Non
 
 
 @pytest.mark.parametrize("lang", ["en", "sv"])
-def test_soc_description_promises_no_energy_reupload(lang: str) -> None:
-    """Choosing SoC sensors never re-sends the energy data (spec §16) - the field text
-    must say so, in both the setup and the reconfigure step."""
+def test_soc_field_is_described_as_required(lang: str) -> None:
+    """SoC is required (spec 2026-10-20-soc-krav): the field text says why and what the
+    upload does, and neither the label nor the text calls it optional. The box for "no
+    SoC sensor" is labelled in both the setup and the reconfigure step."""
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    optional = "optional" if lang == "en" else "valfri"
     for step in ("entities", "reconfigure"):
-        desc = data["config"]["step"][step]["data_description"]["soc_entities"]
-        needle = "energy data is not re-sent" if lang == "en" else "energidatan skickas inte om"
-        assert needle in desc, (step, desc)
+        node = data["config"]["step"][step]
+        desc = node["data_description"]["soc_entities"]
+        assert "365" in desc, (step, desc)
+        for text in (desc, node["data"]["soc_entities"]):
+            assert optional not in text.lower(), (step, text)
+        assert node["data"]["soc_absent"], step
 
 
 @pytest.mark.parametrize("lang, needle", [("en", "prefilled"), ("sv", "förifyll")])
@@ -97,11 +102,12 @@ def test_eff_beskrivningen_sager_att_faltet_ar_forifyllt(lang: str, needle: str)
 
 
 @pytest.mark.parametrize("lang", ["en", "sv"])
-def test_soc_missing_repair_translates_every_error_its_flow_returns(lang: str) -> None:
-    """The repair's picker returns config_flow._soc_error's keys plus its own
-    soc_required; a fix flow reads errors from ITS OWN block, not config.error."""
+def test_soc_required_repair_translates_every_error_its_flow_returns(lang: str) -> None:
+    """The repair's picker returns soc_picker.soc_error's keys plus soc_required
+    (soc_conflict cannot occur there: the picker never has the box); a fix flow
+    reads errors from ITS OWN block, not config.error."""
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
-    errors = data["issues"]["soc_missing"]["fix_flow"]["error"]
+    errors = data["issues"]["soc_required"]["fix_flow"]["error"]
     shared = ("soc_unavailable", "soc_not_measurement", "soc_id_too_long", "soc_too_many")
     for key in ("soc_required", *shared):
         assert errors.get(key), key
@@ -109,12 +115,47 @@ def test_soc_missing_repair_translates_every_error_its_flow_returns(lang: str) -
         assert errors[key] == data["config"]["error"][key], key
 
 
-@pytest.mark.parametrize("lang, needle", [
-    ("en", "does not change your grade"), ("sv", "påverkar inte ditt betyg")])
-def test_soc_missing_repair_says_it_does_not_change_the_grade(lang: str, needle: str) -> None:
+# Data mode (backend spec 2026-10-16): the grade is computed against the capacity and
+# efficiency measured from the state of charge, and a plant without one gets a grade of
+# its own that is not compared with others. The old "does not change your grade" was true
+# only while the SoC was merely collected; it must not come back.
+_SOC_STALE_SV = ("påverkar inte ditt betyg", "Ändrar inte ditt betyg")
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_soc_texts_no_longer_claim_the_grade_is_unaffected(lang: str) -> None:
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
-    text = data["issues"]["soc_missing"]["fix_flow"]["step"]["init"]["description"]
-    assert needle in text, text
+    texts = [data["issues"]["soc_required"]["fix_flow"]["step"]["init"]["description"],
+             data["config"]["step"]["entities"]["data_description"]["soc_entities"],
+             data["config"]["step"]["reconfigure"]["data_description"]["soc_entities"]]
+    for text in texts:
+        assert "not change your grade" not in text, text
+        assert not any(n in text for n in _SOC_STALE_SV), text
+
+
+@pytest.mark.parametrize("lang, needles", [
+    ("en", ("compared with other plants", "365 days", "coming version")),
+    ("sv", ("jämföras med andra anläggningar", "365 dagars", "kommande version"))])
+def test_soc_required_repair_says_what_is_needed_and_what_happens_without_it(
+        lang: str, needles: tuple[str, ...]) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    text = data["issues"]["soc_required"]["fix_flow"]["step"]["init"]["description"]
+    for needle in needles:
+        assert needle in text, (needle, text)
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_soc_required_repair_has_menu_steps_and_aborts(path: Path) -> None:
+    """The fix flow's two menu options, its picker step and the two aborts it can end in
+    (repairs.SocRequiredRepairFlow) all render as text; the old soc_missing is gone."""
+    data = _load(path)
+    assert "soc_missing" not in data["issues"]
+    flow = data["issues"]["soc_required"]["fix_flow"]
+    assert set(flow["step"]["init"]["menu_options"]) == {"pick_sensors", "soc_absent"}
+    assert flow["step"]["pick_sensors"]["data"]["soc_entities"]
+    assert {"failed", "entry_not_found"} <= set(flow["abort"])
+    for key in ("soc_required", "soc_conflict"):
+        assert data["config"]["error"][key], key
 
 
 @pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
@@ -195,3 +236,44 @@ def test_grid_fee_field_says_without_vat_and_energy_tax(lang: str, needle: str) 
     data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
     text = data["options"]["step"]["settings"]["sections"]["tariffs"]["data_description"]["grid_var_ore"]
     assert needle in text, text
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_control_system_required_repair_has_the_pick_step_and_aborts(path: Path) -> None:
+    """The fix flow opens on the form (repairs.ControlSystemRequiredRepairFlow): its two
+    fields, the error it returns, and the two aborts it can end in all render as text.
+    A fix flow reads errors from its own block, not config.error."""
+    issue = _load(path)["issues"]["control_system_required"]
+    assert issue["title"]
+    pick = issue["fix_flow"]["step"]["pick"]
+    assert pick["title"] and pick["description"]
+    assert pick["data"]["control_system"] and pick["data"]["control_system_name"]
+    assert pick["data_description"]["control_system_name"]
+    assert issue["fix_flow"]["error"]["control_system_name_required"]
+    assert {"failed", "entry_not_found"} <= set(issue["fix_flow"]["abort"])
+    # No menu and no ignore: the answer is required (HA's own Ignore stays).
+    assert "init" not in issue["fix_flow"]["step"]
+
+
+@pytest.mark.parametrize("lang, needles", [
+    ("en", ("same control system", "wolta.se")),
+    ("sv", ("samma styrsystem", "wolta.se"))])
+def test_control_system_required_repair_says_why_and_where_to_change_it(
+        lang: str, needles: tuple[str, ...]) -> None:
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    issue = data["issues"]["control_system_required"]
+    text = issue["fix_flow"]["step"]["pick"]["description"]
+    for needle in needles:
+        assert needle in text, (needle, text)
+    # hassfest: a fixable issue carries its text in fix_flow only; a top-level
+    # description is mutually exclusive with fix_flow.
+    assert "description" not in issue
+
+
+@pytest.mark.parametrize("lang", ["en", "sv"])
+def test_control_system_required_repair_reuses_the_onboarding_name_error(lang: str) -> None:
+    """One rule, one wording: the repair's name error is the setup step's."""
+    data = json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+    errors = data["issues"]["control_system_required"]["fix_flow"]["error"]
+    assert errors["control_system_name_required"] == data["config"]["error"][
+        "control_system_name_required"]

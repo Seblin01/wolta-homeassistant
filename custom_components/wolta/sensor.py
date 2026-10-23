@@ -43,8 +43,36 @@ class WoltaSensorEntityDescription(SensorEntityDescription):
 # ---------------------------------------------------------------------------
 
 
+def _window_block(results: dict) -> dict | None:
+    """The owner's grade window (backend spec 2026-10-21 section 4.5): results.betyg.window,
+    {score_on, score_pct, period_start, period_end, preliminary, n_days, start_date,
+    rolling_days, clipped}. Present only in data mode and only when the owner has set a
+    window; absent (not None) in legacy mode and on every payload cached before it. A block
+    without a score_on is not a grade, so it counts as absent and the sensor falls back to
+    the comparison grade rather than going unavailable."""
+    window = (results.get("betyg") or {}).get("window")
+    if isinstance(window, dict) and window.get("score_on") is not None:
+        return window
+    return None
+
+
+def _comparison_score(results: dict) -> float | None:
+    """Comparison grade in percent: holistic.score_on x 100 (the grade that is compared
+    with other installations), published RAW. See _betyg_score for the no-clamping rule."""
+    holistic = (results.get("betyg") or {}).get("holistic") or {}
+    score_on = holistic.get("score_on")
+    if score_on is None:
+        return None
+    return round(score_on * 100, 2)
+
+
 def _betyg_score(results: dict) -> float | None:
-    """Optimisation grade in percent: holistic.score_on x 100, published RAW.
+    """Optimisation grade in percent: the owner's window grade (window.score_on x 100) when
+    results.betyg.window exists, otherwise holistic.score_on x 100, published RAW.
+
+    The window grade is the owner's own view (their start date or rolling window); the
+    comparison grade over the last full months stays on its own sensor (jamforelsebetyg).
+    Both use the same raw publishing rule below.
 
     Spec 2026-07-27 (nettoperiod): the grade is now net of battery wear on both sides, so
     score_on has no lower bound - a plant that cycles harder than is profitable scores
@@ -62,12 +90,10 @@ def _betyg_score(results: dict) -> float | None:
     Upper end is untouched too: the backend clamps score_on at 1.05, so values slightly
     above 100 percent are expected and are not an error.
     """
-    betyg = results.get("betyg") or {}
-    holistic = betyg.get("holistic") or {}
-    score_on = holistic.get("score_on")
-    if score_on is None:
-        return None
-    return round(score_on * 100, 2)
+    window = _window_block(results)
+    if window is not None:
+        return round(window["score_on"] * 100, 2)
+    return _comparison_score(results)
 
 
 def _period_end_ts(results: dict) -> datetime | None:
@@ -86,9 +112,57 @@ def _period_end_ts(results: dict) -> datetime | None:
 
 
 def _betyg_available(results: dict) -> bool:
+    return _betyg_score(results) is not None
+
+
+def _comparison_available(results: dict) -> bool:
+    return _comparison_score(results) is not None
+
+
+def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
+    """Attributes that describe the COMPARISON grade (holistic.score_on): its percentile and
+    sample size, its period (betyg.period_start/period_end at the top level of the betyg
+    block), its maturity, and the details of how it was computed (annual basis, measured
+    period figures, price skill, components, external control, benchmark class). Rule:
+    an attribute that describes a specific grade follows that grade, so these live on the
+    comparison grade sensor always, and on the grade sensor only while it shows the
+    comparison grade."""
     betyg = results.get("betyg") or {}
+    peer = betyg.get("peer") or {}
     holistic = betyg.get("holistic") or {}
-    return holistic.get("score_on") is not None
+    return {
+        "peer_percentile": peer.get("percentile"),
+        "peer_n": peer.get("n"),
+        "period_start": betyg.get("period_start"),
+        "period_end": betyg.get("period_end"),
+        "preliminary": betyg.get("preliminary"),
+        "n_days": betyg.get("n_days"),
+        "annual_basis": (betyg.get("annual") or {}).get("basis"),
+        "measured_period_sek": holistic.get("measured_period_sek"),
+        "measured_wear_sek": holistic.get("measured_wear_sek"),
+        "price_skill": betyg.get("price_skill"),
+        "components": betyg.get("components"),
+        **_external_control_attr(results),
+        **_benchmark_attr(results),
+    }
+
+
+def _grade_basis_attr(results: dict) -> dict[str, Any]:
+    """Which grade the grade sensor shows (basis: window | comparison) and the attributes of
+    that grade. A window grade carries only its own dates and maturity; everything else that
+    describes a grade (percentile, annual basis, measured figures, components, benchmark
+    class ...) belongs to the comparison grade and is added only for basis == comparison
+    (it is always on the comparison grade sensor)."""
+    window = _window_block(results)
+    if window is not None:
+        return {
+            "basis": "window",
+            "period_start": window.get("period_start"),
+            "period_end": window.get("period_end"),
+            "preliminary": window.get("preliminary"),
+            "n_days": window.get("n_days"),
+        }
+    return {"basis": "comparison", **_comparison_grade_attrs(results)}
 
 
 def _decision_available(results: dict) -> bool:
@@ -151,16 +225,31 @@ def _measured_battery_value(results: dict) -> float | None:
     Reversed charge/discharge fields (backend spec 2026-10-12): when the server reports
     battery_direction.state == "reversed" the measured value was measured the wrong way
     round, so this returns None and _battery_value falls back to the modelled decision
-    value - the same figure the economics then use."""
+    value - the same figure the economics then use.
+
+    Data mode (backend spec 2026-10-16 §8.2, R14): once the grade is computed against the
+    data-driven benchmark, the grade card's own `annual` and holistic.measured_period_sek
+    follow the benchmark's period, while the economics stay anchored on the legacy window.
+    The backend carries those legacy figures in the public block betyg.economy =
+    {annual, measured_period_sek, score_on}, and its own anchor
+    (warm.measured_battery_annual_from) reads that block first. This reads in the same
+    order, with the same gate applied to the block itself - never a mix of the two, and no
+    fallback to the top level when the block is present but immature. Without the block
+    (legacy mode, older caches) the top-level fields apply as before."""
     betyg = results.get("betyg") or {}
     direction = betyg.get("battery_direction")
     if isinstance(direction, dict) and direction.get("state") == "reversed":
         return None
-    holistic = betyg.get("holistic") or {}
-    annual = betyg.get("annual")
-    if not annual or annual.get("factor") is None or holistic.get("score_on") is None:
+    economy = betyg.get("economy")
+    if isinstance(economy, dict):
+        annual, score_on, period = (economy.get("annual"), economy.get("score_on"),
+                                    economy.get("measured_period_sek"))
+    else:
+        holistic = betyg.get("holistic") or {}
+        annual, score_on, period = (betyg.get("annual"), holistic.get("score_on"),
+                                    holistic.get("measured_period_sek"))
+    if not annual or annual.get("factor") is None or score_on is None:
         return None
-    period = holistic.get("measured_period_sek")
     return round(period * annual["factor"], 2) if period is not None else None
 
 
@@ -250,6 +339,20 @@ def _external_control_attr(results: dict) -> dict[str, Any]:
     if ext is None:
         return {}
     return {"external_control": ext}
+
+
+def _benchmark_attr(results: dict) -> dict[str, Any]:
+    """benchmark (backend spec 2026-10-16 §8.2): the public block on results.betyg,
+    {method, comparable, reasons}, saying whether the grade is compared with other plants
+    (comparable) or is a grade of the plant's own, and why. Derived in one place by the
+    backend worker and handed over verbatim - the sensor never re-derives the class.
+    Present only in data mode; omitted entirely (not None) in legacy mode and for every
+    payload cached before the flip, the same absent-vs-None contract as
+    _external_control_attr."""
+    block = (results.get("betyg") or {}).get("benchmark")
+    if block is None:
+        return {}
+    return {"benchmark": block}
 
 
 def _flex_compensation_attr(results: dict) -> dict[str, Any]:
@@ -354,36 +457,33 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_betyg_available,
         attr_fn=lambda data: (
             {
-                "peer_percentile": (
-                    (data.results.get("betyg") or {}).get("peer") or {}
-                ).get("percentile"),
-                "peer_n": (
-                    (data.results.get("betyg") or {}).get("peer") or {}
-                ).get("n"),
-                "annual_basis": (
-                    (data.results.get("betyg") or {}).get("annual") or {}
-                ).get("basis"),
-                "measured_period_sek": (
-                    (data.results.get("betyg") or {}).get("holistic") or {}
-                ).get("measured_period_sek"),
-                "measured_wear_sek": (
-                    (data.results.get("betyg") or {}).get("holistic") or {}
-                ).get("measured_wear_sek"),
-                "price_skill": (data.results.get("betyg") or {}).get("price_skill"),
-                "components": (data.results.get("betyg") or {}).get("components"),
-                # Preliminärt betyg (backend api 0.43.0): score från 7 dygn, flaggat tills
-                # 30. Attribut (inte egen sensor) - dashboards/automationer kan märka
-                # osäkerheten utan att betygsentiteten byter identitet.
-                "preliminary": (data.results.get("betyg") or {}).get("preliminary"),
-                "n_days": (data.results.get("betyg") or {}).get("n_days"),
+                **_grade_basis_attr(data.results),
+                # Owner-field attributes (the owner's inputs vs the data, not a grade) stay
+                # whichever grade is shown.
                 **_applied_tariff_attr(data.results),
                 **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),
                 **_measured_params_attr(data.results),
-                **_external_control_attr(data.results),
                 **_flex_compensation_attr(data.results),
             }
             if _betyg_available(data.results)
+            else {"reason": "not enough data for a grade yet"}
+        ),
+    ),
+    WoltaSensorEntityDescription(
+        key="jamforelsebetyg",
+        translation_key="jamforelsebetyg",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        # Always the comparison grade (holistic.score_on), whether or not the owner has a
+        # grade window: this is the grade that is compared with other installations.
+        value_fn=_comparison_score,
+        available_fn=_comparison_available,
+        attr_fn=lambda data: (
+            {
+                **_comparison_grade_attrs(data.results),
+            }
+            if _comparison_available(data.results)
             else {"reason": "not enough data for a grade yet"}
         ),
     ),

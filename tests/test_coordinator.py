@@ -1303,6 +1303,74 @@ async def test_profile_sync_updates_entry_data(hass: HomeAssistant, mock_entry):
 
 
 @pytest.mark.asyncio
+async def test_profile_sync_mirrors_control_system(hass: HomeAssistant, mock_entry):
+    """The control system is changed on wolta.se (a declared switch). entry.data must follow:
+    reauth echoes entry.data, and an install-time value there used to rewrite the owner's
+    latest timeline entry on the server (Wolta B4, 2026-10-20). The name follows its
+    "other" and is dropped when the server has none."""
+    mock_entry.data = {**mock_entry.data, "control_system": "other",
+                       "control_system_name": "Egen styrning"}
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "control_system": "emhass", "control_system_name": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["control_system"] == "emhass"
+    assert "control_system_name" not in kwargs["data"]
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_mirrors_soc_absent_including_false(
+    hass: HomeAssistant, mock_entry
+):
+    """soc_absent is server-owned (the owner flips it on wolta.se). A server False is a
+    real answer ("has a sensor") and must be stored, not popped like a missing value;
+    only None (never answered) drops the key."""
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": False})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_SOC_ABSENT] is False
+
+    mock_entry.data = {**mock_entry.data, CONF_SOC_ABSENT: True}
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert CONF_SOC_ABSENT not in kwargs["data"]
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_keeps_soc_absent_when_the_server_omits_the_key(
+    hass: HomeAssistant, mock_entry
+):
+    """A response without the soc_absent key means a server that does not know the field
+    (wrong release order, rollback): the owner's local answer must survive, or the repair
+    comes back after every answer. A present value, False included, still mirrors."""
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+
+    mock_entry.data = {**mock_entry.data, CONF_SOC_ABSENT: True}
+    assert "soc_absent" not in BASE_PROFILE
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"]["battery_kwh"] == 25.0
+    assert kwargs["data"][CONF_SOC_ABSENT] is True
+
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "soc_absent": False})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_SOC_ABSENT] is False
+
+
+@pytest.mark.asyncio
 async def test_profile_sync_zone_change_updates_title(hass: HomeAssistant, mock_entry):
     client = _mock_client()
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "zone": "SE4"})
@@ -2764,13 +2832,15 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_BATTERY_KW, CONF_BATTERY_KWH, CONF_COST_SEK, CONF_EFF,
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
-        CONF_SURCHARGE_ORE, CONF_ZONE,
+        CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
+        CONF_SOC_ABSENT,
     )
 
     assert _PROFILE_SYNC_KEYS == (
         CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+        CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME, CONF_SOC_ABSENT,
     )
     assert CONF_FLEX_COMPENSATION not in _PROFILE_SYNC_KEYS
 
@@ -5177,10 +5247,10 @@ async def test_without_soc_sensors_no_soc_bookmark_and_no_statistics_read(
 
 
 # ---------------------------------------------------------------------------
-# soc_missing: a nudge to pick a state-of-charge sensor (v0.41.0)
+# soc_required: a SoC sensor (or the "no SoC sensor" box) is required (v0.41.0, reworked v0.50.0)
 # ---------------------------------------------------------------------------
 
-_SOC_ISSUE_ID = "soc_missing_test_entry_id"
+_SOC_ISSUE_ID = "soc_required_test_entry_id"
 _MATURE = {"betyg": {"preliminary": False, "score_pct": 64}}
 
 
@@ -5192,51 +5262,103 @@ async def _soc_coordinator(hass, mock_entry, *, status="nameplate", **entry_over
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["nameplate", "measured"])
-async def test_soc_missing_fires_for_a_graded_battery_without_soc(hass, mock_entry, status):
+async def test_soc_required_fires_for_a_graded_battery_without_soc(hass, mock_entry, status):
     c = await _soc_coordinator(hass, mock_entry, status=status)
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
     assert issue is not None
-    assert issue.translation_key == "soc_missing"
+    assert issue.translation_key == "soc_required"
     assert issue.is_fixable is True
     # The fix flow resolves the entry from the issue data.
     assert issue.data == {"entry_id": "test_entry_id"}
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_not_when_a_sensor_is_chosen(hass, mock_entry):
+async def test_soc_required_not_when_a_sensor_is_chosen(hass, mock_entry):
     from custom_components.wolta.const import CONF_SOC
     c = await _soc_coordinator(hass, mock_entry, **{CONF_SOC: ["sensor.soc"]})
     c._soc_entities = ["sensor.soc"]
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_clears_once_a_sensor_is_chosen(hass, mock_entry):
+async def test_soc_required_clears_once_a_sensor_is_chosen(hass, mock_entry):
     c = await _soc_coordinator(hass, mock_entry)
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
     c._soc_entities = ["sensor.soc"]
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_respects_ignore(hass, mock_entry):
+async def test_soc_required_ignores_the_old_ignore_flag(hass, mock_entry):
+    """The old "ignore" answered an offer, not the requirement (spec 4.2): it no longer
+    silences the issue."""
     from custom_components.wolta.const import CONF_SOC_ISSUE_IGNORED
     c = await _soc_coordinator(hass, mock_entry, **{CONF_SOC_ISSUE_IGNORED: True})
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_soc_absent_silences(hass, mock_entry):
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+    c = await _soc_coordinator(hass, mock_entry, **{CONF_SOC_ABSENT: True})
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_soc_absent_clears_an_open_issue(hass, mock_entry):
+    from custom_components.wolta.const import CONF_SOC_ABSENT
+    c = await _soc_coordinator(hass, mock_entry)
+    c._evaluate_soc_required_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+    mock_entry.data = {**mock_entry.data, CONF_SOC_ABSENT: True}
+    c._evaluate_soc_required_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_soc_required_fires_even_if_old_missing_was_ignored(hass, mock_entry):
+    """HA keeps dismissed_version when an existing id is re-created, so the new issue has
+    its own id and the legacy soc_missing_<entry> is deleted on every evaluation."""
+    from custom_components.wolta.const import CONF_SOC_ISSUE_IGNORED
+    c = await _soc_coordinator(hass, mock_entry, **{CONF_SOC_ISSUE_IGNORED: True})
+    legacy = "soc_missing_test_entry_id"
+    ir.async_create_issue(
+        hass, DOMAIN, legacy, is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="soc_missing")
+    ir.async_ignore_issue(hass, DOMAIN, legacy, True)
+    c._evaluate_soc_required_issue(_MATURE)
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, legacy) is None
+    new = reg.async_get_issue(DOMAIN, _SOC_ISSUE_ID)
+    assert new is not None and new.dismissed_version is None
+    # Idempotent: a second evaluation with nothing legacy left is a no-op.
+    c._evaluate_soc_required_issue(_MATURE)
+    assert reg.async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_legacy_soc_missing_is_deleted_even_without_a_grade_block(hass, mock_entry):
+    c = await _soc_coordinator(hass, mock_entry)
+    ir.async_create_issue(
+        hass, DOMAIN, "soc_missing_test_entry_id", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="soc_missing")
+    c._evaluate_soc_required_issue({})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "soc_missing_test_entry_id") is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["none", "pending", "needs_input", None])
-async def test_soc_missing_needs_a_known_battery(hass, mock_entry, status):
+async def test_soc_required_needs_a_known_battery(hass, mock_entry, status):
     """No battery, a battery still being measured, or a stamp we never got: nothing to
     ask about yet."""
     c = await _soc_coordinator(hass, mock_entry, status=status)
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
@@ -5244,39 +5366,62 @@ async def test_soc_missing_needs_a_known_battery(hass, mock_entry, status):
 @pytest.mark.parametrize("results", [
     {}, {"betyg": None}, {"betyg": {}}, {"betyg": {"preliminary": True, "score_pct": 50}},
 ])
-async def test_soc_missing_waits_for_a_mature_grade(hass, mock_entry, results):
+async def test_soc_required_waits_for_a_mature_grade(hass, mock_entry, results):
     """A new install was just offered the field in setup; do not ask again until the
     plant has a settled grade."""
     c = await _soc_coordinator(hass, mock_entry)
-    c._evaluate_soc_missing_issue(results)
+    c._evaluate_soc_required_issue(results)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("results", [{}, {"betyg": None}, {"betyg": {}}])
-async def test_soc_missing_keeps_the_issue_when_a_cycle_lacks_a_grade(hass, mock_entry, results):
+async def test_soc_required_keeps_the_issue_when_a_cycle_lacks_a_grade(hass, mock_entry, results):
     """A results payload without a grade block says nothing about the plant - it must not
     delete an open repair, or the repair would flap on every such cycle."""
     c = await _soc_coordinator(hass, mock_entry)
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
-    c._evaluate_soc_missing_issue(results)
+    c._evaluate_soc_required_issue(results)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is not None
     # A preliminary grade, by contrast, is an answer: the plant is not settled -> clear.
-    c._evaluate_soc_missing_issue({"betyg": {"preliminary": True, "score_pct": 50}})
+    c._evaluate_soc_required_issue({"betyg": {"preliminary": True, "score_pct": 50}})
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_never_in_view_only(hass, mock_entry):
+async def test_soc_required_keeps_an_ignored_issue_when_the_battery_status_is_unread(
+    hass, mock_entry
+):
+    """_battery_status lives in memory: after a start or reload it is None until the first
+    profile GET succeeds. A main cycle that gets results but no profile must not delete
+    an open repair - that would wipe HA's Ignore (dismissed_version) with it."""
+    c = await _soc_coordinator(hass, mock_entry)
+    c._evaluate_soc_required_issue(_MATURE)
+    ir.async_ignore_issue(hass, DOMAIN, _SOC_ISSUE_ID, True)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID).dismissed_version
+
+    c._battery_status = None
+    c._evaluate_soc_required_issue(_MATURE)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
+    assert issue is not None and issue.dismissed_version is not None
+
+    # A real answer still clears it.
+    c._battery_status = "none"
+    c._evaluate_soc_required_issue(_MATURE)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_soc_required_never_in_view_only(hass, mock_entry):
     c = await _soc_coordinator(hass, mock_entry)
     c._view_only = True
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_is_evaluated_in_the_upload_cycle(hass, mock_entry):
+async def test_soc_required_is_evaluated_in_the_upload_cycle(hass, mock_entry):
     """The main cycle evaluates it, with the cycle's own results and battery stamp."""
     client = _mock_client(results={**RESULTS_PAYLOAD, **_MATURE})
     client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_status": "measured"})
@@ -5285,7 +5430,7 @@ async def test_soc_missing_is_evaluated_in_the_upload_cycle(hass, mock_entry):
 
 
 @pytest.mark.asyncio
-async def test_soc_missing_is_not_persistent_and_only_the_main_cycle_raises_it(hass, mock_entry):
+async def test_soc_required_is_not_persistent_and_only_the_main_cycle_raises_it(hass, mock_entry):
     """The issue is re-derived every main cycle from live state, never persisted: after a
     restart it is absent until the first main cycle re-raises it. The side poll
     (_take_battery_state) updates the battery stamp but must not raise it - the stamp
@@ -5294,7 +5439,7 @@ async def test_soc_missing_is_not_persistent_and_only_the_main_cycle_raises_it(h
     c._take_battery_state({**BASE_PROFILE, "battery_status": "measured"})
     assert c._battery_status == "measured"
     assert ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID) is None
-    c._evaluate_soc_missing_issue(_MATURE)
+    c._evaluate_soc_required_issue(_MATURE)
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _SOC_ISSUE_ID)
     assert issue is not None and issue.is_persistent is False
 
@@ -6483,3 +6628,124 @@ async def test_grid_fee_implausible_not_in_view_only(hass, mock_entry):
     c._view_only = True
     c._evaluate_grid_fee_issue(_tariff_check(True))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# control_system_required (spec 2026-10-20-soc-krav 4.6): the control system must be set
+# ---------------------------------------------------------------------------
+
+_CS_ISSUE_ID = "control_system_required_test_entry_id"
+
+
+async def _cs_coordinator(hass, mock_entry, *, synced=True, **entry_over):
+    """A coordinator whose profile has been read once (the battery stamp is set only by a
+    successful profile GET, _take_battery_state); `synced=False` is a fresh start."""
+    c = await _cap_coordinator(hass, mock_entry, **entry_over)
+    c._battery_status = "measured" if synced else None
+    return c
+
+
+def _cs_issue(hass):
+    return ir.async_get(hass).async_get_issue(DOMAIN, _CS_ISSUE_ID)
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_fires_when_profile_synced_without_control_system(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    issue = _cs_issue(hass)
+    assert issue is not None
+    assert issue.translation_key == "control_system_required"
+    assert issue.is_fixable is True
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.data["entry_id"] == "test_entry_id"
+    assert issue.is_persistent is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "", "   "])
+async def test_cs_issue_fires_for_other_without_a_name(hass, mock_entry, name):
+    from custom_components.wolta.const import CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME
+    over = {CONF_CONTROL_SYSTEM: "other"}
+    if name is not None:
+        over[CONF_CONTROL_SYSTEM_NAME] = name
+    c = await _cs_coordinator(hass, mock_entry, **over)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", [
+    {"control_system": "tibber"},
+    {"control_system": "other", "control_system_name": "Egen styrning"},
+])
+async def test_cs_issue_silent_when_the_control_system_is_set(hass, mock_entry, over):
+    c = await _cs_coordinator(hass, mock_entry, **over)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_silent_before_the_profile_has_been_read(hass, mock_entry):
+    """entry.data is only a mirror of the server: before the first profile read an entry
+    without the key may simply not have been mirrored yet."""
+    c = await _cs_coordinator(hass, mock_entry, synced=False)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_keeps_an_ignored_issue_when_the_profile_is_unread(hass, mock_entry):
+    """An open (and ignored) repair survives a cycle whose profile GET failed: the
+    evaluation leaves it as it is instead of deleting it and wiping HA's Ignore."""
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    ir.async_ignore_issue(hass, DOMAIN, _CS_ISSUE_ID, True)
+
+    c._battery_status = None
+    c._evaluate_control_system_issue()
+    issue = _cs_issue(hass)
+    assert issue is not None and issue.dismissed_version is not None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_never_in_view_only(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c._view_only = True
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_clears_once_the_control_system_is_mirrored(hass, mock_entry):
+    from custom_components.wolta.const import CONF_CONTROL_SYSTEM
+    c = await _cs_coordinator(hass, mock_entry)
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is not None
+    mock_entry.data = {**mock_entry.data, CONF_CONTROL_SYSTEM: "tibber"}
+    c._evaluate_control_system_issue()
+    assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_is_evaluated_in_the_upload_cycle(hass, mock_entry):
+    """The main cycle reads the profile first, so the mirror and the evaluation agree: a
+    server without a control system raises it, a server with one does not."""
+    client = _mock_client(results=RESULTS_PAYLOAD)
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_status": "measured"})
+    await _sync_refresh(hass, mock_entry, client)
+    assert _cs_issue(hass) is not None
+
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_not_raised_when_the_server_has_a_control_system(hass, mock_entry):
+    client = _mock_client(results=RESULTS_PAYLOAD)
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_status": "measured", "control_system": "tibber"})
+    # The mirror writes entry.data; the mock entry is not registered, so apply the write.
+    with patch.object(hass.config_entries, "async_update_entry",
+                      side_effect=lambda e, **kw: setattr(e, "data", kw["data"]) or True):
+        await _sync_refresh(hass, mock_entry, client)
+    assert mock_entry.data["control_system"] == "tibber"
+    assert _cs_issue(hass) is None
