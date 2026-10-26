@@ -65,6 +65,7 @@ from .const import (
     CONF_NAMEPLATE_KW,
     CONF_POWER_ISSUE_IGNORED,
     CONF_PURCHASE_DATE,
+    CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
     CONF_SOC,
     CONF_SOC_ABSENT,
@@ -793,6 +794,11 @@ _ISSUE_SOC_MISSING_LEGACY = "soc_missing"
 # api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
 # energy tax is counted twice. Non-fixable: only the owner knows the right figure.
 _ISSUE_GRID_FEE_IMPLAUSIBLE = "grid_fee_implausible"
+# The owner gave a grid fee as a percentage of spot without the fixed part (results.tariff_check
+# .grid_fixed_missing, server api 0.118.0). The server then has no basis for the purchase price
+# and keeps the sensor unavailable until the fixed part (0 if there is none) is entered.
+# Non-fixable: only the owner knows the figure.
+_ISSUE_GRID_FIXED_MISSING = "grid_fixed_missing"
 # The server's archive of replaced rows is full (429 on open): a correction of the stored
 # history waits until Retry-After. Non-fixable, one per entry; the translation key says
 # which correction waits (_direction / _entities), the placeholder when it is retried.
@@ -887,6 +893,9 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     # The owner's "this battery has no SoC sensor" answer; also flipped on wolta.se and
     # via the repair PATCH. A server False is stored (the loop below only drops None).
     CONF_SOC_ABSENT,
+    # The owner's "my municipality has reduced energy tax" answer (tri-state; also given on
+    # wolta.se). A server False is a real answer and is stored; None drops the key.
+    CONF_REDUCED_ENERGY_TAX,
 )
 
 
@@ -2312,11 +2321,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         new_data = dict(entry.data)
         changed = False
         for key in _PROFILE_SYNC_KEYS:
-            if key == CONF_SOC_ABSENT and key not in profile:
+            if key in (CONF_SOC_ABSENT, CONF_REDUCED_ENERGY_TAX) and key not in profile:
                 # A response without the key comes from a server that does not know the
                 # field (wrong release order, rollback). Dropping the owner's local
-                # answer then would bring the SoC repair back after every answer. A
-                # present value mirrors, None (never answered) and False included.
+                # answer then would bring the SoC repair back after every answer (and
+                # lose the energy-tax answer the next reauth should carry). A present
+                # value mirrors, None (never answered) and False included.
                 continue
             server_val = profile.get(key)
             if server_val is None:
@@ -3887,6 +3897,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         check = results.get("tariff_check")
         if not isinstance(check, dict):
             return
+        self._evaluate_grid_fixed_issue(check)
         issue_id = f"{_ISSUE_GRID_FEE_IMPLAUSIBLE}_{self.config_entry.entry_id}"
         if not check.get("grid_var_implausible") or self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
@@ -3898,6 +3909,27 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             severity=ir.IssueSeverity.WARNING,
             translation_key=_ISSUE_GRID_FEE_IMPLAUSIBLE,
             translation_placeholders={"limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
+        )
+
+    def _evaluate_grid_fixed_issue(self, check: dict) -> None:
+        """Warn when the server says the grid fee has a percentage but no fixed part.
+
+        Same shape as the implausibility warning above, and just as server-owned: the flag is
+        tariff.grid_fixed_missing, derived once on the server and read here. A tariff_check
+        without the flag is a server before api 0.118.0 and leaves whatever is open as it is
+        (a missing answer is not a "no"). Never in view-only mode: the tariff is set on
+        wolta.se there, not under Configure."""
+        if "grid_fixed_missing" not in check:
+            return
+        issue_id = f"{_ISSUE_GRID_FIXED_MISSING}_{self.config_entry.entry_id}"
+        if check.get("grid_fixed_missing") is not True or self._view_only:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self.hass, DOMAIN, issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_GRID_FIXED_MISSING,
         )
 
     @staticmethod

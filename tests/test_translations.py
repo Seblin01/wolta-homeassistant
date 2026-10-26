@@ -277,3 +277,123 @@ def test_control_system_required_repair_reuses_the_onboarding_name_error(lang: s
     errors = data["issues"]["control_system_required"]["fix_flow"]["error"]
     assert errors["control_system_name_required"] == data["config"]["error"][
         "control_system_name_required"]
+
+
+# ---------------------------------------------------------------------------
+# Inköpspris (HACS 0.53.0): reduced energy tax choice and the fixed grid fee
+# ---------------------------------------------------------------------------
+
+_TAX_MUNICIPALITIES = (
+    "Norrbotten", "Västerbotten", "Jämtland", "Sollefteå", "Ånge", "Örnsköldsvik",
+    "Ljusdal", "Malung-Sälen", "Mora", "Orsa", "Älvdalen", "Torsby")
+
+
+def _lang(lang: str) -> dict:
+    return json.loads((_TRANSLATIONS / f"{lang}.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_reduced_energy_tax_select_has_its_three_options(path: Path) -> None:
+    """The selector reads its labels from selector.<translation_key>.options.<value>; a
+    missing entry renders the raw value ("not_set") in the list."""
+    options = _load(path)["selector"]["reduced_energy_tax"]["options"]
+    assert set(options) == {"not_set", "no", "yes"}
+    assert all(options.values())
+
+
+@pytest.mark.parametrize("lang, needles", [
+    ("en", ("Skatteverket", "9.6", "state is unknown", "Not set")),
+    ("sv", ("Skatteverket", "9,6", "tillståndet är okänt", "Inte angivet"))])
+def test_reduced_energy_tax_help_text_names_the_source_and_what_not_set_means(
+        lang: str, needles: tuple[str, ...]) -> None:
+    data = _lang(lang)
+    text = data["options"]["step"]["settings"]["sections"]["tariffs"]["data_description"][
+        "reduced_energy_tax"]
+    for needle in needles + _TAX_MUNICIPALITIES:
+        assert needle in text, (needle, text)
+    assert data["selector"]["reduced_energy_tax"]["options"]["not_set"] in text
+
+
+@pytest.mark.parametrize("lang, needle, fixed_word", [
+    ("en", "0 if you only have a percentage", "fixed part"),
+    ("sv", "0 om du bara har procent", "fasta del")])
+def test_fixed_grid_fee_field_says_zero_when_only_a_percentage(
+        lang: str, needle: str, fixed_word: str) -> None:
+    descriptions = _lang(lang)["options"]["step"]["settings"]["sections"]["tariffs"][
+        "data_description"]
+    assert needle in descriptions["grid_var_ore"]
+    # The percent field points at the fixed part it requires.
+    assert fixed_word in descriptions["grid_var_pct"]
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_grid_fixed_missing_issue_exists_and_is_not_fixable(path: Path) -> None:
+    issue = _load(path)["issues"]["grid_fixed_missing"]
+    assert issue["title"]
+    assert issue["description"]
+    assert "fix_flow" not in issue
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_grid_fixed_required_error_exists_for_options_and_reauth(path: Path) -> None:
+    data = _load(path)
+    assert data["options"]["error"]["grid_fixed_required"]
+    assert data["config"]["error"]["grid_fixed_required"]
+    # The reauth form shows the field it asks for.
+    assert data["config"]["step"]["reauth_confirm"]["data"]["grid_var_ore"]
+
+
+# --- purchase-price copy -------------------------------------------------------
+#
+# A purchase-price sensor without a price is AVAILABLE with state `unknown` and a `reason`
+# attribute (Home Assistant hides every attribute of an unavailable entity, and the reason
+# is the point). Copy that says "unavailable" would send the user looking for the wrong
+# thing, so the strings that explain the missing price must not use the word.
+
+_ALL_COPY = [_STRINGS, *_translation_files()]
+_NO_PRICE_COPY = (
+    ("issues", "grid_fixed_missing", "description"),
+    ("options", "step", "settings", "sections", "tariffs", "data_description",
+     "reduced_energy_tax"),
+)
+_SETTINGS_PATH = {
+    "strings.json": "Configure → Settings → Tariffs",
+    "en.json": "Configure → Settings → Tariffs",
+    "sv.json": "Konfigurera → Inställningar → Tariffer",
+}
+
+
+def _at(tree: dict, path: tuple[str, ...]) -> str:
+    for key in path:
+        tree = tree[key]
+    return tree
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("key", _NO_PRICE_COPY, ids=lambda k: ".".join(k[-2:]))
+def test_missing_price_copy_does_not_say_unavailable(path: Path, key: tuple[str, ...]):
+    text = _at(_load(path), key).lower()
+    assert "unavailable" not in text, f"{path.name}: {'.'.join(key)}"
+    assert "otillgänglig" not in text, f"{path.name}: {'.'.join(key)}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("issue", ["grid_fee_implausible", "grid_fixed_missing"])
+def test_repair_text_names_the_real_menu_path(path: Path, issue: str):
+    """The tariffs live under Configure → Settings → Tariffs, not directly under Configure."""
+    text = _at(_load(path), ("issues", issue, "description"))
+    assert _SETTINGS_PATH[path.name] in text, f"{path.name}: {issue}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_options_fixed_part_error_names_the_tariffs_section(path: Path):
+    """Base errors render at the top of the form, so "above" points at nothing."""
+    text = _at(_load(path), ("options", "error", "grid_fixed_required"))
+    assert "above" not in text.lower() and "ovan" not in text.lower(), path.name
+    tariffs = _at(_load(path), ("options", "step", "settings", "sections", "tariffs", "name"))
+    assert tariffs in text, path.name
+
+
+def test_swedish_copy_uses_typographic_quotes():
+    text = _at(_load(_TRANSLATIONS / "sv.json"), ("options", "error", "grid_fixed_required"))
+    assert '"' not in text

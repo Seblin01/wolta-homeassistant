@@ -140,7 +140,11 @@
     },
     "grid_fee_implausible": {
       "title": "Wolta: nätavgiften ser för hög ut",
-      "description": "Nätavgiften du angett är över {limit} öre per kWh, mer än någon rörlig nätavgift vi har sett. Den innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Tariffer. Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
+      "description": "Nätavgiften du angett är över {limit} öre per kWh, mer än någon rörlig nätavgift vi har sett. Den innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
+    },
+    "grid_fixed_missing": {
+      "title": "Wolta: nätavgiften saknar sin fasta del",
+      "description": "Nätavgiften är angiven som procent av spotpriset, men utan fast del. Utan den kan Wolta inte räkna ut vad du betalar för elen, så sensorn för inköpspris saknar pris (tillståndet är okänt, se attributet reason).\n\nAnge nätavgiftens fasta del (överföringsavgiften, exklusive moms och energiskatt) under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Ange 0 om du bara har procent."
     },
     "soc_required": {
       "title": "Wolta behöver sensorn för batteriets laddningsnivå",
@@ -350,7 +354,12 @@
       "reauth_confirm": {
         "title": "Autentisera Wolta på nytt",
         "description": "Din Wolta-profiltoken har upphört eller tagits bort. Bekräfta för att skapa en ny profil och återkoppla integrationen.",
-        "data": {}
+        "data": {
+          "grid_var_ore": "Nätavgift, fast del (öre/ct per kWh)"
+        },
+        "data_description": {
+          "grid_var_ore": "Din sparade nätavgift är procent av spot utan fast del, vilket Wolta numera kräver. Ange den fasta delen, exklusive moms och energiskatt. Ange 0 om du bara har procent."
+        }
       },
       "user": {
         "title": "Konfigurera Wolta",
@@ -434,6 +443,7 @@
     },
     "error": {
       "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
+      "grid_fixed_required": "Din sparade nätavgift är procent av spot utan fast del. Ange den fasta delen (exklusive moms och energiskatt, 0 om du bara har procent) och bekräfta igen.",
       "invalid_input": "Wolta avvisade anläggningens uppgifter – kontrollera elområde och styrsystem och försök igen.",
       "rate_limited": "Wolta API begränsar för tillfället förfrågningar – försök igen senare.",
       "required_sensor": "Minst en sensor krävs för detta flöde.",
@@ -511,14 +521,16 @@
               "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh)",
               "export_extra_ore": "Exportjustering (öre/ct per kWh)",
               "grid_var_pct": "Nätavgiftens procentdel (% av spot)",
-              "export_extra_pct": "Exportersättning i procent (% av spot)"
+              "export_extra_pct": "Exportersättning i procent (% av spot)",
+              "reduced_energy_tax": "Reducerad energiskatt"
             },
             "data_description": {
-              "grid_var_ore": "Din rörliga nätavgift (överföringsavgift), exklusive moms och energiskatt, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Wolta lägger på moms och energiskatt själv. Rensa fältet för att återgå till landets schablon.",
+              "grid_var_ore": "Din rörliga nätavgift (överföringsavgift), exklusive moms och energiskatt, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Wolta lägger på moms och energiskatt själv. Har nätavgiften också en procentdel av spot (fältet nedan) är det här dess fasta del, och den är obligatorisk: ange 0 om du bara har procent. Rensa fältet för att återgå till landets schablon.",
               "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Rensa fältet för att återgå till landets schablon.",
               "export_extra_ore": "Extra belopp ditt nät-/exportavtal betalar (eller drar av) per exporterad kWh, utöver spotpriset, i öre eller eurocent. Kan vara negativt. Rensa fältet för att återgå till landets schablon.",
-              "grid_var_pct": "Nätavgiftens rörliga del som procent av spotpriset. Rensa fältet för att ta bort procentdelen.",
-              "export_extra_pct": "Exportersättning som procent av spotpriset (kan vara negativ). Rensa fältet för att ta bort procentdelen."
+              "grid_var_pct": "Nätavgiftens procentdel av spotpriset. Den kräver den fasta delen i fältet ovan (0 om du bara har procent). Rensa fältet för att ta bort procentdelen.",
+              "export_extra_pct": "Exportersättning som procent av spotpriset (kan vara negativ). Rensa fältet för att ta bort procentdelen.",
+              "reduced_energy_tax": "Vissa kommuner i norra Sverige har reducerad energiskatt: ditt nätbolag drar av 9,6 öre/kWh exklusive moms på fakturan. Det gäller alla kommuner i Norrbotten, Västerbotten och Jämtland samt Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen och Torsby. Källa: Skatteverket. Välj Ja om du bor i någon av dem och Nej om du inte gör det. Inte angivet betyder att du inte har svarat: i SE1–SE3 saknar sensorn för inköpspris pris (tillståndet är okänt) tills du gör det."
             }
           }
         },
@@ -543,12 +555,22 @@
     },
     "error": {
       "battery_pair_incomplete": "Kapacitet och effekt hör ihop: fyll i båda, eller lämna båda tomma och låt Wolta mäta dem.",
+      "grid_fixed_required": "En nätavgift som anges som procent av spot behöver också sin fasta del. Fyll i ”Nätavgift” i sektionen Tariffer (0 om du bara har procent).",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },
     "abort": {
       "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare.",
       "reauth_required": "Profilen finns inte längre på wolta.se – återautentisering har startats, se dina aviseringar."
+    }
+  },
+  "selector": {
+    "reduced_energy_tax": {
+      "options": {
+        "not_set": "Inte angivet",
+        "no": "Nej",
+        "yes": "Ja"
+      }
     }
   },
   "entity": {
@@ -593,6 +615,9 @@
       },
       "spot_price_with_forecast": {
         "name": "Spotpris med prognos"
+      },
+      "purchase_price": {
+        "name": "Inköpspris"
       }
     },
     "button": {

@@ -36,6 +36,11 @@ CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"
 CONF_EXPORT_EXTRA_PCT = "export_extra_pct"
+# Reduced energy tax (the "norrlandsavdraget"): the owner lives in a municipality where the
+# grid operator deducts 9.6 öre/kWh excl. VAT (Skatteverket, see the options help text).
+# Tri-state, mirrored from the server (_PROFILE_SYNC_KEYS): absent/None = never answered, False =
+# answered no, True = answered yes. Only asked in SE1-SE3 (no affected municipality in SE4).
+CONF_REDUCED_ENERGY_TAX = "reduced_energy_tax"
 # Battery charge/discharge reversed (issue #1): some community integrations/meters
 # (Emaldo, signed Shelly) map the directions the wrong way → inverted grade. The flag swaps
 # batt_in/batt_out in the upload path so the user doesn't have to change their HA sensors.

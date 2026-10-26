@@ -328,6 +328,7 @@ class WoltaApiClient:
         control_system: str | None = None,
         control_system_name: str | None = None,
         soc_absent: bool | None = None,
+        reduced_energy_tax: bool | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -382,6 +383,11 @@ class WoltaApiClient:
         # omitted field leaves the server's value untouched (spec 2026-10-20-soc-krav).
         if soc_absent is not None:
             payload["soc_absent"] = soc_absent
+        # Same rule for the energy-tax answer (strict bool on the server): False ("no") is an
+        # answer and is sent, None is omitted. Since api 0.118.0 a re-onboarding merges the
+        # tariff key by key with the stored one, so an omitted answer keeps the stored one.
+        if reduced_energy_tax is not None:
+            payload["reduced_energy_tax"] = reduced_energy_tax
         data = await self._request("POST", "/profile", json=payload, _reclaim_errors=True)
         return data["profile_token"]
 
@@ -433,6 +439,23 @@ class WoltaApiClient:
         aiohttp's default 300 s total timeout."""
         data = await self._request(
             "GET", "/prices/forecast", params={"zone": zone}, timeout=PUBLIC_LOOKUP_TIMEOUT
+        )
+        return data if isinstance(data, dict) else None
+
+    async def get_purchase_prices(self, token: str) -> dict | None:
+        """GET /profile/prices (Bearer token; server >= 0.118.0): the owner's electricity
+        purchase price per quarter-hour for today and tomorrow, in öre/kWh INCLUDING VAT
+        (`purchase_ore_kwh`) next to the spot price EXCLUDING VAT (`spot_ore_kwh`), plus
+        `available`, `reason` (why it is not available) and `components`. Null when the
+        body is not a JSON object.
+
+        Read-only on the server. A 404 (unknown token, a profile that is not an integration
+        profile, or a server before 0.118.0) arrives as WoltaAuthError and a 429 as
+        WoltaRateLimitError, like every profile call; the price coordinator treats all of
+        them as "no purchase price now". Bound by PUBLIC_LOOKUP_TIMEOUT: the sensor is
+        optional and must not hang on aiohttp's default 300 s total timeout."""
+        data = await self._request(
+            "GET", "/profile/prices", headers=self._auth(token), timeout=PUBLIC_LOOKUP_TIMEOUT
         )
         return data if isinstance(data, dict) else None
 

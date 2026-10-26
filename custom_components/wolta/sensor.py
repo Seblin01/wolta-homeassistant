@@ -26,10 +26,14 @@ from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, 
 from .coordinator import WoltaCoordinator, WoltaData
 from .price_coordinator import (
     FULL_FORECAST_KEY,
+    PURCHASE_KEY,
     WoltaPriceCoordinator,
     current_price,
+    current_purchase,
     forecast_days,
     price_series,
+    purchase_covers,
+    purchase_series,
 )
 
 
@@ -819,6 +823,106 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
         return attrs
 
 
+class WoltaPurchasePriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntity):
+    """What the owner pays for electricity right now: SEK/kWh INCLUDING VAT, for the
+    current quarter-hour (spot + supplier markup + energy tax after any reduction + variable
+    grid fee, VAT on all of it). Subscription, fuse fee, power tariff and fixed-price
+    contracts are not in it. The spot price sensors next to it stay EXCLUDING VAT.
+
+    Information only, like the spot sensors: backed by WoltaPriceCoordinator and nothing
+    else, so it reads and writes nothing the grade, the upload or the profile use. The
+    server works the price out from the tariff the owner has set (GET /profile/prices); the
+    integration only reads it. Disabled by default, and only an enabled one makes the
+    coordinator call that endpoint. The state switches at each quarter boundary from the
+    series already fetched, without a poll.
+
+    States: a price; `unknown` with the `reason` attribute when the server has no price for
+    the owner (tariff not set, ...) or the covering quarter has none; `unavailable` only when
+    there is no data at all (see `available`).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "purchase_price"
+    _attr_native_unit_of_measurement = "SEK/kWh"
+    _attr_suggested_display_precision = 3
+    _attr_entity_registry_enabled_default = False
+    # The series is up to ~190 points; the recorder would store it on every change.
+    _unrecorded_attributes = frozenset({"prices"})
+
+    def __init__(self, coordinator: WoltaPriceCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.unique_id}_purchase_price"
+        self._attr_device_info = _device_info(entry)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Only an enabled entity is ever added to hass (a disabled one is just a registry
+        # entry), so being here means the user wants the purchase price: ask the coordinator
+        # to fetch it. Enabling or disabling the entity reloads the entry, which
+        # re-evaluates this.
+        self.async_on_remove(self.coordinator.async_request_purchase_prices())
+        self.async_on_remove(
+            async_track_utc_time_change(
+                self.hass, self._quarter_boundary, minute=(0, 15, 30, 45), second=1
+            )
+        )
+
+    @callback
+    def _quarter_boundary(self, _now: datetime) -> None:
+        self.async_write_ha_state()
+
+    def _purchase(self) -> dict[str, Any] | None:
+        data = self.coordinator.data or {}
+        purchase = data.get(PURCHASE_KEY)
+        return purchase if isinstance(purchase, dict) else None
+
+    def _current(self) -> float | None:
+        return current_purchase(self._purchase(), dt_util.utcnow())
+
+    @property
+    def available(self) -> bool:
+        # Unavailable: /prices/now failed (the coordinator fails, like the spot sensors),
+        # there is no purchase data (not fetched yet, a server before 0.118.0, or the request
+        # failed with no earlier answer to fall back on) or the data is stale (no quarter
+        # covers now). A failed poll alone does not make it unavailable: the coordinator keeps
+        # the last good response, and this check ends it once that series no longer covers now.
+        #
+        # When the server ANSWERED that it has no price (available: false, with a `reason`),
+        # or the covering quarter has none (that year's energy-tax rule is missing), the
+        # entity is available with the state `unknown` instead. Home Assistant drops every
+        # attribute of an unavailable entity, and `reason` (what the owner has to do) is the
+        # whole point of that answer.
+        purchase = self._purchase()
+        if not self.coordinator.last_update_success or purchase is None:
+            return False
+        if purchase.get("available") is not True:
+            return True
+        return purchase_covers(purchase, dt_util.utcnow())
+
+    @property
+    def native_value(self) -> float | None:
+        return self._current()
+
+    @property
+    def attribution(self) -> str | None:
+        # The spot price inside the purchase price is the same market data the spot sensors
+        # show; the credit comes from /prices/now.
+        source = (self.coordinator.data or {}).get("source")
+        return source or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        purchase = self._purchase()
+        if purchase is None:
+            return {}
+        return {
+            "prices": purchase_series(purchase),
+            "components": purchase.get("components"),
+            "reason": purchase.get("reason"),
+            "tomorrow_complete": purchase.get("tomorrow_complete"),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
@@ -842,3 +946,4 @@ async def async_setup_entry(
             WoltaSpotPriceSensor(coordinator.prices, entry, with_forecast=flag)
             for flag in (False, True)
         )
+        async_add_entities([WoltaPurchasePriceSensor(coordinator.prices, entry)])
