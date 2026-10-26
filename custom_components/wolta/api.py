@@ -408,6 +408,16 @@ class WoltaApiClient:
         data = await self._request("GET", "/control-systems", timeout=PREFILL_TIMEOUT)
         return data if isinstance(data, list) else []
 
+    async def get_prices_now(self, zone: str) -> dict:
+        """GET /prices/now?zone=<zone> (public, no Authorization header): current,
+        today's and tomorrow's spot prices and, where available, the price forecast.
+
+        Bound by PREFILL_TIMEOUT like the other public lookup: the price sensors are
+        optional and must not hang on aiohttp's default 300 s total timeout."""
+        return await self._request(
+            "GET", "/prices/now", params={"zone": zone}, timeout=PREFILL_TIMEOUT
+        )
+
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.
 

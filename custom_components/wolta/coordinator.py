@@ -79,6 +79,7 @@ from .const import (
 from . import stats
 from . import coverage
 from .control_system_prefill import control_system_name_error
+from .price_coordinator import WoltaPriceCoordinator
 from . import intervals
 from .stats import (
     aggregate_5min_to_15min,
@@ -971,6 +972,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._battery_status: str | None = None
         self._battery_detect: dict | None = None
         self._detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+        # Spot-price coordinator, set by async_setup_entry. Separate on purpose: the
+        # price forecast is information only and never feeds the grade or the upload.
+        self.prices: WoltaPriceCoordinator | None = None
 
         # Normalise entry data to lists for backward compat with v0.1.0 (plain strings)
         def _to_list(val: str | list | None) -> list[str]:

@@ -24,6 +24,7 @@ from .const import (
     WOLTA_API_BASE,
 )
 from .coordinator import WoltaCoordinator
+from .price_coordinator import WoltaPriceCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +49,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = WoltaCoordinator(hass, entry)
     entry.runtime_data = coordinator
     await coordinator.async_config_entry_first_refresh()
+    # Spot prices (information only, never read by the grade). async_refresh, not
+    # async_config_entry_first_refresh: a failing price endpoint must not stop the entry.
+    coordinator.prices = WoltaPriceCoordinator(hass, entry, client)
+    await coordinator.prices.async_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
