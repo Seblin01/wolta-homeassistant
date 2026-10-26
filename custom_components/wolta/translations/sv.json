@@ -587,6 +587,12 @@
       },
       "datastatus": {
         "name": "Datastatus"
+      },
+      "spot_price": {
+        "name": "Spotpris"
+      },
+      "spot_price_with_forecast": {
+        "name": "Spotpris med prognos"
       }
     },
     "button": {

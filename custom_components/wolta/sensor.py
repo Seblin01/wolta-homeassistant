@@ -22,6 +22,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
+from .price_coordinator import WoltaPriceCoordinator, price_series
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +612,18 @@ _CURRENCY_KEYS = frozenset({"batterivarde_ar", "facit_i_ar"})
 # ---------------------------------------------------------------------------
 
 
+def _device_info(entry: ConfigEntry) -> DeviceInfo:
+    """The one Wolta device every sensor of an entry attaches to."""
+    link = entry.data.get(CONF_LINK_TOKEN)
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Wolta",
+        manufacturer="Wolta",
+        entry_type="service",
+        configuration_url=link_url(link) if link else f"{WOLTA_API_BASE}/anlaggning",
+    )
+
+
 class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
     """A single Wolta sensor backed by the coordinator."""
 
@@ -635,14 +648,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         self._attr_unique_id = f"{entry.unique_id}_{description.key}"
         # Läslänk, aldrig ägar-tokenet (spec 2026-08-24). Saknas den cachade länken
         # (mint har aldrig lyckats) faller vi tillbaka på den tokenlösa sidan.
-        link = entry.data.get(CONF_LINK_TOKEN)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="Wolta",
-            manufacturer="Wolta",
-            entry_type="service",
-            configuration_url=link_url(link) if link else f"{WOLTA_API_BASE}/anlaggning",
-        )
+        self._attr_device_info = _device_info(entry)
 
     # ------------------------------------------------------------------
     # Properties
@@ -697,6 +703,89 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         return attrs
 
 
+class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntity):
+    """Current spot price (SEK/kWh, excluding VAT) with the price series as an attribute.
+
+    Information only: backed by WoltaPriceCoordinator and nothing else, so it reads and
+    writes nothing the grade, the upload or the profile use, and a failing price endpoint
+    only makes these two sensors unavailable. The with_forecast variant adds the forecast
+    points to the series; it is disabled by default.
+    """
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "SEK/kWh"
+    # The series is hundreds of points; the recorder would store it on every change.
+    _unrecorded_attributes = frozenset({"prices"})
+
+    def __init__(
+        self,
+        coordinator: WoltaPriceCoordinator,
+        entry: ConfigEntry,
+        *,
+        with_forecast: bool,
+    ) -> None:
+        super().__init__(coordinator)
+        self._with_forecast = with_forecast
+        key = "spot_price_with_forecast" if with_forecast else "spot_price"
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{entry.unique_id}_{key}"
+        self._attr_entity_registry_enabled_default = not with_forecast
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def _now_ore(self) -> float | None:
+        # `now` can be null (no current price) and its ore_kwh null (no FX rate).
+        data = self.coordinator.data
+        now = data.get("now") if data else None
+        return now.get("ore_kwh") if isinstance(now, dict) else None
+
+    @property
+    def available(self) -> bool:
+        # data is None until the first price refresh has finished: that refresh runs
+        # after platform setup and last_update_success defaults to True before it.
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and self._now_ore is not None
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        ore = self._now_ore
+        return None if ore is None else round(ore / 100, 5)
+
+    def _forecast(self) -> dict[str, Any] | None:
+        data = self.coordinator.data or {}
+        forecast = data.get("forecast") if self._with_forecast else None
+        return forecast if isinstance(forecast, dict) else None
+
+    @property
+    def attribution(self) -> str | None:
+        data = self.coordinator.data or {}
+        source = data.get("source")
+        forecast = self._forecast()
+        if source and forecast and forecast.get("source"):
+            return f"{source} {forecast['source']}"
+        return source or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        attrs: dict[str, Any] = {
+            "prices": price_series(data, with_forecast=self._with_forecast),
+            "vat_factor": data.get("vat_factor"),
+            "tomorrow_complete": data.get("tomorrow_complete"),
+        }
+        if self._with_forecast:
+            forecast = self._forecast()
+            attrs["forecast_issued_at"] = forecast.get("issued_at") if forecast else None
+            # The API's accuracy object, passed through unchanged.
+            attrs["forecast_accuracy"] = forecast.get("accuracy") if forecast else None
+        return attrs
+
+
 # ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
@@ -713,3 +802,10 @@ async def async_setup_entry(
         WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
         for desc in SENSOR_DESCRIPTIONS
     )
+    # Spot prices: only when the price coordinator exists. Separate from the entities
+    # above on purpose - see WoltaSpotPriceSensor.
+    if coordinator.prices is not None:
+        async_add_entities(
+            WoltaSpotPriceSensor(coordinator.prices, entry, with_forecast=flag)
+            for flag in (False, True)
+        )
