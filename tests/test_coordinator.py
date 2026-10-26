@@ -2833,7 +2833,7 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
         CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
-        CONF_SOC_ABSENT,
+        CONF_SOC_ABSENT, CONF_REDUCED_ENERGY_TAX,
     )
 
     assert _PROFILE_SYNC_KEYS == (
@@ -2841,6 +2841,7 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
         CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME, CONF_SOC_ABSENT,
+        CONF_REDUCED_ENERGY_TAX,
     )
     assert CONF_FLEX_COMPENSATION not in _PROFILE_SYNC_KEYS
 
@@ -6628,6 +6629,115 @@ async def test_grid_fee_implausible_not_in_view_only(hass, mock_entry):
     c._view_only = True
     c._evaluate_grid_fee_issue(_tariff_check(True))
     assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# grid_fixed_missing (server api 0.118.0): a percentage of spot without the fixed part of
+# the grid fee. The server derives the flag (tariff.grid_fixed_missing) and the purchase-price
+# sensor stays unavailable until it is fixed; the repair only shows it.
+# ---------------------------------------------------------------------------
+
+_FIXED_ISSUE_ID = "grid_fixed_missing_test_entry_id"
+
+
+def _fixed_check(flag: bool) -> dict:
+    return {"tariff_check": {"grid_var_implausible": False, "grid_var_limit_ore": 60.0,
+                             "grid_fixed_missing": flag}}
+
+
+@pytest.mark.asyncio
+async def test_grid_fixed_missing_fires_from_the_server_flag(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_fixed_check(True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == "grid_fixed_missing"
+    assert issue.is_fixable is False
+    assert issue.severity == ir.IssueSeverity.WARNING
+    # Independent of the implausibility repair: only one of the two is raised.
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _GRID_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_fixed_missing_clears_when_the_server_says_false(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_fixed_check(True))
+    c._evaluate_grid_fee_issue(_fixed_check(False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_fixed_missing_left_alone_without_the_block(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_fixed_check(True))
+    c._evaluate_grid_fee_issue({})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_grid_fixed_missing_left_alone_when_the_server_lacks_the_flag(hass, mock_entry):
+    """A server before api 0.118.0 sends tariff_check without grid_fixed_missing: that is no
+    answer, so an open issue is not deleted and none is created."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_fixed_check(True))
+    c._evaluate_grid_fee_issue({"tariff_check": {"grid_var_implausible": False}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is not None
+    ir.async_delete_issue(hass, DOMAIN, _FIXED_ISSUE_ID)
+    c._evaluate_grid_fee_issue({"tariff_check": {"grid_var_implausible": False}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_fixed_missing_not_in_view_only(hass, mock_entry):
+    """View-only: the tariff is set on wolta.se, not under Configure here."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._view_only = True
+    c._evaluate_grid_fee_issue(_fixed_check(True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_fee_issues_can_be_open_together(hass, mock_entry):
+    """Implausible and fixed-missing are different faults; one flag never hides the other."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue({"tariff_check": {
+        "grid_var_implausible": True, "grid_var_limit_ore": 60.0, "grid_fixed_missing": True}})
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, _GRID_ISSUE_ID) is not None
+    assert reg.async_get_issue(DOMAIN, _FIXED_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_mirrors_reduced_energy_tax_including_false(
+    hass: HomeAssistant, mock_entry
+):
+    """The answer is also given on wolta.se. A server False is a real answer ("no") and must
+    be stored; None (never answered, or removed with PATCH null) drops the key; a response
+    without the key is a server that does not know the field and leaves the cache alone."""
+    from custom_components.wolta.const import CONF_REDUCED_ENERGY_TAX
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(
+        return_value={**BASE_PROFILE, "reduced_energy_tax": False})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_REDUCED_ENERGY_TAX] is False
+
+    mock_entry.data = {**mock_entry.data, CONF_REDUCED_ENERGY_TAX: True}
+    client.get_profile = AsyncMock(
+        return_value={**BASE_PROFILE, "battery_kwh": 25.0})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_REDUCED_ENERGY_TAX] is True
+
+    client.get_profile = AsyncMock(
+        return_value={**BASE_PROFILE, "reduced_energy_tax": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert CONF_REDUCED_ENERGY_TAX not in kwargs["data"]
 
 
 # ---------------------------------------------------------------------------

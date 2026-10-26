@@ -86,6 +86,7 @@ from .const import (
     CONF_PLANT_ID,
     CONF_PREFILL_PURCHASE_DATE,
     CONF_PURCHASE_DATE,
+    CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
     CONF_SHARE,
     CONF_SOC,
@@ -229,6 +230,18 @@ def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSele
     )
 
 
+def _is_grid_fixed_error(err: WoltaApiError) -> bool:
+    """The server's 422 for "a percentage of spot without the fixed part of the grid fee".
+
+    The detail is the sentence `grid_var_pct kräver grid_var_ore (nätavgiftens fasta del, 0 om
+    du bara har procent)`. api.py reduces an error body to one escaped line, so the Swedish
+    letters may arrive as unicode escapes; the two field names are plain ASCII and identify the rule
+    on their own, so the match does not depend on the wording or the escaping."""
+    text = str(err)
+    return (getattr(err, "status", None) == 422
+            and "grid_var_pct" in text and "grid_var_ore" in text)
+
+
 def _number_selector(
     min_val: float = 0.0,
     max_val: float = 1000.0,
@@ -345,6 +358,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         self._entities_data: dict[str, Any] = {}
         self._link_token: str | None = None
         self._link_profile: dict[str, Any] | None = None
+        # Reauth: set when the server refused the re-created profile because the cached
+        # tariff has a percentage of spot without the fixed part; the form then asks for it.
+        self._reauth_ask_fixed: bool = False
         self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
         # Styrsystem-förslaget ur batterisensorernas integrationsdomän (sätts i
         # entitetssteget). None = inget förslag → plant-fältet får ingen default.
@@ -1012,6 +1028,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
             CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_SOC_ABSENT,
+            CONF_REDUCED_ENERGY_TAX,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -1044,7 +1061,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_NAMEPLATE_KW, CONF_EFF,
                 CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
                 CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
-                CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+                CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX,
             ):
                 if prof.get(key) is not None:
                     entry_data[key] = prof[key]
@@ -1098,6 +1115,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             reauth_entry = self._get_reauth_entry()
             entry_data = dict(reauth_entry.data)
+            # Only present after the server refused a percentage without its fixed part:
+            # the answer is used for this create and kept in the cache.
+            fixed_in = user_input.get(CONF_GRID_VAR_ORE)
+            if fixed_in is not None:
+                entry_data[CONF_GRID_VAR_ORE] = fixed_in
 
             try:
                 session = async_get_clientsession(self.hass)
@@ -1169,6 +1191,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # v0.50.0 has none -> None is omitted by the client, so whatever an
                     # older server row holds is kept.
                     soc_absent=entry_data.get(CONF_SOC_ABSENT),
+                    # The energy-tax answer (None = never answered, omitted by the client).
+                    # The backend (>= 0.118.0) merges the tariff key by key on a re-onboarding
+                    # of a known plant, so an omitted answer keeps the stored one.
+                    reduced_energy_tax=entry_data.get(CONF_REDUCED_ENERGY_TAX),
                 )
             except WoltaPlantClaimed:
                 # A wolta.se account owns the plant (Wolta security review 2026-10-16): the
@@ -1177,25 +1203,35 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_reauth_new_token()
             except WoltaApiError as err:
                 _LOGGER.error("Reauth failed – could not create Wolta profile: %s", err)
-                if getattr(err, "status", None) == 422:
+                if _is_grid_fixed_error(err):
+                    # The old profile is gone, so Configure cannot open to fix this (it reads
+                    # the profile first): the reauth form itself asks for the fixed part.
+                    self._reauth_ask_fixed = True
+                    errors["base"] = "grid_fixed_required"
+                elif getattr(err, "status", None) == 422:
                     errors["base"] = "invalid_input"
                 else:
                     errors["base"] = "cannot_connect"
             else:
-                return self.async_update_reload_and_abort(
-                    reauth_entry,
+                data_updates = {
+                    CONF_TOKEN: new_token,
                     # Persist the id too: on a pre-v0.16.0 entry it was just derived from
                     # entry_id, and a later reauth must send the SAME value to land on the
                     # same plant row.
-                    data_updates={
-                        CONF_TOKEN: new_token,
-                        CONF_PLANT_ID: entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
-                    },
-                )
+                    CONF_PLANT_ID: entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
+                }
+                if fixed_in is not None:
+                    data_updates[CONF_GRID_VAR_ORE] = fixed_in
+                return self.async_update_reload_and_abort(
+                    reauth_entry, data_updates=data_updates)
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({}),
+            data_schema=(
+                vol.Schema({vol.Required(CONF_GRID_VAR_ORE): _number_selector(
+                    min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")})
+                if self._reauth_ask_fixed else vol.Schema({})
+            ),
             errors=errors,
         )
 
@@ -1305,8 +1341,30 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
     _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
-                   CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT),
+                   CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX),
 }
+# The energy-tax answer is tri-state on the server (null / false / true) and a boolean selector
+# can only give true/false, so the form uses a list select whose values map to those three.
+_TAX_NOT_SET = "not_set"
+_TAX_CHOICES = (_TAX_NOT_SET, "no", "yes")
+# Zones where the question is asked. The deduction is Swedish and no affected municipality lies
+# in SE4 (spec 2026-10-26-inkopspris, boio.se/el/elomrade), so SE4 and other countries never see
+# it; the wolta.se form hides it the same way.
+_REDUCED_TAX_ZONES = ("SE1", "SE2", "SE3")
+
+
+def _tax_to_choice(value: Any) -> str:
+    """Server tri-state → select value."""
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return _TAX_NOT_SET
+
+
+def _choice_to_tax(choice: Any) -> bool | None:
+    """Select value → PATCH value (not_set clears the answer with null)."""
+    return {"yes": True, "no": False}.get(choice)
 # Required fields (always present in the form, prefilled from the server snapshot)
 _REQUIRED_FIELDS = (CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF)
 
@@ -1345,6 +1403,12 @@ class WoltaOptionsFlow(OptionsFlow):
         if len(_zone_group(self.config_entry.data.get(CONF_ZONE, ""))) > 1:
             options.append("zone_correction")
         return self.async_show_menu(step_id="init", menu_options=options)
+
+    def _tax_asked(self) -> bool:
+        """Whether the energy-tax question applies: the plant's zone (the server's, else the
+        cached one) is SE1-SE3."""
+        zone = (self._server or {}).get(CONF_ZONE) or self.config_entry.data.get(CONF_ZONE) or ""
+        return str(zone).upper() in _REDUCED_TAX_ZONES
 
     async def async_step_account_link(
         self, user_input: dict[str, Any] | None = None
@@ -1463,7 +1527,8 @@ class WoltaOptionsFlow(OptionsFlow):
                 sec_input = user_input.get(sec) or {}
                 for key in fields:
                     if key in sec_input:
-                        flat[key] = sec_input[key]
+                        flat[key] = (_choice_to_tax(sec_input[key])
+                                     if key == CONF_REDUCED_ENERGY_TAX else sec_input[key])
 
             # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
             # (se battery_pending nedan), så ett ensamt värde är submitbart – och ett halvt
@@ -1488,12 +1553,18 @@ class WoltaOptionsFlow(OptionsFlow):
             # means "actively cleared" → PATCH null would wipe the plant price on
             # every save. Older backends never send cost_scope → False → unchanged.
             plant_scoped_cost = self._server.get("cost_scope") == "plant"
+            # The energy-tax select only exists in SE1-SE3 (see _REDUCED_TAX_ZONES). Where it
+            # is hidden its absence is not "not set": the stored answer must survive, so the
+            # diff skips the key (same reasoning as plant_scoped_cost above).
+            tax_asked = self._tax_asked()
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
             for sec, fields in _SECTION_FIELDS.items():
                 for key in fields:
                     if key == CONF_COST_SEK and plant_scoped_cost:
+                        continue
+                    if key == CONF_REDUCED_ENERGY_TAX and not tax_asked:
                         continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
@@ -1515,12 +1586,27 @@ class WoltaOptionsFlow(OptionsFlow):
             invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
             invert_changed = invert_new != bool(desired_invert_intervals(entry.data))
 
+            # A percentage of spot needs the fixed part of the grid fee (0 is an answer): the
+            # server refuses the PATCH otherwise (422), so the form says it first and sends
+            # nothing. Mirrors the server's own condition: only a save that TOUCHES one of the
+            # two fields is checked, so a legacy profile with just the percentage can still
+            # save an unrelated change (the grid_fixed_missing repair asks for the fixed part).
+            if (
+                (CONF_GRID_VAR_ORE in patch_fields or CONF_GRID_VAR_PCT in patch_fields)
+                and flat.get(CONF_GRID_VAR_PCT) is not None
+                and flat.get(CONF_GRID_VAR_ORE) is None
+            ):
+                errors["base"] = "grid_fixed_required"
+
             if patch_fields and not errors:
                 try:
                     await client.patch_profile(token, **patch_fields)
                 except WoltaApiError as err:
                     _LOGGER.error("Failed to patch Wolta profile: %s", err)
-                    errors["base"] = "cannot_connect"
+                    # The same refusal from the server (a cache that is out of step with it)
+                    # reads as the same fault, not as a connection problem.
+                    errors["base"] = (
+                        "grid_fixed_required" if _is_grid_fixed_error(err) else "cannot_connect")
 
             if not errors:
                 # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -1657,13 +1743,25 @@ class WoltaOptionsFlow(OptionsFlow):
              else [_opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"))])
             + [date_row]
         ))
-        tariffs_schema = vol.Schema(dict([
+        tariff_rows = [
             _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")),
             _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
-        ]))
+        ]
+        if self._tax_asked():
+            # default (not suggested_value): the select always carries a value, "not set"
+            # included, so the form always submits one and an untouched form changes nothing.
+            tariff_rows.append((
+                vol.Optional(CONF_REDUCED_ENERGY_TAX,
+                             default=_tax_to_choice(srv.get(CONF_REDUCED_ENERGY_TAX))),
+                SelectSelector(SelectSelectorConfig(
+                    options=list(_TAX_CHOICES),
+                    mode=SelectSelectorMode.LIST,
+                    translation_key=CONF_REDUCED_ENERGY_TAX)),
+            ))
+        tariffs_schema = vol.Schema(dict(tariff_rows))
 
         schema = vol.Schema({
             vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),

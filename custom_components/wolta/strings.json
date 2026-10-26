@@ -142,6 +142,10 @@
       "title": "Wolta: your grid fee looks too high",
       "description": "The grid fee you entered is above {limit} öre (or cents) per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Tariffs. If your network operator really charges this much, you can leave it as it is."
     },
+    "grid_fixed_missing": {
+      "title": "Wolta: your grid fee needs its fixed part",
+      "description": "Your grid fee is entered as a percentage of the spot price, but without a fixed part. Wolta cannot work out what you pay for electricity without it, so the purchase-price sensor stays unavailable.\n\nEnter the fixed part of your grid fee (the transfer fee, excluding VAT and energy tax) under Settings → Devices & services → Wolta → Configure → Tariffs. Enter 0 if you only have a percentage."
+    },
     "soc_required": {
       "title": "Wolta needs your battery's state-of-charge sensor",
       "fix_flow": {
@@ -350,7 +354,12 @@
       "reauth_confirm": {
         "title": "Re-authenticate Wolta",
         "description": "Your Wolta profile token has expired or been deleted. Confirm to create a new profile and re-link this integration.",
-        "data": {}
+        "data": {
+          "grid_var_ore": "Grid fee, fixed part (öre/ct per kWh)"
+        },
+        "data_description": {
+          "grid_var_ore": "Your saved grid fee is a percentage of spot without a fixed part, which Wolta now requires. Enter the fixed part, excluding VAT and energy tax. Enter 0 if you only have a percentage."
+        }
       },
       "user": {
         "title": "Set up Wolta",
@@ -434,6 +443,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
+      "grid_fixed_required": "Your saved grid fee is a percentage of spot without a fixed part. Enter the fixed part (excluding VAT and energy tax, 0 if you only have a percentage) and confirm again.",
       "invalid_input": "Wolta rejected the plant details – check the price zone and control system and try again.",
       "rate_limited": "Wolta API is currently rate-limiting requests – please try again later.",
       "required_sensor": "At least one sensor is required for this stream.",
@@ -511,14 +521,16 @@
               "surcharge_ore": "Electricity supplier markup (öre/ct per kWh)",
               "export_extra_ore": "Export premium/discount (öre/ct per kWh)",
               "grid_var_pct": "Grid fee, percent of spot (% of spot)",
-              "export_extra_pct": "Export compensation, percent of spot (% of spot)"
+              "export_extra_pct": "Export compensation, percent of spot (% of spot)",
+              "reduced_energy_tax": "Reduced energy tax"
             },
             "data_description": {
-              "grid_var_ore": "Your variable grid fee (transfer fee), excluding VAT and energy tax, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Wolta adds VAT and energy tax itself. Clear the field to revert to your country's standard tariff.",
+              "grid_var_ore": "Your variable grid fee (transfer fee), excluding VAT and energy tax, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Wolta adds VAT and energy tax itself. If your grid fee also has a percentage of spot (the field below), this is its fixed part and is required: enter 0 if you only have a percentage. Clear the field to revert to your country's standard tariff.",
               "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
               "export_extra_ore": "Extra amount your grid/export agreement pays (or deducts) per exported kWh, on top of the spot price, in öre or euro cents. Can be negative. Clear the field to revert to your country's standard tariff.",
-              "grid_var_pct": "The variable part of your grid fee as a percent of the spot price. Clear the field to remove the percent component.",
-              "export_extra_pct": "Export compensation as a percent of the spot price (can be negative). Clear the field to remove the percent component."
+              "grid_var_pct": "The percentage part of your grid fee, as a percent of the spot price. It needs the fixed part in the field above (0 if you only have a percentage). Clear the field to remove the percent component.",
+              "export_extra_pct": "Export compensation as a percent of the spot price (can be negative). Clear the field to remove the percent component.",
+              "reduced_energy_tax": "Some municipalities in northern Sweden have a reduced energy tax: your grid operator deducts 9.6 öre/kWh excluding VAT on the bill. It applies in all municipalities in Norrbotten, Västerbotten and Jämtland, and in Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen and Torsby. Source: Skatteverket. Choose Yes if you live in one of them and No if you do not. Not set means you have not answered: in SE1–SE3 the purchase-price sensor stays unavailable until you do."
             }
           }
         },
@@ -543,12 +555,22 @@
     },
     "error": {
       "battery_pair_incomplete": "Capacity and power go together: fill in both, or leave both empty and let Wolta measure them.",
+      "grid_fixed_required": "A grid fee given as a percentage of spot needs its fixed part too. Fill in \"Grid fee\" above (0 if you only have a percentage).",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },
     "abort": {
       "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later.",
       "reauth_required": "The profile no longer exists on wolta.se – re-authentication has been started, check your notifications."
+    }
+  },
+  "selector": {
+    "reduced_energy_tax": {
+      "options": {
+        "not_set": "Not set",
+        "no": "No",
+        "yes": "Yes"
+      }
     }
   },
   "entity": {

@@ -328,6 +328,7 @@ class WoltaApiClient:
         control_system: str | None = None,
         control_system_name: str | None = None,
         soc_absent: bool | None = None,
+        reduced_energy_tax: bool | None = None,
     ) -> str:
         """Create a new profile and return its token.
 
@@ -382,6 +383,11 @@ class WoltaApiClient:
         # omitted field leaves the server's value untouched (spec 2026-10-20-soc-krav).
         if soc_absent is not None:
             payload["soc_absent"] = soc_absent
+        # Same rule for the energy-tax answer (strict bool on the server): False ("no") is an
+        # answer and is sent, None is omitted. Since api 0.118.0 a re-onboarding merges the
+        # tariff key by key with the stored one, so an omitted answer keeps the stored one.
+        if reduced_energy_tax is not None:
+            payload["reduced_energy_tax"] = reduced_energy_tax
         data = await self._request("POST", "/profile", json=payload, _reclaim_errors=True)
         return data["profile_token"]
 
