@@ -25,7 +25,7 @@ from custom_components.wolta.const import (
     DOMAIN,
     WOLTA_API_BASE,
 )
-from custom_components.wolta.price_coordinator import price_series
+from custom_components.wolta.price_coordinator import WoltaPriceCoordinator, price_series
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -60,6 +60,22 @@ _FORECAST = {
     "accuracy": {"basis": "upstream", "days": 0, "window_days": 30},
     "source": "fsrc",
 }
+
+
+def _entry() -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_TOKEN: "tok-price-test",
+            CONF_ZONE: "SE3",
+            CONF_BATT_IN: "sensor.batt_in",
+            CONF_BATT_OUT: "sensor.batt_out",
+            CONF_GRID_IN: "sensor.grid_in",
+            CONF_GRID_OUT: "sensor.grid_out",
+            CONF_SOLAR: "sensor.solar",
+            CONF_PLANT_ID: "a" * 32,
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -118,19 +134,7 @@ async def test_setup_survives_price_endpoint_failure(
     """A failing price endpoint must never stop the entry from loading."""
     aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
     aioclient_mock.get(PRICES_URL, status=500)
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            CONF_TOKEN: "tok-price-test",
-            CONF_ZONE: "SE3",
-            CONF_BATT_IN: "sensor.batt_in",
-            CONF_BATT_OUT: "sensor.batt_out",
-            CONF_GRID_IN: "sensor.grid_in",
-            CONF_GRID_OUT: "sensor.grid_out",
-            CONF_SOLAR: "sensor.solar",
-            CONF_PLANT_ID: "a" * 32,
-        },
-    )
+    entry = _entry()
     entry.add_to_hass(hass)
 
     with (
@@ -144,9 +148,67 @@ async def test_setup_survives_price_endpoint_failure(
         ),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
+        # The first price refresh runs as a background task (see async_setup_entry).
+        await hass.async_block_till_done(wait_background_tasks=True)
 
     assert entry.state is ConfigEntryState.LOADED
     prices = entry.runtime_data.prices
     assert prices is not None
     assert prices.last_update_success is False
+
+
+@pytest.mark.asyncio
+async def test_setup_does_not_wait_for_price_refresh(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A hung price endpoint must not delay the existing sensors: platform forwarding
+    happens while the first price refresh is still pending."""
+    import asyncio
+
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    entry = _entry()
+    entry.add_to_hass(hass)
+    release = asyncio.Event()
+
+    async def _hung_refresh(self) -> None:
+        await release.wait()
+
+    try:
+        with (
+            patch(
+                "custom_components.wolta.coordinator.WoltaCoordinator.async_config_entry_first_refresh",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
+                new_callable=AsyncMock,
+            ) as forward,
+            patch.object(WoltaPriceCoordinator, "async_refresh", _hung_refresh),
+        ):
+            assert await hass.config_entries.async_setup(entry.entry_id)
+            assert entry.state is ConfigEntryState.LOADED
+            forward.assert_awaited_once()
+            assert entry.runtime_data.prices is not None
+    finally:
+        release.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.mark.asyncio
+async def test_price_coordinator_follows_zone_change(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The options step "Correct the price zone" updates entry.data without a reload;
+    the next price poll must use the new zone, not the one from setup."""
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    entry = _entry()
+    entry.add_to_hass(hass)
+    client = WoltaApiClient(async_get_clientsession(hass), base_url=WOLTA_API_BASE)
+    coordinator = WoltaPriceCoordinator(hass, entry, client)
+
+    await coordinator.async_refresh()
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: "SE4"})
+    await coordinator.async_refresh()
+
+    zones = [call[1].query["zone"] for call in aioclient_mock.mock_calls]
+    assert zones == ["SE3", "SE4"]

@@ -39,7 +39,9 @@ def price_series(resp: dict[str, Any], *, with_forecast: bool) -> list[dict[str,
     with_forecast and a non-null forecast) the forecast points. The API guarantees the
     three lists are sorted and do not overlap, so concatenation keeps time order.
 
-    Each point is {"start": ts_utc, "price": SEK/kWh | None}; with_forecast adds
+    Each point is {"start": ts_utc, "price": SEK/kWh EXCLUDING VAT | None} (the API's
+    ore_kwh is ex VAT; the VAT factor travels separately as `vat_factor` in the response
+    and is not applied here); with_forecast adds
     "forecast": bool so a chart can tell real prices from forecast ones."""
     series: list[dict[str, Any]] = []
 
@@ -71,11 +73,12 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=PRICE_POLL,
         )
         self._client = client
-        self._zone: str = entry.data[CONF_ZONE]
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            data = await self._client.get_prices_now(self._zone)
+            # Read the zone on every poll: the options step "Correct the price zone"
+            # updates entry.data without a reload (the main coordinator does the same).
+            data = await self._client.get_prices_now(self.config_entry.data[CONF_ZONE])
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             raise UpdateFailed(f"Could not fetch Wolta prices: {err}") from err
         if not isinstance(data, dict):

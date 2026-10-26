@@ -49,11 +49,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = WoltaCoordinator(hass, entry)
     entry.runtime_data = coordinator
     await coordinator.async_config_entry_first_refresh()
-    # Spot prices (information only, never read by the grade). async_refresh, not
-    # async_config_entry_first_refresh: a failing price endpoint must not stop the entry.
-    coordinator.prices = WoltaPriceCoordinator(hass, entry, client)
-    await coordinator.prices.async_refresh()
+    # Spot prices (information only, never read by the grade). The first refresh runs as
+    # a background task, after the platforms are forwarded: a slow or failing price
+    # endpoint must neither stop the entry nor delay the existing sensors. async_refresh
+    # does not raise; the task is cancelled with the entry on unload.
+    prices = WoltaPriceCoordinator(hass, entry, client)
+    coordinator.prices = prices
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_create_background_task(
+        hass, prices.async_refresh(), name=f"{DOMAIN}_prices_first_refresh"
+    )
     return True
 
 
