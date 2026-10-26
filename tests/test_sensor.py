@@ -949,7 +949,7 @@ def test_irr_payback_capex_scope_attribute_absent_on_older_api():
 
 
 def test_batterivarde_ar_fallback_grade_never_shows_annualized_scrap():
-    """Sebastians 3-dygnsanläggning (2026-07-20): ett OMOGET betyg (fallback-läge,
+    """En anläggning med 3 dygns data (2026-07-20): ett OMOGET betyg (fallback-läge,
     score_on=None) bär ändå measured_period_sek - historiskt sett annualiserat med
     365/n_days, dvs. tre sommardagar presenterade som årsvärde. Mognadsgrinden är
     score_on (samma som betygssensorn): utan score → aldrig measured; utan decision
