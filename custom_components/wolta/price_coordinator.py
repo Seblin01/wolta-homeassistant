@@ -20,7 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .api import WoltaApiClient, WoltaApiError
-from .const import CONF_ZONE, DOMAIN
+from .const import CONF_ZONE, DOMAIN, PRICE_SENSOR_ZONES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ def current_price(resp: dict[str, Any], now: datetime) -> float | None:
     that one is only as fresh as the last poll (which is not aligned to the quarter) and
     the server's own cache. None when no point covers `now` - stale data after a missed
     poll or midnight - or the covering point has no price."""
+    # The 15-minute width (QUARTER) assumes Wolta's quarter-hour price rows (since 2025-10-01).
     best: tuple[datetime, dict[str, Any]] | None = None
     for key in ("today", "tomorrow"):
         for point in _points(resp, key):
@@ -107,10 +108,18 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._client = client
 
     async def _async_update_data(self) -> dict[str, Any]:
+        # Read the zone on every poll: the options step "Correct the price zone"
+        # updates entry.data without a reload (the main coordinator does the same).
+        zone = self.config_entry.data[CONF_ZONE]
+        if zone not in PRICE_SENSOR_ZONES:
+            # The sensors show SEK with Swedish VAT; another zone's prices would be
+            # mislabelled. Make no request and stay unavailable until a reload.
+            raise UpdateFailed(
+                f"Price zone {zone} is not a Swedish zone; the spot price sensors "
+                "are unavailable until the integration is reloaded"
+            )
         try:
-            # Read the zone on every poll: the options step "Correct the price zone"
-            # updates entry.data without a reload (the main coordinator does the same).
-            data = await self._client.get_prices_now(self.config_entry.data[CONF_ZONE])
+            data = await self._client.get_prices_now(zone)
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             raise UpdateFailed(f"Could not fetch Wolta prices: {err}") from err
         if not isinstance(data, dict):

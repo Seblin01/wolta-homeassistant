@@ -401,3 +401,26 @@ async def test_price_sensors_created_in_every_swedish_zone(
         await hass.async_block_till_done(wait_background_tasks=True)
 
     assert er.async_get(hass).async_get_entity_id("sensor", DOMAIN, SPOT_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_zone_changed_to_non_swedish_makes_sensors_unavailable(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The options step "Correct the price zone" changes the zone without a reload. The
+    coordinator must not keep serving prices for a zone the sensors cannot represent
+    (SEK and Swedish VAT): no request, and both sensors unavailable until a reload."""
+    entry = await _setup(hass, aioclient_mock, enable_forecast=True)
+    spot_id = _entity_id(hass, SPOT_ID)
+    forecast_id = _entity_id(hass, FORECAST_ID)
+    assert hass.states.get(spot_id).state == "0.523"
+    polls = len(aioclient_mock.mock_calls)
+
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: "NO1"})
+    await entry.runtime_data.prices.async_refresh()
+    await hass.async_block_till_done()
+
+    assert len(aioclient_mock.mock_calls) == polls
+    assert entry.runtime_data.prices.last_update_success is False
+    assert hass.states.get(spot_id).state == "unavailable"
+    assert hass.states.get(forecast_id).state == "unavailable"
