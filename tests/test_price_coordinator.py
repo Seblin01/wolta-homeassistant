@@ -107,7 +107,12 @@ def test_price_series_with_forecast_flags():
 
     assert len(series) == 6
     assert [p["forecast"] for p in series] == [False, False, False, True, True, True]
-    assert series[3] == {"start": "2026-10-28T10:00:00Z", "price": 0.1, "forecast": True}
+    assert series[3] == {
+        "start": "2026-10-28T10:00:00Z",
+        "price": 0.1,
+        "forecast": True,
+        "horizon": 1,
+    }
 
 
 def test_price_series_forecast_null():

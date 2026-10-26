@@ -268,7 +268,9 @@ class WoltaApiClient:
                     retry_after = 3600
                 raise WoltaRateLimitError(retry_after=retry_after)
             if not (200 <= resp.status < 300):
-                body = await resp.text()
+                # One line, at most 200 characters: an HTML error page from a proxy must
+                # not end up in a log line (the exception message is logged by callers).
+                body = " ".join((await resp.text()).split())[:200]
                 raise WoltaApiError(f"HTTP {resp.status} from {url}: {body}", status=resp.status)
             # Return JSON body for 2xx responses (None for no-content)
             if resp.status == 204:
@@ -420,6 +422,19 @@ class WoltaApiClient:
         return await self._request(
             "GET", "/prices/now", params={"zone": zone}, timeout=PUBLIC_LOOKUP_TIMEOUT
         )
+
+    async def get_price_forecast(self, zone: str) -> dict | None:
+        """GET /prices/forecast?zone=<zone> (public, no Authorization header): the price
+        forecast for up to three days ahead, `{"days": [{"date", "horizon", "issued_at",
+        "points", "accuracy"}, ...], ...}`, or null when there is none. Horizon 1 is
+        tomorrow (the same forecast /prices/now carries), 2 and 3 the following days.
+
+        Same bound as get_prices_now: the forecast is optional and must not hang on
+        aiohttp's default 300 s total timeout."""
+        data = await self._request(
+            "GET", "/prices/forecast", params={"zone": zone}, timeout=PUBLIC_LOOKUP_TIMEOUT
+        )
+        return data if isinstance(data, dict) else None
 
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.

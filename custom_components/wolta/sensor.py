@@ -24,7 +24,13 @@ from homeassistant.util import dt as dt_util
 
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
-from .price_coordinator import WoltaPriceCoordinator, current_price, price_series
+from .price_coordinator import (
+    FULL_FORECAST_KEY,
+    WoltaPriceCoordinator,
+    current_price,
+    forecast_days,
+    price_series,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +717,8 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
     Information only: backed by WoltaPriceCoordinator and nothing else, so it reads and
     writes nothing the grade, the upload or the profile use, and a failing price endpoint
     only makes these two sensors unavailable. The with_forecast variant adds the forecast
-    points to the series; it is disabled by default.
+    points (up to three days ahead) to the series; it is disabled by default, and only an
+    enabled one makes the coordinator fetch the days beyond tomorrow.
     """
 
     _attr_has_entity_name = True
@@ -737,6 +744,13 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        if self._with_forecast:
+            # Only an enabled entity is ever added to hass (a disabled one is just a
+            # registry entry), so being here means the user wants the forecast: ask the
+            # coordinator to fetch the days beyond tomorrow too. The spot-only sensor never
+            # asks, so it causes no extra request. Enabling or disabling the entity
+            # reloads the entry, which re-evaluates this.
+            self.async_on_remove(self.coordinator.async_request_full_forecast())
         # The coordinator polls every 15 minutes, unaligned to the quarter. Re-evaluate
         # the state at each quarter boundary so it flips on time without a poll.
         self.async_on_remove(
@@ -775,8 +789,14 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
         data = self.coordinator.data or {}
         source = data.get("source")
         forecast = self._forecast()
-        if source and forecast and forecast.get("source"):
-            return f"{source} {forecast['source']}"
+        forecast_source = forecast.get("source") if forecast else None
+        if forecast_source is None and self._with_forecast and forecast_days(data):
+            # Tomorrow's prices are out, so /prices/now has no forecast any more, but the
+            # days beyond tomorrow are forecast and need the same credit.
+            full = data.get(FULL_FORECAST_KEY)
+            forecast_source = full.get("source") if isinstance(full, dict) else None
+        if source and forecast_source:
+            return f"{source} {forecast_source}"
         return source or None
 
     @property
@@ -794,6 +814,8 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
             attrs["forecast_issued_at"] = forecast.get("issued_at") if forecast else None
             # The API's accuracy object, passed through unchanged.
             attrs["forecast_accuracy"] = forecast.get("accuracy") if forecast else None
+            # Days 2 and 3: issue time and accuracy per day (the points are in `prices`).
+            attrs["forecast_days"] = forecast_days(data)
         return attrs
 
 

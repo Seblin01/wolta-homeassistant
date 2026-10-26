@@ -29,6 +29,7 @@ from custom_components.wolta.const import (
 )
 from custom_components.wolta.coordinator import WoltaCoordinator, WoltaData
 from custom_components.wolta.sensor import WoltaSpotPriceSensor
+from tests.test_price_forecast import _ACC, _NOW_FORECAST, _three_days
 from tests.test_sensor import RESULTS_FULL
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -42,6 +43,7 @@ def _frozen_now(freezer) -> None:
     freezer.move_to(NOW)
 
 PRICES_URL = f"{WOLTA_API_BASE}/api/v1/prices/now"
+FORECAST_URL = f"{WOLTA_API_BASE}/api/v1/prices/forecast"
 UNIQUE_ID = "uid-price-test"
 SPOT_ID = f"{UNIQUE_ID}_spot_price"
 FORECAST_ID = f"{UNIQUE_ID}_spot_price_with_forecast"
@@ -120,6 +122,8 @@ async def _setup(
     *,
     prices_json: dict | None = None,
     prices_status: int = 200,
+    forecast_json: dict | None = None,
+    forecast_status: int = 200,
     enable_forecast: bool = False,
     hold_price_refresh: asyncio.Event | None = None,
 ) -> MockConfigEntry:
@@ -128,6 +132,10 @@ async def _setup(
         aioclient_mock.get(PRICES_URL, json=prices_json or _resp(forecast=None))
     else:
         aioclient_mock.get(PRICES_URL, status=prices_status)
+    if forecast_status == 200:
+        aioclient_mock.get(FORECAST_URL, json=forecast_json)
+    else:
+        aioclient_mock.get(FORECAST_URL, status=forecast_status)
     entry = _entry()
     entry.add_to_hass(hass)
     if enable_forecast:
@@ -247,6 +255,166 @@ async def test_forecast_sensor_without_forecast(
     assert attrs["forecast_accuracy"] is None
     assert all(p["forecast"] is False for p in attrs["prices"])
     assert attrs["attribution"] == "Price source"
+
+
+def _forecast_calls(aioclient_mock: AiohttpClientMocker) -> list:
+    return [c for c in aioclient_mock.mock_calls if str(c[1]).startswith(FORECAST_URL)]
+
+
+@pytest.mark.asyncio
+async def test_spot_only_makes_no_forecast_request(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The forecast sensor is disabled by default: nobody needs /prices/forecast."""
+    entry = await _setup(
+        hass, aioclient_mock, prices_json=_resp(forecast=_NOW_FORECAST), forecast_json=_three_days()
+    )
+    await entry.runtime_data.prices.async_refresh()
+
+    assert _forecast_calls(aioclient_mock) == []
+    attrs = hass.states.get(_entity_id(hass, SPOT_ID)).attributes
+    assert len(attrs["prices"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_forecast_sensor_makes_one_forecast_request_per_poll(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry = await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_json=_three_days(),
+        enable_forecast=True,
+    )
+    assert len(_forecast_calls(aioclient_mock)) == 1
+
+    await entry.runtime_data.prices.async_refresh()
+    assert len(_forecast_calls(aioclient_mock)) == 2
+
+
+@pytest.mark.asyncio
+async def test_disabling_the_forecast_sensor_stops_forecast_requests(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry = await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_json=_three_days(),
+        enable_forecast=True,
+    )
+    prices = entry.runtime_data.prices
+    assert len(_forecast_calls(aioclient_mock)) == 1
+
+    # Disabling the entity removes it from hass, which withdraws its interest.
+    er.async_get(hass).async_update_entity(
+        _entity_id(hass, FORECAST_ID), disabled_by=er.RegistryEntryDisabler.USER
+    )
+    await hass.async_block_till_done()
+    await prices.async_refresh()
+
+    assert len(_forecast_calls(aioclient_mock)) == 1
+    assert prices.last_update_success is True
+    assert hass.states.get(_entity_id(hass, SPOT_ID)).state == "0.523"
+
+
+@pytest.mark.asyncio
+async def test_forecast_sensor_series_has_three_days(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_json=_three_days(),
+        enable_forecast=True,
+    )
+
+    state = hass.states.get(_entity_id(hass, FORECAST_ID))
+
+    assert state.state == "0.523"
+    prices = state.attributes["prices"]
+    starts = [p["start"] for p in prices]
+    assert starts == sorted(starts) and len(starts) == len(set(starts))
+    assert [p.get("horizon") for p in prices] == [None, None, None, 1, 1, 2, 2, 3, 3]
+    assert [p["forecast"] for p in prices] == [False] * 3 + [True] * 6
+    assert state.attributes["forecast_issued_at"] == "2026-10-26T09:00:00Z"
+    assert state.attributes["forecast_accuracy"] == _ACC
+    assert [d["horizon"] for d in state.attributes["forecast_days"]] == [2, 3]
+    assert state.attributes["forecast_days"][0] == {
+        "date": "2026-10-28",
+        "horizon": 2,
+        "issued_at": "2026-10-26T09:05:00Z",
+        "accuracy": {**_ACC, "days": 2},
+    }
+    assert all("points" not in d for d in state.attributes["forecast_days"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["status", "null"])
+async def test_forecast_endpoint_failure_keeps_the_rest(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, failure: str
+):
+    await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_status=500 if failure == "status" else 200,
+        forecast_json=None,
+        enable_forecast=True,
+    )
+
+    state = hass.states.get(_entity_id(hass, FORECAST_ID))
+
+    assert state.state == "0.523"
+    attrs = state.attributes
+    assert [p.get("horizon") for p in attrs["prices"]] == [None, None, None, 1, 1]
+    assert attrs["forecast_issued_at"] == "2026-10-26T09:00:00Z"
+    assert attrs["forecast_accuracy"] == _ACC
+    assert attrs["forecast_days"] == []
+
+
+@pytest.mark.asyncio
+async def test_forecast_sensor_after_tomorrow_is_published(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Once tomorrow's prices are out /prices/now has no forecast, but days 2 and 3 remain:
+    they are still shown, still credited, and tomorrow's forecast attributes are null."""
+    full = _three_days()
+    full["days"] = full["days"][1:]
+    await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=None),
+        forecast_json=full,
+        enable_forecast=True,
+    )
+
+    attrs = hass.states.get(_entity_id(hass, FORECAST_ID)).attributes
+
+    assert [p.get("horizon") for p in attrs["prices"]] == [None, None, None, 2, 2, 3, 3]
+    assert attrs["forecast_issued_at"] is None
+    assert [d["horizon"] for d in attrs["forecast_days"]] == [2, 3]
+    assert attrs["attribution"] == "Price source fsrc"
+
+
+@pytest.mark.asyncio
+async def test_spot_sensor_never_gets_forecast_days(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_json=_three_days(),
+        enable_forecast=True,
+    )
+
+    attrs = hass.states.get(_entity_id(hass, SPOT_ID)).attributes
+
+    assert len(attrs["prices"]) == 3
+    assert not [k for k in attrs if k.startswith("forecast")]
 
 
 def test_prices_attribute_not_recorded():
@@ -380,6 +548,7 @@ async def test_price_sensors_not_created_outside_sweden(
     assert registry.async_get_entity_id("sensor", DOMAIN, FORECAST_ID) is None
     assert registry.async_get_entity_id("sensor", DOMAIN, GRADE_ID) is not None
     assert not [c for c in aioclient_mock.mock_calls if str(c[1]).startswith(PRICES_URL)]
+    assert not [c for c in aioclient_mock.mock_calls if str(c[1]).startswith(FORECAST_URL)]
 
 
 @pytest.mark.asyncio
