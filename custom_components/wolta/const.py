@@ -188,6 +188,13 @@ CONTROL_SYSTEMS: list[tuple[str, str]] = [
 # Covers all 26 countries in the Wolta backend; labels are shown in the UI.
 # Server-side validates the zone; unknown zones get a 422 response.
 # Keep this list in sync with the backend's countries register manually.
+# Zones that get the spot-price sensors. The price endpoint converts to SEK and öre with
+# Swedish VAT (25 %), so the figures are only meaningful for Swedish zones; elsewhere the
+# price coordinator is not created at all (no polling, no 404s). Decided at setup: changing
+# the zone in the options flow between a Swedish and a non-Swedish zone leaves the sensors
+# as they were until the entry is reloaded.
+PRICE_SENSOR_ZONES: tuple[str, ...] = ("SE1", "SE2", "SE3", "SE4")
+
 SUPPORTED_ZONES: list[tuple[str, str]] = [
     # Sweden
     ("SE1", "SE1 – Northern Sweden"),

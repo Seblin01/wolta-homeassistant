@@ -127,6 +127,27 @@ def test_price_series_missing_fx():
     assert series == [{"start": "2026-10-26T10:00:00Z", "price": None}]
 
 
+def test_price_series_tolerates_malformed_points():
+    """The attributes are built on every state write: a bad point must never raise."""
+    resp = _resp(forecast=None)
+    resp["today"] = [
+        {"eur_mwh": 40.0, "ore_kwh": 10.0},  # no ts_utc: skipped
+        "garbage",  # not a point: skipped
+        {"ts_utc": "2026-10-26T10:00:00Z", "ore_kwh": "abc"},  # non-numeric: price None
+        {"ts_utc": "2026-10-26T10:15:00Z", "ore_kwh": True},  # bool is not a price
+        _pt("2026-10-26T10:30:00Z", 20.0),
+    ]
+    resp["tomorrow"] = None
+
+    series = price_series(resp, with_forecast=False)
+
+    assert series == [
+        {"start": "2026-10-26T10:00:00Z", "price": None},
+        {"start": "2026-10-26T10:15:00Z", "price": None},
+        {"start": "2026-10-26T10:30:00Z", "price": 0.2},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_setup_survives_price_endpoint_failure(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker

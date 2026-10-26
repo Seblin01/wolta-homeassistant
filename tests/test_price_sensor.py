@@ -13,6 +13,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.wolta.const import (
     CONF_BATT_IN,
@@ -31,6 +32,14 @@ from custom_components.wolta.sensor import WoltaSpotPriceSensor
 from tests.test_sensor import RESULTS_FULL
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+NOW = "2026-10-26T10:05:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _frozen_now(freezer) -> None:
+    """The state is computed locally from the series, so every test needs a fixed clock."""
+    freezer.move_to(NOW)
 
 PRICES_URL = f"{WOLTA_API_BASE}/api/v1/prices/now"
 UNIQUE_ID = "uid-price-test"
@@ -63,8 +72,10 @@ _FORECAST = {
 def _resp(*, forecast: dict | None) -> dict:
     return {
         "zone": "SE3",
-        "now": _pt("2026-10-26T10:00:00Z", 52.3),
-        "today": [_pt("2026-10-26T10:00:00Z", 52.3), _pt("2026-10-26T11:00:00Z", 60.0)],
+        # The server's `now` is deliberately different from the quarter that covers the
+        # frozen clock: the sensor must follow its own series, not this field.
+        "now": _pt("2026-10-26T10:00:00Z", 44.0),
+        "today": [_pt("2026-10-26T10:00:00Z", 52.3), _pt("2026-10-26T10:15:00Z", 60.0)],
         "tomorrow": [_pt("2026-10-27T10:00:00Z", 30.0)],
         "tomorrow_complete": False,
         "fx": {"date": "2026-10-23", "eur_sek": 11.0},
@@ -248,7 +259,7 @@ async def test_missing_fx_makes_sensors_unavailable(
 ):
     """now.ore_kwh is null when the backend had no FX rate: no state rather than a wrong one."""
     resp = _resp(forecast=None)
-    resp["now"] = _pt("2026-10-26T10:00:00Z", None)
+    resp["today"][0] = _pt("2026-10-26T10:00:00Z", None)
     await _setup(hass, aioclient_mock, prices_json=resp)
 
     assert hass.states.get(_entity_id(hass, SPOT_ID)).state == "unavailable"
@@ -295,3 +306,98 @@ async def test_price_sensors_unavailable_until_first_data(
     finally:
         release.set()
         await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.mark.asyncio
+async def test_state_follows_quarter_boundaries_without_a_poll(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    await _setup(hass, aioclient_mock)
+    entity_id = _entity_id(hass, SPOT_ID)
+    assert hass.states.get(entity_id).state == "0.523"
+    polls = len(aioclient_mock.mock_calls)
+
+    freezer.move_to("2026-10-26T10:15:02+00:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "0.6"
+    assert len(aioclient_mock.mock_calls) == polls
+
+
+@pytest.mark.asyncio
+async def test_unavailable_when_no_point_covers_now(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    """Stale data (e.g. the next poll has not arrived after midnight, or the last point
+    is over) must not keep serving an old price."""
+    await _setup(hass, aioclient_mock)
+    entity_id = _entity_id(hass, SPOT_ID)
+
+    # The last point, 10:15, covers until 10:30.
+    freezer.move_to("2026-10-26T10:30:02+00:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_when_all_points_are_in_the_future(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    resp = _resp(forecast=None)
+    resp["today"] = [_pt("2026-10-26T12:00:00Z", 52.3)]
+    resp["tomorrow"] = []
+    await _setup(hass, aioclient_mock, prices_json=resp)
+
+    assert hass.states.get(_entity_id(hass, SPOT_ID)).state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_price_sensors_not_created_outside_sweden(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The prices are converted to SEK with Swedish VAT: other zones get no price
+    sensors and the price endpoint is never called."""
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: "NO1"})
+
+    with patch(
+        "custom_components.wolta.coordinator.WoltaCoordinator.async_config_entry_first_refresh",
+        _main_first_refresh,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.prices is None
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, SPOT_ID) is None
+    assert registry.async_get_entity_id("sensor", DOMAIN, FORECAST_ID) is None
+    assert registry.async_get_entity_id("sensor", DOMAIN, GRADE_ID) is not None
+    assert not [c for c in aioclient_mock.mock_calls if str(c[1]).startswith(PRICES_URL)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone", ["SE1", "SE2", "SE3", "SE4"])
+async def test_price_sensors_created_in_every_swedish_zone(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, zone: str
+):
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: zone})
+
+    with patch(
+        "custom_components.wolta.coordinator.WoltaCoordinator.async_config_entry_first_refresh",
+        _main_first_refresh,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert er.async_get(hass).async_get_entity_id("sensor", DOMAIN, SPOT_ID) is not None

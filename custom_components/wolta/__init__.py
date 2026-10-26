@@ -20,7 +20,9 @@ from .const import (
     CONF_PLANT_ID,
     CONF_TOKEN,
     CONF_VIEW_ONLY,
+    CONF_ZONE,
     DOMAIN,
+    PRICE_SENSOR_ZONES,
     WOLTA_API_BASE,
 )
 from .coordinator import WoltaCoordinator
@@ -53,12 +55,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # a background task, after the platforms are forwarded: a slow or failing price
     # endpoint must neither stop the entry nor delay the existing sensors. async_refresh
     # does not raise; the task is cancelled with the entry on unload.
-    prices = WoltaPriceCoordinator(hass, entry, client)
-    coordinator.prices = prices
+    # Swedish zones only (PRICE_SENSOR_ZONES): elsewhere there is no coordinator, no
+    # polling and no price sensors.
+    prices: WoltaPriceCoordinator | None = None
+    if entry.data.get(CONF_ZONE) in PRICE_SENSOR_ZONES:
+        prices = WoltaPriceCoordinator(hass, entry, client)
+        coordinator.prices = prices
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_create_background_task(
-        hass, prices.async_refresh(), name=f"{DOMAIN}_prices_first_refresh"
-    )
+    if prices is not None:
+        entry.async_create_background_task(
+            hass, prices.async_refresh(), name=f"{DOMAIN}_prices_first_refresh"
+        )
     return True
 
 

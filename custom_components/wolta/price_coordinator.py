@@ -9,7 +9,7 @@ endpoint only makes the price sensors unavailable; it never touches the existing
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -17,6 +17,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import WoltaApiClient, WoltaApiError
 from .const import CONF_ZONE, DOMAIN
@@ -24,14 +25,26 @@ from .const import CONF_ZONE, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 PRICE_POLL = timedelta(minutes=15)
+# The price series is quarter-hourly: a point covers the 15 minutes after its start.
+QUARTER = timedelta(minutes=15)
 
 
 def _price(point: dict[str, Any]) -> float | None:
-    """SEK/kWh (ex VAT) from a point's ore_kwh; None when the backend had no FX rate."""
+    """SEK/kWh (ex VAT) from a point's ore_kwh; None when the backend had no FX rate
+    (or sent something that is not a number)."""
     ore = point.get("ore_kwh")
-    if ore is None:
+    if isinstance(ore, bool) or not isinstance(ore, (int, float)):
         return None
     return round(ore / 100, 5)
+
+
+def _points(resp: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The well-formed points of one list in the response: dicts with a string ts_utc.
+    The attributes are rebuilt on every state write, so a bad point is skipped, never raised."""
+    raw = resp.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [p for p in raw if isinstance(p, dict) and isinstance(p.get("ts_utc"), str)]
 
 
 def price_series(resp: dict[str, Any], *, with_forecast: bool) -> list[dict[str, Any]]:
@@ -45,20 +58,39 @@ def price_series(resp: dict[str, Any], *, with_forecast: bool) -> list[dict[str,
     "forecast": bool so a chart can tell real prices from forecast ones."""
     series: list[dict[str, Any]] = []
 
-    def _add(points: list[dict[str, Any]] | None, is_forecast: bool) -> None:
-        for point in points or []:
+    def _add(points: list[dict[str, Any]], is_forecast: bool) -> None:
+        for point in points:
             item: dict[str, Any] = {"start": point["ts_utc"], "price": _price(point)}
             if with_forecast:
                 item["forecast"] = is_forecast
             series.append(item)
 
-    _add(resp.get("today"), False)
-    _add(resp.get("tomorrow"), False)
+    _add(_points(resp, "today"), False)
+    _add(_points(resp, "tomorrow"), False)
     if with_forecast:
         forecast = resp.get("forecast")
         if isinstance(forecast, dict):
-            _add(forecast.get("points"), True)
+            _add(_points(forecast, "points"), True)
     return series
+
+
+def current_price(resp: dict[str, Any], now: datetime) -> float | None:
+    """SEK/kWh (ex VAT) of the quarter that covers `now`, from the real prices (today and
+    tomorrow, never the forecast). Computed locally instead of reading the server's `now`:
+    that one is only as fresh as the last poll (which is not aligned to the quarter) and
+    the server's own cache. None when no point covers `now` - stale data after a missed
+    poll or midnight - or the covering point has no price."""
+    best: tuple[datetime, dict[str, Any]] | None = None
+    for key in ("today", "tomorrow"):
+        for point in _points(resp, key):
+            start = dt_util.parse_datetime(point["ts_utc"])
+            if start is None or start.tzinfo is None or start > now:
+                continue
+            if best is None or start > best[0]:
+                best = (start, point)
+    if best is None or now - best[0] >= QUARTER:
+        return None
+    return _price(best[1])
 
 
 class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):

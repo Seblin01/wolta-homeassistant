@@ -15,14 +15,16 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
-from .price_coordinator import WoltaPriceCoordinator, price_series
+from .price_coordinator import WoltaPriceCoordinator, current_price, price_series
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +716,7 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
 
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "SEK/kWh"
+    _attr_suggested_display_precision = 3
     # The series is hundreds of points; the recorder would store it on every change.
     _unrecorded_attributes = frozenset({"prices"})
 
@@ -732,27 +735,35 @@ class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntit
         self._attr_entity_registry_enabled_default = not with_forecast
         self._attr_device_info = _device_info(entry)
 
-    @property
-    def _now_ore(self) -> float | None:
-        # `now` can be null (no current price) and its ore_kwh null (no FX rate).
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The coordinator polls every 15 minutes, unaligned to the quarter. Re-evaluate
+        # the state at each quarter boundary so it flips on time without a poll.
+        self.async_on_remove(
+            async_track_utc_time_change(
+                self.hass, self._quarter_boundary, minute=(0, 15, 30, 45), second=1
+            )
+        )
+
+    @callback
+    def _quarter_boundary(self, _now: datetime) -> None:
+        self.async_write_ha_state()
+
+    def _current(self) -> float | None:
         data = self.coordinator.data
-        now = data.get("now") if data else None
-        return now.get("ore_kwh") if isinstance(now, dict) else None
+        return None if data is None else current_price(data, dt_util.utcnow())
 
     @property
     def available(self) -> bool:
         # data is None until the first price refresh has finished: that refresh runs
         # after platform setup and last_update_success defaults to True before it.
-        return (
-            self.coordinator.last_update_success
-            and self.coordinator.data is not None
-            and self._now_ore is not None
-        )
+        # _current() is None when no point covers this quarter (stale data) or the
+        # covering point has no price (no exchange rate).
+        return self.coordinator.last_update_success and self._current() is not None
 
     @property
     def native_value(self) -> float | None:
-        ore = self._now_ore
-        return None if ore is None else round(ore / 100, 5)
+        return self._current()
 
     def _forecast(self) -> dict[str, Any] | None:
         data = self.coordinator.data or {}
