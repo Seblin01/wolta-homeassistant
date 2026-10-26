@@ -4497,6 +4497,37 @@ async def test_zone_correction_patches_and_updates_entry(hass: HomeAssistant) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target, kept",
+    [("SE4", False), ("SE1", True)],
+    ids=["leaves_se1_se3", "stays_in_se1_se3"],
+)
+async def test_zone_correction_drops_a_stale_energy_tax_answer(
+    hass: HomeAssistant, target, kept
+) -> None:
+    """The energy-tax answer exists only in SE1-SE3 (the server 422s `true` anywhere else), so
+    a correction out of that range must not leave it in entry.data for the next reauth."""
+    entry = _make_mock_entry(hass, extra_data={CONF_REDUCED_ENERGY_TAX: True})
+    mock_client = MagicMock()
+    mock_client.patch_profile = AsyncMock(return_value={"zone": target})
+
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "zone_correction"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={CONF_ZONE: target})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = hass.config_entries.async_get_entry(entry.entry_id).data
+    assert data[CONF_ZONE] == target
+    assert (CONF_REDUCED_ENERGY_TAX in data) is kept
+
+
+@pytest.mark.asyncio
 async def test_zone_correction_unchanged_does_not_patch(hass: HomeAssistant) -> None:
     """Re-picking the zone that is already stored is a no-op, not a PATCH."""
     entry = _make_mock_entry(hass)
@@ -4938,6 +4969,14 @@ def _tariff_field(result, field: str):
     return marker, inner[marker]
 
 
+def _section_options(result, name: str) -> dict:
+    """The `section(...)` options (e.g. collapsed) of a section in the settings form."""
+    outer = result["data_schema"].schema
+    sec_key = next(k for k in outer
+                   if (k.schema if hasattr(k, "schema") else str(k)) == name)
+    return outer[sec_key].options
+
+
 def _tariff_fields(result) -> list[str]:
     outer = result["data_schema"].schema
     sec_key = next(k for k in outer
@@ -5124,6 +5163,35 @@ async def test_options_percent_without_fixed_part_shows_the_form_again(
 
 
 @pytest.mark.asyncio
+async def test_options_fixed_part_error_opens_the_tariffs_section(hass: HomeAssistant) -> None:
+    """The base error renders at the top; the section holding the field must be open."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        assert _section_options(result, "tariffs")["collapsed"] is True
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_VAR_PCT: 5.6})))
+    assert result["errors"] == {"base": "grid_fixed_required"}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+
+
+@pytest.mark.asyncio
+async def test_options_error_form_keeps_what_the_user_typed(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_VAR_PCT: 5.6, CONF_SURCHARGE_ORE: 12.5})))
+    assert result["errors"] == {"base": "grid_fixed_required"}
+    for field, expected in ((CONF_GRID_VAR_PCT, 5.6), (CONF_SURCHARGE_ORE, 12.5)):
+        marker, _ = _tariff_field(result, field)
+        assert (marker.description or {}).get("suggested_value") == expected
+
+
+@pytest.mark.asyncio
 async def test_options_clearing_the_fixed_part_under_a_percentage_is_refused(
     hass: HomeAssistant,
 ) -> None:
@@ -5244,6 +5312,18 @@ async def test_reauth_sends_the_reduced_energy_tax_answer(hass: HomeAssistant, s
     mock_client = _mock_client("new-token")
     await _start_reauth(hass, {**_REAUTH_BASE, CONF_REDUCED_ENERGY_TAX: stored}, mock_client)
     assert mock_client.create_profile.call_args.kwargs["reduced_energy_tax"] is stored
+
+
+@pytest.mark.asyncio
+async def test_reauth_outside_se1_se3_does_not_send_a_cached_tax_answer(
+    hass: HomeAssistant,
+) -> None:
+    """A `true` cached from before a zone correction would be refused by the server (422)
+    in SE4, so the reauth would never get through."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(
+        hass, {**_REAUTH_BASE, CONF_ZONE: "SE4", CONF_REDUCED_ENERGY_TAX: True}, mock_client)
+    assert mock_client.create_profile.call_args.kwargs["reduced_energy_tax"] is None
 
 
 @pytest.mark.asyncio

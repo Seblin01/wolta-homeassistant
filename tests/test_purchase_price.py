@@ -387,14 +387,34 @@ async def test_purchase_and_prices_now_are_requested_concurrently(
 async def test_prices_now_failure_still_fails_the_coordinator_and_cancels_the_purchase_task(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
-    aioclient_mock.get(PRICES_URL, status=500)
-    aioclient_mock.get(PURCHASE_URL, json=_purchase())
+    """The purchase request is held open while /prices/now fails: the poll must still fail
+    and the in-flight purchase task must be cancelled, not left running."""
+    from custom_components.wolta.api import WoltaApiError
+
     coordinator = _coordinator(hass)
     coordinator.async_request_purchase_prices()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
 
-    await coordinator.async_refresh()
+    async def _now(zone: str) -> dict:
+        await started.wait()  # the purchase request is in flight before this one fails
+        raise WoltaApiError("boom", status=500)
+
+    async def _purchase_call(token: str) -> dict:
+        started.set()
+        try:
+            await asyncio.Event().wait()  # never answers
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    coordinator._client.get_prices_now = _now
+    coordinator._client.get_purchase_prices = _purchase_call
+
+    await asyncio.wait_for(coordinator.async_refresh(), timeout=5)
 
     assert coordinator.last_update_success is False
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
 
 
 # --- sensor -----------------------------------------------------------------

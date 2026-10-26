@@ -62,7 +62,7 @@ there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
 ## Spot price sensors
 
-Two extra sensors show the day-ahead spot price (a third one, [*Purchase price*](#purchase-price-sensor), shows what you actually pay, including VAT). They exist for the **Swedish price zones SE1–SE4 only**, because the prices are converted to SEK with Swedish VAT; for any other zone they are not created and the integration makes no price requests. They are information only: they have no connection to the optimisation grade, the economics or the data the integration uploads, and a problem with the price endpoint only makes these two sensors unavailable. The forecast never feeds the grade or any of the economy figures.
+Two extra sensors show the day-ahead spot price (a third one, [*Purchase price*](#purchase-price-sensor), shows what you actually pay, including VAT). They exist for the **Swedish price zones SE1–SE4 only**, because the prices are converted to SEK with Swedish VAT; for any other zone they are not created and the integration makes no price requests. They are information only: they have no connection to the optimisation grade, the economics or the data the integration uploads, and a problem with the price endpoint only makes the spot price sensors (and the purchase price sensor, which shares their poll) unavailable. The forecast never feeds the grade or any of the economy figures.
 
 | Entity | Enabled by default | Description |
 |--------|--------------------|-------------|
@@ -156,7 +156,7 @@ recorder:
 | `reason` | `null` while the sensor has a price; otherwise why it has none (the table below). |
 | `tomorrow_complete` | Whether all of tomorrow's quarters are published. |
 
-**When the sensor has no price, `reason` says what to do.** The state is then `unknown` (not `unavailable`, because Home Assistant hides every attribute of an unavailable entity and `reason` is the point):
+**When the sensor has no price, `reason` says what to do.** The state is then `unknown` (not `unavailable`, because Home Assistant hides every attribute of an unavailable entity and `reason` is the point). The fixes below name *Configure → Settings → Tariffs*; for a view-only plant the tariff is set on wolta.se instead:
 
 | `reason` | What it means and what you do |
 |----------|-------------------------------|
@@ -374,7 +374,7 @@ For the flip repair you can also choose **Ignore**, which is remembered until th
 
 **The grade sensor has a `capacity_hint` attribute (v0.8.0+).** The backend sets it when the battery capacity you entered is clearly higher than the usable capacity your measured data shows — a nameplate-vs-usable mix-up. The grade compares you against a perfect dispatch on the capacity you *entered*, so an oversized entry unfairly lowers the score. Open **Configure** and set the battery capacity to the attribute's `suggested_kwh` (or your own better estimate of usable capacity); the grade is recomputed automatically. No hint means no mismatch was detected.
 
-**"Wolta: your grid fee looks too high" repair (v0.49.0+).** Raised when the grid fee you entered is above the limit the Wolta server sets (60 öre or cents per kWh, higher than any variable grid fee Wolta has verified). Such a figure most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is then counted twice, in the grade and in the economics. Enter only the transfer fee, excluding VAT and energy tax, under Configure → Tariffs. If your network operator really charges that much, leave it: the figure is still used, and the repair is only a warning. It clears itself once the server finds the fee plausible. Not raised in view-only mode, where the tariff is set on wolta.se. Needs Wolta API 0.110.0 or newer.
+**"Wolta: your grid fee looks too high" repair (v0.49.0+).** Raised when the grid fee you entered is above the limit the Wolta server sets (60 öre or cents per kWh, higher than any variable grid fee Wolta has verified). Such a figure most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is then counted twice, in the grade and in the economics. Enter only the transfer fee, excluding VAT and energy tax, under Configure → Settings → Tariffs. If your network operator really charges that much, leave it: the figure is still used, and the repair is only a warning. It clears itself once the server finds the fee plausible. Not raised in view-only mode, where the tariff is set on wolta.se. Needs Wolta API 0.110.0 or newer.
 
 **"Wolta: your grid fee needs its fixed part" repair (v0.53.0+).** Raised when the grid fee you entered is a percentage of the spot price without a fixed part. Wolta cannot work out what you pay for electricity from a percentage alone, so the [Purchase price sensor](#purchase-price-sensor) has no price (`reason: grid_fixed_missing`). Enter the fixed part of the grid fee (the transfer fee, excluding VAT and energy tax; `0` if you only have a percentage) under Configure → Settings → Tariffs. It clears itself once the server has the fixed part. Not raised in view-only mode, where the tariff is set on wolta.se. Needs Wolta API 0.118.0 or newer. If you are asked to re-authenticate while the fixed part is missing, the re-authentication form asks for it too.
 

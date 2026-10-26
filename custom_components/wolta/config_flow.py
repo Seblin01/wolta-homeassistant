@@ -1194,7 +1194,12 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # The energy-tax answer (None = never answered, omitted by the client).
                     # The backend (>= 0.118.0) merges the tariff key by key on a re-onboarding
                     # of a known plant, so an omitted answer keeps the stored one.
-                    reduced_energy_tax=entry_data.get(CONF_REDUCED_ENERGY_TAX),
+                    # Omitted outside SE1-SE3: a `true` cached from before a zone correction
+                    # would be refused by the server (422) and block the reauth.
+                    reduced_energy_tax=(
+                        entry_data.get(CONF_REDUCED_ENERGY_TAX)
+                        if str(entry_data[CONF_ZONE]).upper() in _REDUCED_TAX_ZONES else None
+                    ),
                 )
             except WoltaPlantClaimed:
                 # A wolta.se account owns the plant (Wolta security review 2026-10-16): the
@@ -1480,9 +1485,13 @@ class WoltaOptionsFlow(OptionsFlow):
                     # whose zone differs from the stored one (reidentify_integration_plant
                     # raises) - so a correction without this line would make the next
                     # reauth fail with "already registered in another price zone".
-                    self.hass.config_entries.async_update_entry(
-                        entry, data={**entry.data, CONF_ZONE: chosen}
-                    )
+                    new_data = {**entry.data, CONF_ZONE: chosen}
+                    if str(chosen).upper() not in _REDUCED_TAX_ZONES:
+                        # The energy-tax answer exists only in SE1-SE3 and the server
+                        # refuses `true` anywhere else (422), so a cached answer from the old
+                        # zone must not travel with the next reauth.
+                        new_data.pop(CONF_REDUCED_ENERGY_TAX, None)
+                    self.hass.config_entries.async_update_entry(entry, data=new_data)
             if not errors:
                 return self.async_create_entry(title="", data={})
 
@@ -1782,10 +1791,18 @@ class WoltaOptionsFlow(OptionsFlow):
         schema = vol.Schema({
             vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),
             vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
-            vol.Required(_SEC_TARIFFS): section(tariffs_schema, {"collapsed": True}),
+            # Open when the fixed-part error is shown: base errors render at the top of the
+            # form, and the field they ask for sits in this section.
+            vol.Required(_SEC_TARIFFS): section(
+                tariffs_schema,
+                {"collapsed": errors.get("base") != "grid_fixed_required"}),
             vol.Required(
                 CONF_INVERT_BATTERY,
                 default=bool(desired_invert_intervals(entry.data)),
             ): BooleanSelector(BooleanSelectorConfig()),
         })
+        # Re-show after an error keeps what the user typed (suggested values, section by
+        # section), so a refused save does not send them back to the stored values.
+        if errors and user_input is not None:
+            schema = self.add_suggested_values_to_schema(schema, user_input)
         return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)
