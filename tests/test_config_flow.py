@@ -5020,6 +5020,37 @@ async def test_options_tax_answer_is_patched_and_mirrored(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, refreshed",
+    [
+        ({CONF_REDUCED_ENERGY_TAX: "yes"}, True),
+        ({CONF_SURCHARGE_ORE: 11.5}, True),
+        ({CONF_COST_SEK: 99000.0}, False),
+    ],
+    ids=["energy_tax", "surcharge", "plant_field"],
+)
+async def test_options_tariff_change_refreshes_the_purchase_price(
+    hass: HomeAssistant, fields, refreshed
+) -> None:
+    """The purchase price follows the owner's tariff: a saved tariff change must not wait
+    for the next 15-minute price poll. A change that does not touch the tariff leaves the
+    price coordinator alone."""
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock()
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**fields)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    if refreshed:
+        mock_coordinator.prices.async_request_refresh.assert_awaited_once()
+    else:
+        mock_coordinator.prices.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_options_tax_back_to_not_set_removes_the_answer(hass: HomeAssistant) -> None:
     """PATCH null removes the server's answer; the cache drops the key the same way."""
     entry = _make_mock_entry(hass, extra_data={CONF_REDUCED_ENERGY_TAX: True})

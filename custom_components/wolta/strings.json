@@ -615,6 +615,9 @@
       },
       "spot_price_with_forecast": {
         "name": "Spot price with forecast"
+      },
+      "purchase_price": {
+        "name": "Purchase price"
       }
     },
     "button": {

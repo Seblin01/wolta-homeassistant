@@ -62,7 +62,7 @@ there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
 ## Spot price sensors
 
-Two extra sensors show the day-ahead spot price. They exist for the **Swedish price zones SE1–SE4 only**, because the prices are converted to SEK with Swedish VAT; for any other zone they are not created and the integration makes no price requests. They are information only: they have no connection to the optimisation grade, the economics or the data the integration uploads, and a problem with the price endpoint only makes these two sensors unavailable. The forecast never feeds the grade or any of the economy figures.
+Two extra sensors show the day-ahead spot price (a third one, [*Purchase price*](#purchase-price-sensor), shows what you actually pay, including VAT). They exist for the **Swedish price zones SE1–SE4 only**, because the prices are converted to SEK with Swedish VAT; for any other zone they are not created and the integration makes no price requests. They are information only: they have no connection to the optimisation grade, the economics or the data the integration uploads, and a problem with the price endpoint only makes these two sensors unavailable. The forecast never feeds the grade or any of the economy figures.
 
 | Entity | Enabled by default | Description |
 |--------|--------------------|-------------|
@@ -107,7 +107,7 @@ Until Wolta has measured 14 days for a horizon, treat the upstream figure as the
 
 ### Example: feeding the prices to EMHASS
 
-A template sensor can turn the `prices` attribute into a plain list, for example for EMHASS's `load_cost_forecast`. This is an illustration, not a tested configuration: adapt the horizon (here 96 quarters, 24 hours) and the time step to your EMHASS setup. The prices in the attribute are excluding VAT; the template already multiplies by `vat_factor`, so the list is VAT-inclusive (drop that factor for the raw prices). Grid tariffs and other taxes are not included. Points without a price (no exchange rate) are left out, which can shorten or shift the list, and EMHASS needs a list that matches its horizon: check the length before relying on it. Since v0.52.0 the `prices` list can run well past 96 quarters (up to about three days of forecast), so keep the slice at the end of the template, or the list becomes longer than the EMHASS horizon; the days beyond tomorrow are the least certain part of it.
+A template sensor can turn the `prices` attribute into a plain list, for example for EMHASS's `load_cost_forecast`. This is an illustration, not a tested configuration: adapt the horizon (here 96 quarters, 24 hours) and the time step to your EMHASS setup. The prices in the attribute are excluding VAT; the template already multiplies by `vat_factor`, so the list is VAT-inclusive (drop that factor for the raw prices). Grid tariffs and other taxes are not included (the [*Purchase price* sensor](#purchase-price-sensor) has them, including VAT). Points without a price (no exchange rate) are left out, which can shorten or shift the list, and EMHASS needs a list that matches its horizon: check the length before relying on it. Since v0.52.0 the `prices` list can run well past 96 quarters (up to about three days of forecast), so keep the slice at the end of the template, or the list becomes longer than the EMHASS horizon; the days beyond tomorrow are the least certain part of it.
 
 ```yaml
 template:
@@ -137,6 +137,40 @@ recorder:
     entities:
       - sensor.spot_price_forecast_list
 ```
+
+## Purchase price sensor
+
+`sensor.wolta_purchase_price` (v0.53.0+) shows what a kilowatt-hour costs you to buy **right now**, in SEK/kWh **including VAT**, per quarter-hour. It is for controlling consumption and storage against the price you really pay (for example as the import price in EMHASS), not the market price. It is **disabled by default**; enable it like the forecast sensor, under *Settings → Devices & services → Wolta → entities* (open the disabled *Purchase price* entity and switch it on). It exists for the Swedish price zones SE1–SE4, like the spot price sensors, and is information only: it is not part of the optimisation grade, the economics or anything the integration uploads.
+
+**What is in the price:** the spot price, plus your electricity supplier's markup, plus the energy tax (after the reduced energy tax, if you have it), plus your variable grid fee, with 25 % VAT on all of it. The markup and the grid fee are the ones you saved under *Configure → Settings → Tariffs*, the same ones the grade and the economy figures use; the server works the price out from them, the integration only reads the result.
+
+**What is not in the price:** fixed charges that cannot be expressed as a price per kWh: the subscription fee to your supplier and to your grid operator, the fuse fee and the power tariff (effektavgift). Contracts with a fixed price per kWh are not covered either: the sensor assumes you buy at the spot price plus a markup. If your supplier charges elcertifikat or similar per kWh, include it in your markup.
+
+**The spot price sensors stay excluding VAT.** The Purchase price sensor is the only one that includes VAT. In its `prices` attribute `purchase` is including VAT and `spot` is the spot price **excluding VAT**, the same figure as `sensor.wolta_spot_price`. Both are SEK/kWh.
+
+| Part | Description |
+|------|-------------|
+| State | The purchase price of the current quarter-hour, SEK/kWh including VAT. Worked out locally from `prices` and flips on the quarter-hour without waiting for the next poll. |
+| `prices` | A list of `{start, purchase, spot}` points (UTC start time, SEK/kWh) for today and, once it is published, tomorrow. `purchase` is `null` for a quarter that has no price (see below). Not stored by the recorder, like the spot price lists. |
+| `components` | What the price is built from: `surcharge_ore`, `grid_var_ore` and `grid_var_pct` (your tariff), `reduced_energy_tax` (your answer: `true`, `false` or `null` for not answered), `energy_tax_ore` (the energy tax in öre/kWh excluding VAT, after any reduction, per calendar year as `{"2026": ...}`) and `vat_factor`. |
+| `reason` | `null` while the sensor has a price; otherwise why it has none (the table below). |
+| `tomorrow_complete` | Whether all of tomorrow's quarters are published. |
+
+**When the sensor has no price, `reason` says what to do.** The state is then `unknown` (not `unavailable`, because Home Assistant hides every attribute of an unavailable entity and `reason` is the point):
+
+| `reason` | What it means and what you do |
+|----------|-------------------------------|
+| `tariff_not_set` | You have not entered both the grid fee and the supplier markup. Wolta does not guess them: set both under *Configure → Settings → Tariffs*. `0` counts as set. |
+| `grid_fixed_missing` | Your grid fee is a percentage of spot without a fixed part. Fill in the fixed part of the grid fee (öre/kWh excluding VAT, `0` if you only have a percentage) under *Configure → Settings → Tariffs*. The *Wolta: your grid fee needs its fixed part* repair says the same. |
+| `energy_tax_unconfirmed` | In SE1–SE3 Wolta needs to know whether your municipality has the reduced energy tax: answer *Reduced energy tax* under *Configure → Settings → Tariffs* (*Yes* or *No*). SE4 is not asked. |
+| `fx_missing` | Wolta has no EUR/SEK exchange rate at the moment, so neither the spot price nor the purchase price can be converted. Nothing to do on your side: it comes back when the rate does. |
+| `zone_not_supported` | The plant's price zone is not SE1–SE4, where Wolta prices electricity. Correct the zone under *Configure → Correct the price zone* if it is wrong. |
+
+A single quarter can also have no price (`purchase` is `null` in `prices`, and the state is `unknown` while it lasts) when Wolta does not have the energy-tax rate for that calendar year yet. It never reuses last year's tax.
+
+The state is `unavailable` when the data is missing altogether: the Wolta server could not be reached, the answer was an error, or the data is out of date. A Wolta server older than **API 0.118.0** does not have the endpoint and answers 404, which also shows as `unavailable`. The integration then logs one line when it breaks and one when it works again, and the spot price sensors are not affected.
+
+**One extra request, only when you use it.** While the sensor is enabled the integration asks the Wolta server for the prices once per 15-minute poll, alongside the spot price request, with your plant's token in the `Authorization` header. With the sensor disabled nothing extra is requested. Saving a changed tariff under *Configure* refreshes it straight away.
 
 ## Requirements
 
@@ -202,7 +236,8 @@ Open the integration's **Configure** dialog (Settings → Devices & Services →
 - Battery capacity (kWh), power (kW) and round-trip efficiency — changing these triggers a server-side regrade of your optimisation score. While Wolta is still measuring a newly created battery (status sensor shows *Measuring battery* or *Needs battery values*), **capacity and power** are blank and optional rather than required, so saving other settings doesn't overwrite the pending measurement with a guess. (Efficiency stays a required field — it is never measured from scratch, so it is always prefilled.)
 - Nameplate capacity (kWh) and nameplate power (kW) — optional manufacturer-rated figures. The grade itself always uses the usable/deliverable values above; the rated figures let wolta.se compare per-kWh prices fairly in the expansion calculator and explain measured-vs-rated differences. Filling in **Nameplate capacity (kWh)** and **Nameplate power (kW)** has the same effect as the Repair: Wolta derives the usable capacity from them right away, and switches to the measured value once the data allows. Clearing a field removes the value.
 - What you paid for the battery, and the purchase date — used for IRR, payback and this year's actual savings. Enter the invoice total, after any green deduction; it is treated as the whole investment. If Home Assistant's sensor history suggests a purchase date, it's offered as a one-time suggestion here rather than being set automatically — accept it, type your own, or clear it if you don't know the date. Clearing a field removes the value.
-- Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). The grid fee is the transfer fee **excluding VAT and energy tax**: Wolta adds both itself. Clearing a field reverts it to your country's standard tariff.
+- Your own tariff — grid fee, electricity supplier markup and an export premium/discount (öre/kWh for SEK zones, euro cents/kWh for other zones; the export figure may be negative). The grid fee is the transfer fee **excluding VAT and energy tax**: Wolta adds both itself. Clearing a field reverts it to your country's standard tariff. If the grid fee also has a percentage of spot (*Grid fee, percent of spot*), the fixed grid fee is required (v0.53.0+): enter `0` if you only have a percentage. Wolta cannot work out a purchase price from a percentage alone and refuses the save otherwise.
+- **Reduced energy tax** (v0.53.0+, Swedish zones SE1–SE3) — *Not set*, *No* or *Yes*. Some municipalities in northern Sweden have a reduced energy tax: the grid operator deducts 9.6 öre/kWh excluding VAT. It applies in all municipalities in Norrbotten, Västerbotten and Jämtland, and in Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen and Torsby (source: Skatteverket). The municipalities do not follow the price zones, so Wolta cannot work it out from your zone; choose *Yes* if you live in one of them and *No* if you do not. The answer lowers the import price in the grade and the economics by that amount, and is part of the [Purchase price sensor](#purchase-price-sensor); until you answer, that sensor stays without a price (`energy_tax_unconfirmed`). SE4 has no affected municipality and is not asked. Leaving it *Not set* keeps the grade exactly as before.
 - Reserve floor (%) — the share of usable capacity your control system never discharges below. Clearing the field removes the reserve.
 - **Battery charge/discharge reversed** — a toggle that swaps the battery charge and discharge streams. It applies to the history Wolta already stores as well as to new uploads, without re-sending anything. See Troubleshooting below.
 
@@ -341,6 +376,8 @@ For the flip repair you can also choose **Ignore**, which is remembered until th
 
 **"Wolta: your grid fee looks too high" repair (v0.49.0+).** Raised when the grid fee you entered is above the limit the Wolta server sets (60 öre or cents per kWh, higher than any variable grid fee Wolta has verified). Such a figure most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is then counted twice, in the grade and in the economics. Enter only the transfer fee, excluding VAT and energy tax, under Configure → Tariffs. If your network operator really charges that much, leave it: the figure is still used, and the repair is only a warning. It clears itself once the server finds the fee plausible. Not raised in view-only mode, where the tariff is set on wolta.se. Needs Wolta API 0.110.0 or newer.
 
+**"Wolta: your grid fee needs its fixed part" repair (v0.53.0+).** Raised when the grid fee you entered is a percentage of the spot price without a fixed part. Wolta cannot work out what you pay for electricity from a percentage alone, so the [Purchase price sensor](#purchase-price-sensor) has no price (`reason: grid_fixed_missing`). Enter the fixed part of the grid fee (the transfer fee, excluding VAT and energy tax; `0` if you only have a percentage) under Configure → Settings → Tariffs. It clears itself once the server has the fixed part. Not raised in view-only mode, where the tariff is set on wolta.se. Needs Wolta API 0.118.0 or newer. If you are asked to re-authenticate while the fixed part is missing, the re-authentication form asks for it too.
+
 **"Wolta needs your battery's nameplate values" repair appears (v0.36.0+).** On a newly created plant, Wolta measures battery capacity, power and efficiency from the data you upload instead of asking for them at setup — the status sensor shows *Measuring battery* while that's in progress. If the data can't yield a measurement after enough time has passed — the battery never charges fully, or one of the battery streams is empty — this repair fires and asks for the manufacturer's nameplate capacity and power instead. Wolta derives the usable capacity from the nameplate pair and switches to the measured value later if the data allows it. You can also enter the nameplate values proactively at any time under Configure → Settings, without waiting for the repair.
 
 **"Your energy data doesn't add up" repair appears (v0.38.0+).** Wolta derives your household consumption as solar + grid import + battery discharge − export − battery charge. If, for a large part of the grading window, the battery takes in more than solar and grid deliver in the same interval, the sensors don't describe the whole house and the grade would measure the sensor mapping rather than your battery's control. The backend then keeps your grade out of the comparison with other installations (you still see it yourself), and this repair tells you which quantity doesn't add up — solar reading too low (typically solar measured after a DC-coupled battery, or a missing inverter/string), grid import or charge not adding up, or a missing sensor — and names the sensors you picked. The decision is the backend's; the integration never applies its own threshold. It is not raised in view-only mode, where the data doesn't come from your Home Assistant sensors. It clears itself once the grading window no longer contains the mismatched data.
@@ -391,6 +428,8 @@ If you select state-of-charge sensors, their min/max/average values are sent to 
 
 **Deleting the integration removes your data server-side** — for profiles the integration created. Removing the config entry in Home Assistant then triggers a right-to-erasure request to the Wolta backend. **Linked profiles are exempt:** removing the integration only disconnects Home Assistant; your wolta.se profile and history stay. Delete those from wolta.se itself.
 
+While the *Purchase price* sensor is enabled (it is disabled by default), the integration also reads your plant's computed purchase price from Wolta every 15 minutes, with the plant token in the `Authorization` header. The request only reads; it changes nothing on the server.
+
 **Every request identifies the integration and its version** (since v0.37.3), as
 `wolta-hacs/0.37.4 HomeAssistant/2026.9.3 aiohttp/3.14.3 Python/3.14` in the User-Agent —
 the second half is what Home Assistant already sends to every server it talks to. This is
@@ -433,6 +472,7 @@ Entity names follow your Home Assistant language (English and Swedish translatio
 | `sensor.wolta_data_status` | `sensor.wolta_datastatus` |
 | `sensor.wolta_spot_price` | `sensor.wolta_spotpris` |
 | `sensor.wolta_spot_price_with_forecast` | `sensor.wolta_spotpris_med_prognos` |
+| `sensor.wolta_purchase_price` | `sensor.wolta_inkopspris` |
 | `sensor.wolta_status` | `sensor.wolta_status` |
 | `button.wolta_recompute` | `button.wolta_rakna_om` |
 

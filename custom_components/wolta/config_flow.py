@@ -1383,6 +1383,12 @@ def _zone_group(zone: str) -> list[tuple[str, str]]:
     return [(z, label) for z, label in SUPPORTED_ZONES if z[:2].upper() == prefix]
 
 
+# The tariff fields the purchase price is built from (the export fields are not in it).
+_TARIFF_PRICE_KEYS = frozenset(
+    {CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX}
+)
+
+
 class WoltaOptionsFlow(OptionsFlow):
     """Handle options for an existing Wolta config entry (shared-profile edit)."""
 
@@ -1634,6 +1640,16 @@ class WoltaOptionsFlow(OptionsFlow):
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
                 coordinator = getattr(entry, "runtime_data", None)
+                prices = getattr(coordinator, "prices", None)
+                if prices is not None and _TARIFF_PRICE_KEYS & patch_fields.keys():
+                    # The purchase-price sensor shows what THIS tariff costs: refresh it now
+                    # instead of at the next 15-minute poll. A request on top of the poll, and
+                    # only if the owner changed the tariff; it fetches /profile/prices only when
+                    # that sensor is enabled. Never lets a price problem fail the save.
+                    try:
+                        await prices.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug("Options flow: price refresh failed.", exc_info=True)
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
