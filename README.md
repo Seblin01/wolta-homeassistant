@@ -67,11 +67,27 @@ Two extra sensors show the day-ahead spot price. They exist for the **Swedish pr
 | Entity | Enabled by default | Description |
 |--------|--------------------|-------------|
 | `sensor.wolta_spot_price` | Yes | The spot price of the current quarter-hour, in SEK/kWh **excluding VAT**. The state is worked out locally from the `prices` list and flips on the quarter-hour without waiting for the next poll; it is `unavailable` when the data holds no price for the current quarter. The attribute `prices` is a list of `{start, price}` points (UTC start time, SEK/kWh excluding VAT) for today and, once it is published, tomorrow. `vat_factor` is the Swedish VAT multiplier (1.25, i.e. 25 %), so multiply a price by it for a VAT-inclusive figure. `tomorrow_complete` says whether tomorrow's prices are all published. |
-| `sensor.wolta_spot_price_with_forecast` | **No** | The same state, but `prices` also carries a forecast for the quarters of tomorrow that have no published price yet. Each point has `forecast: true` or `false`. The extra attributes `forecast_issued_at` and `forecast_accuracy` describe the forecast. |
+| `sensor.wolta_spot_price_with_forecast` | **No** | The same state, but `prices` also carries Wolta's forecast for up to three days ahead: the quarters of tomorrow that have no published price yet, and the two days after tomorrow. Each point has `forecast: true` or `false`, and forecast points also have `horizon` (1, 2 or 3). The extra attributes `forecast_issued_at` and `forecast_accuracy` describe tomorrow's forecast, and `forecast_days` lists the issue time and accuracy of days 2 and 3. |
 
 **Enable the forecast sensor** under *Settings → Devices & services → Wolta → entities*: open the disabled *Spot price with forecast* entity and switch it on. The two sensors poll the public Wolta price endpoint every 15 minutes and need no account or token. They are unavailable until the first data has arrived, and while Wolta has no exchange rate to convert the prices to SEK. The zone is read when the integration is set up: if you change it with *Correct the price zone* between a Swedish and a non-Swedish zone, the price sensors become unavailable until the integration is reloaded (or Home Assistant restarted); after a reload they are created, or not, to match the new zone.
 
-**The forecast only covers tomorrow's quarters without a published price.** Once the day-ahead prices for tomorrow are out (normally around 13:00), the published prices replace the forecast, so forecast points never overlap real prices. When no forecast is available, the forecast sensor has no forecast points and behaves like the plain spot price sensor.
+**The forecast covers up to three days ahead.** `horizon` says how far ahead a forecast point is: `1` is tomorrow, `2` the day after tomorrow and `3` the day after that. Once the day-ahead prices for tomorrow are out (normally around 13:00), the published prices replace tomorrow's forecast, so forecast points never overlap real prices; from then on the forecast starts at the following day. The list may hold fewer than three forecast days, and when no forecast is available the forecast sensor has no forecast points and behaves like the plain spot price sensor. The points are in time order and no timestamp appears twice.
+
+**The further ahead, the less certain the forecast is.** A forecast two or three days out depends on weather forecasts that are further out, so expect it to be worse than tomorrow's; use it to see the rough shape of the coming days (a windy, cheap day or a still, expensive one), not to plan around single quarters. Each day has its own issue time and accuracy. `forecast_issued_at` and `forecast_accuracy` (explained below) describe tomorrow's forecast, and the attribute `forecast_days` holds the same for the later days, without the points (those are in `prices`):
+
+```yaml
+forecast_days:
+  - date: "2026-10-28"
+    horizon: 2
+    issued_at: "2026-10-26T09:05:00Z"
+    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 22 }
+  - date: "2026-10-29"
+    horizon: 3
+    issued_at: "2026-10-26T09:10:00Z"
+    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 22 }
+```
+
+The forecast sensor makes one extra request to the public Wolta price endpoint per poll to get days 2 and 3; the plain spot price sensor makes none, so with the forecast sensor disabled nothing changes. If that extra request fails, the sensor keeps today, tomorrow and tomorrow's forecast, and `forecast_days` is an empty list until the next successful poll. `prices` now holds up to roughly 400 points; that is why it is not stored by the recorder (see below).
 
 **What the forecast is based on, and how good it is.** The forecast comes from the open-source [EpexPredictor](https://github.com/b3nn0/EpexPredictor), which predicts day-ahead prices from weather forecasts (Open-Meteo), expected generation and load (energy-charts) and recent price history. Wolta measures how good the forecast was: it compares the forecast that was actually shown before 13:00 with the prices that were then published. The attribute `forecast_accuracy` carries the result:
 
@@ -83,9 +99,9 @@ Two extra sensors show the day-ahead spot price. They exist for the **Swedish pr
 | `peak_mae_ore_kwh` | With `basis: wolta`: the same error over the day's 8 most expensive quarters, the ones that matter most for charging and discharging decisions. `null` otherwise. |
 | `upstream_mae_ore_kwh` | The predictor project's own backtest error for your zone for a forecast one day ahead, about 18–26 öre/kWh. It was measured with actual weather, so the real-world error is somewhat larger. |
 
-Until Wolta has measured 14 days, treat the upstream figure as the best available estimate. A forecast with this error is good for judging which hours of tomorrow are likely to be cheap or expensive; it is not a price to rely on to the öre.
+Until Wolta has measured 14 days, treat the upstream figure as the best available estimate. A forecast with this error is good for judging which hours of tomorrow are likely to be cheap or expensive; it is not a price to rely on to the öre. The `accuracy` of a later day in `forecast_days` has the same keys, and the error for days 2 and 3 should be expected to be larger than for tomorrow.
 
-**The `prices` attribute is not stored by the recorder.** It holds hundreds of points and would otherwise be written to the database on every change. Read it live from the state, for example in a template or an automation; it does not appear in the history graph.
+**The `prices` attribute is not stored by the recorder.** With three forecast days it holds up to roughly 400 points (about 100 per day at quarter-hour resolution) and would otherwise be written to the database on every change. Read it live from the state, for example in a template or an automation; it does not appear in the history graph.
 
 **Source.** The `attribution` attribute comes from the server and is in Swedish. On the plain spot price sensor it names the source of the prices only. On the forecast sensor, while a forecast is present, it also names the forecast sources and links to EpexPredictor, energy-charts and Open-Meteo. The integration shows the price data as information and makes no claim about a licence for it.
 
