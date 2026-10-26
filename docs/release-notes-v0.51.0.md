@@ -1,0 +1,12 @@
+# v0.51.0 – spot price sensors with forecast
+
+Two new sensors show the day-ahead spot price for your price zone, one of them with a forecast for the part of tomorrow that has no published price yet. They are information only: they never affect the optimisation grade, the economics or anything the integration uploads.
+
+- **New sensor: Spot price.** `sensor.wolta_spot_price` shows the current spot price in SEK/kWh excluding VAT. The attribute `prices` lists today's and, once published, tomorrow's prices as `{start, price}` points. `vat_factor` is the VAT multiplier for your zone and `tomorrow_complete` says whether tomorrow's prices are all out.
+- **New sensor: Spot price with forecast (disabled by default).** `sensor.wolta_spot_price_with_forecast` has the same state, but `prices` also carries a forecast for tomorrow's quarters that have no published price yet, each point marked `forecast: true` or `false`. Enable it under Settings → Devices & services → Wolta → entities. The forecast covers SE1–SE4 only.
+- **How good the forecast is.** The attributes `forecast_issued_at` and `forecast_accuracy` describe it. Wolta measures the forecast that was shown before 13:00 against the prices that were then published. With at least 14 measured days, `forecast_accuracy.basis` is `wolta`, and `mae_ore_kwh` and `peak_mae_ore_kwh` are Wolta's own errors in öre/kWh excluding VAT over the last 30 days. Before that, `basis` is `upstream` and `upstream_mae_ore_kwh` is the predictor project's own backtest error for your zone, about 18–26 öre/kWh, measured with actual weather, so the real-world error is somewhat larger.
+- **Prices are not stored by the recorder.** The `prices` attribute is excluded from the recorder, so it does not fill the database. Read it from the state in a template or an automation.
+- **Never affects the grade.** The price sensors have their own data source and read nothing the grade, the upload or the profile use. If the price endpoint fails, only these two sensors become unavailable; the existing sensors are not touched.
+- **Source.** The `attribution` attribute credits the sources, with a link to [EpexPredictor](https://github.com/b3nn0/EpexPredictor), energy-charts and Open-Meteo.
+- **When the forecast appears.** The spot price sensor works as soon as you update. The forecast appears once wolta.se has deployed the server side; until then the forecast sensor shows the published prices only.
+- **EMHASS example.** The README has an example template that turns the `prices` attribute into a price list for EMHASS.
