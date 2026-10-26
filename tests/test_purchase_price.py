@@ -563,6 +563,62 @@ async def test_forgetting_the_purchase_response_drops_the_kept_one(
     assert await _poll_purchase(aioclient_mock, coordinator, status=500) is not None
 
 
+async def _gated_fetch_during_forget(
+    aioclient_mock: AiohttpClientMocker, coordinator: WoltaPriceCoordinator, *, forget_first: bool
+) -> None:
+    """One poll whose /profile/prices request is held open and answered with a priced series;
+    the tariff save (async_forget_purchase) happens before the request starts
+    (forget_first) or while it is in flight."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _purchase_call(token: str) -> dict:
+        started.set()
+        await release.wait()
+        return _purchase()
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    if forget_first:
+        coordinator.async_forget_purchase()
+    with patch.object(coordinator._client, "get_purchase_prices", _purchase_call):
+        refresh = asyncio.ensure_future(coordinator.async_refresh())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        if not forget_first:
+            coordinator.async_forget_purchase()
+        release.set()
+        await asyncio.wait_for(refresh, timeout=5)
+    assert coordinator.last_update_success is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_in_flight_during_a_tariff_save_is_not_kept(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A /profile/prices request that started before the save answers with the OLD tariff's
+    series. It must not be stored: if the refresh queued by the save then fails, the old
+    price would be served until it stops covering the quarter-hour."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+
+    await _gated_fetch_during_forget(aioclient_mock, coordinator, forget_first=False)
+
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_started_after_a_tariff_save_is_kept(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The new tariff's answer (the request started after the save) is kept as before."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+
+    await _gated_fetch_during_forget(aioclient_mock, coordinator, forget_first=True)
+
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) == _purchase()
+
+
 # --- sensor -----------------------------------------------------------------
 
 

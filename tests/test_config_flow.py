@@ -5136,12 +5136,19 @@ async def test_options_price_refresh_task_belongs_to_the_entry(hass: HomeAssista
 
     mock_coordinator.prices = MagicMock()
     mock_coordinator.prices.async_request_refresh = AsyncMock(side_effect=_slow_refresh)
-    with _options_patched(mock_client):
+    with (
+        _options_patched(mock_client),
+        patch.object(
+            entry, "async_create_background_task", wraps=entry.async_create_background_task
+        ) as spawn,
+    ):
         result = await _settings_session(hass, entry)
         await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=_opts(**_core(**{CONF_SURCHARGE_ORE: 11.5})))
         await asyncio.wait_for(started.wait(), timeout=5)
-    assert len(entry._background_tasks) == 1
+    spawn.assert_called_once()
+    assert spawn.call_args.args[0] is hass
+    assert spawn.call_args.args[2] == "wolta_options_price_refresh"
     release.set()
     await hass.async_block_till_done(wait_background_tasks=True)
 

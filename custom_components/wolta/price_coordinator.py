@@ -265,8 +265,12 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # blank a series that still covers now. Only a priced answer is kept (purchase_covers
         # bounds it; an "available: false" answer has no coverage and would keep a stale
         # `reason` for good), only for the zone it was fetched for (a zone correction does
-        # not reload the entry), and it is dropped on a tariff save (async_forget_purchase).
+        # not reload the entry), and it is dropped on a tariff save (async_forget_purchase),
+        # which also keeps a request already in flight from storing the old tariff's answer.
         self._last_purchase: tuple[str, dict[str, Any]] | None = None
+        # Bumped by every async_forget_purchase: a request that started before the bump is
+        # answering for the old tariff, and its response is not kept.
+        self._purchase_generation = 0
 
     @callback
     def async_request_full_forecast(self) -> Callable[[], None]:
@@ -306,7 +310,9 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def async_forget_purchase(self) -> None:
         """Drop the kept purchase response. The options flow calls it when the owner saves a
         changed tariff: the kept series was priced with the old one, and must not be shown if
-        the refresh that follows the save fails."""
+        the refresh that follows the save fails. A /profile/prices request already in flight
+        was started with the old tariff: it is not kept either when it answers."""
+        self._purchase_generation += 1
         self._last_purchase = None
 
     async def _fetch_purchase(self) -> dict[str, Any] | None:
@@ -318,6 +324,7 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         replaces it) and only travels in the Authorization header; the error text carries
         the URL, never the token."""
         zone = self.config_entry.data[CONF_ZONE]
+        generation = self._purchase_generation
         try:
             purchase = await self._client.get_purchase_prices(self.config_entry.data[CONF_TOKEN])
             if purchase is None:
@@ -338,7 +345,8 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._purchase_failing:
             _LOGGER.info("The purchase price is available again")
             self._purchase_failing = False
-        self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
+        if generation == self._purchase_generation:
+            self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
         return purchase
 
     async def _fetch_full_forecast(self, zone: str) -> dict[str, Any] | None:
