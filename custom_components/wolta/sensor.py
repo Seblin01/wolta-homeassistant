@@ -15,13 +15,16 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
+from .price_coordinator import WoltaPriceCoordinator, current_price, price_series
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +614,18 @@ _CURRENCY_KEYS = frozenset({"batterivarde_ar", "facit_i_ar"})
 # ---------------------------------------------------------------------------
 
 
+def _device_info(entry: ConfigEntry) -> DeviceInfo:
+    """The one Wolta device every sensor of an entry attaches to."""
+    link = entry.data.get(CONF_LINK_TOKEN)
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Wolta",
+        manufacturer="Wolta",
+        entry_type="service",
+        configuration_url=link_url(link) if link else f"{WOLTA_API_BASE}/anlaggning",
+    )
+
+
 class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
     """A single Wolta sensor backed by the coordinator."""
 
@@ -635,14 +650,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         self._attr_unique_id = f"{entry.unique_id}_{description.key}"
         # Läslänk, aldrig ägar-tokenet (spec 2026-08-24). Saknas den cachade länken
         # (mint har aldrig lyckats) faller vi tillbaka på den tokenlösa sidan.
-        link = entry.data.get(CONF_LINK_TOKEN)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="Wolta",
-            manufacturer="Wolta",
-            entry_type="service",
-            configuration_url=link_url(link) if link else f"{WOLTA_API_BASE}/anlaggning",
-        )
+        self._attr_device_info = _device_info(entry)
 
     # ------------------------------------------------------------------
     # Properties
@@ -697,6 +705,98 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         return attrs
 
 
+class WoltaSpotPriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorEntity):
+    """Current spot price (SEK/kWh, excluding VAT) with the price series as an attribute.
+
+    Information only: backed by WoltaPriceCoordinator and nothing else, so it reads and
+    writes nothing the grade, the upload or the profile use, and a failing price endpoint
+    only makes these two sensors unavailable. The with_forecast variant adds the forecast
+    points to the series; it is disabled by default.
+    """
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "SEK/kWh"
+    _attr_suggested_display_precision = 3
+    # The series is hundreds of points; the recorder would store it on every change.
+    _unrecorded_attributes = frozenset({"prices"})
+
+    def __init__(
+        self,
+        coordinator: WoltaPriceCoordinator,
+        entry: ConfigEntry,
+        *,
+        with_forecast: bool,
+    ) -> None:
+        super().__init__(coordinator)
+        self._with_forecast = with_forecast
+        key = "spot_price_with_forecast" if with_forecast else "spot_price"
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{entry.unique_id}_{key}"
+        self._attr_entity_registry_enabled_default = not with_forecast
+        self._attr_device_info = _device_info(entry)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The coordinator polls every 15 minutes, unaligned to the quarter. Re-evaluate
+        # the state at each quarter boundary so it flips on time without a poll.
+        self.async_on_remove(
+            async_track_utc_time_change(
+                self.hass, self._quarter_boundary, minute=(0, 15, 30, 45), second=1
+            )
+        )
+
+    @callback
+    def _quarter_boundary(self, _now: datetime) -> None:
+        self.async_write_ha_state()
+
+    def _current(self) -> float | None:
+        data = self.coordinator.data
+        return None if data is None else current_price(data, dt_util.utcnow())
+
+    @property
+    def available(self) -> bool:
+        # data is None until the first price refresh has finished: that refresh runs
+        # after platform setup and last_update_success defaults to True before it.
+        # _current() is None when no point covers this quarter (stale data) or the
+        # covering point has no price (no exchange rate).
+        return self.coordinator.last_update_success and self._current() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self._current()
+
+    def _forecast(self) -> dict[str, Any] | None:
+        data = self.coordinator.data or {}
+        forecast = data.get("forecast") if self._with_forecast else None
+        return forecast if isinstance(forecast, dict) else None
+
+    @property
+    def attribution(self) -> str | None:
+        data = self.coordinator.data or {}
+        source = data.get("source")
+        forecast = self._forecast()
+        if source and forecast and forecast.get("source"):
+            return f"{source} {forecast['source']}"
+        return source or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        attrs: dict[str, Any] = {
+            "prices": price_series(data, with_forecast=self._with_forecast),
+            "vat_factor": data.get("vat_factor"),
+            "tomorrow_complete": data.get("tomorrow_complete"),
+        }
+        if self._with_forecast:
+            forecast = self._forecast()
+            attrs["forecast_issued_at"] = forecast.get("issued_at") if forecast else None
+            # The API's accuracy object, passed through unchanged.
+            attrs["forecast_accuracy"] = forecast.get("accuracy") if forecast else None
+        return attrs
+
+
 # ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
@@ -713,3 +813,10 @@ async def async_setup_entry(
         WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
         for desc in SENSOR_DESCRIPTIONS
     )
+    # Spot prices: only when the price coordinator exists. Separate from the entities
+    # above on purpose - see WoltaSpotPriceSensor.
+    if coordinator.prices is not None:
+        async_add_entities(
+            WoltaSpotPriceSensor(coordinator.prices, entry, with_forecast=flag)
+            for flag in (False, True)
+        )

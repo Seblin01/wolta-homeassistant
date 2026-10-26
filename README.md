@@ -60,6 +60,68 @@ solar-plus-storage analyses, Solcellskollen's Swedish calculations) and investme
 appraisal (incremental cash-flow principle). If you want the big number, it is still
 there: `sensor.wolta_plant_savings_per_year`, correctly labelled.
 
+## Spot price sensors
+
+Two extra sensors show the day-ahead spot price. They exist for the **Swedish price zones SE1–SE4 only**, because the prices are converted to SEK with Swedish VAT; for any other zone they are not created and the integration makes no price requests. They are information only: they have no connection to the optimisation grade, the economics or the data the integration uploads, and a problem with the price endpoint only makes these two sensors unavailable. The forecast never feeds the grade or any of the economy figures.
+
+| Entity | Enabled by default | Description |
+|--------|--------------------|-------------|
+| `sensor.wolta_spot_price` | Yes | The spot price of the current quarter-hour, in SEK/kWh **excluding VAT**. The state is worked out locally from the `prices` list and flips on the quarter-hour without waiting for the next poll; it is `unavailable` when the data holds no price for the current quarter. The attribute `prices` is a list of `{start, price}` points (UTC start time, SEK/kWh excluding VAT) for today and, once it is published, tomorrow. `vat_factor` is the Swedish VAT multiplier (1.25, i.e. 25 %), so multiply a price by it for a VAT-inclusive figure. `tomorrow_complete` says whether tomorrow's prices are all published. |
+| `sensor.wolta_spot_price_with_forecast` | **No** | The same state, but `prices` also carries a forecast for the quarters of tomorrow that have no published price yet. Each point has `forecast: true` or `false`. The extra attributes `forecast_issued_at` and `forecast_accuracy` describe the forecast. |
+
+**Enable the forecast sensor** under *Settings → Devices & services → Wolta → entities*: open the disabled *Spot price with forecast* entity and switch it on. The two sensors poll the public Wolta price endpoint every 15 minutes and need no account or token. They are unavailable until the first data has arrived, and while Wolta has no exchange rate to convert the prices to SEK. The zone is read when the integration is set up: if you change it with *Correct the price zone* between a Swedish and a non-Swedish zone, the price sensors become unavailable until the integration is reloaded (or Home Assistant restarted); after a reload they are created, or not, to match the new zone.
+
+**The forecast only covers tomorrow's quarters without a published price.** Once the day-ahead prices for tomorrow are out (normally around 13:00), the published prices replace the forecast, so forecast points never overlap real prices. When no forecast is available, the forecast sensor has no forecast points and behaves like the plain spot price sensor.
+
+**What the forecast is based on, and how good it is.** The forecast comes from the open-source [EpexPredictor](https://github.com/b3nn0/EpexPredictor), which predicts day-ahead prices from weather forecasts (Open-Meteo), expected generation and load (energy-charts) and recent price history. Wolta measures how good the forecast was: it compares the forecast that was actually shown before 13:00 with the prices that were then published. The attribute `forecast_accuracy` carries the result:
+
+| Key | Meaning |
+| --- | --- |
+| `basis` | `wolta` when at least 14 days have been measured, otherwise `upstream`. |
+| `days`, `window_days` | How many days Wolta has measured, and the window it looks at (30 days). |
+| `mae_ore_kwh` | With `basis: wolta`: Wolta's own mean absolute error per quarter, in öre/kWh excluding VAT, over the window. `null` otherwise. |
+| `peak_mae_ore_kwh` | With `basis: wolta`: the same error over the day's 8 most expensive quarters, the ones that matter most for charging and discharging decisions. `null` otherwise. |
+| `upstream_mae_ore_kwh` | The predictor project's own backtest error for your zone for a forecast one day ahead, about 18–26 öre/kWh. It was measured with actual weather, so the real-world error is somewhat larger. |
+
+Until Wolta has measured 14 days, treat the upstream figure as the best available estimate. A forecast with this error is good for judging which hours of tomorrow are likely to be cheap or expensive; it is not a price to rely on to the öre.
+
+**The `prices` attribute is not stored by the recorder.** It holds hundreds of points and would otherwise be written to the database on every change. Read it live from the state, for example in a template or an automation; it does not appear in the history graph.
+
+**Source.** The `attribution` attribute comes from the server and is in Swedish. On the plain spot price sensor it names the source of the prices only. On the forecast sensor, while a forecast is present, it also names the forecast sources and links to EpexPredictor, energy-charts and Open-Meteo. The integration shows the price data as information and makes no claim about a licence for it.
+
+### Example: feeding the prices to EMHASS
+
+A template sensor can turn the `prices` attribute into a plain list, for example for EMHASS's `load_cost_forecast`. This is an illustration, not a tested configuration: adapt the horizon (here 96 quarters, 24 hours) and the time step to your EMHASS setup. The prices in the attribute are excluding VAT; the template already multiplies by `vat_factor`, so the list is VAT-inclusive (drop that factor for the raw prices). Grid tariffs and other taxes are not included. Points without a price (no exchange rate) are left out, which can shorten or shift the list, and EMHASS needs a list that matches its horizon: check the length before relying on it.
+
+```yaml
+template:
+  - sensor:
+      - name: "Spot price forecast list"
+        unique_id: wolta_spot_price_forecast_list
+        state: "{{ (state_attr('sensor.wolta_spot_price_with_forecast', 'prices') or []) | length }}"
+        attributes:
+          load_cost_forecast: >-
+            {% set vat = state_attr('sensor.wolta_spot_price_with_forecast', 'vat_factor') | float(1.25) %}
+            {% set points = state_attr('sensor.wolta_spot_price_with_forecast', 'prices') or [] %}
+            {% set from_ts = now() - timedelta(minutes=15) %}
+            {% set ns = namespace(prices=[]) %}
+            {% for p in points %}
+              {% if p.price is not none and as_datetime(p.start) >= from_ts %}
+                {% set ns.prices = ns.prices + [(p.price * vat) | round(4)] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.prices[:96] }}
+```
+
+Replace `sensor.wolta_spot_price_with_forecast` with your entity ID (see [Verify entity IDs](#verify-entity-ids)). The last quarters of the list are forecast values; check `forecast` on the points if you want to treat them differently. The sensor's state is the number of points (a stable value on purpose; a timestamp would be recorded every minute). The list changes every quarter-hour, so consider excluding the sensor from the recorder:
+
+```yaml
+recorder:
+  exclude:
+    entities:
+      - sensor.spot_price_forecast_list
+```
+
 ## Requirements
 
 - Home Assistant 2025.12.0 or newer
@@ -353,6 +415,8 @@ Entity names follow your Home Assistant language (English and Swedish translatio
 | `sensor.wolta_payback_time` | `sensor.wolta_aterbetalningstid` |
 | `sensor.wolta_actual_savings_this_year` | `sensor.wolta_facit_i_ar` |
 | `sensor.wolta_data_status` | `sensor.wolta_datastatus` |
+| `sensor.wolta_spot_price` | `sensor.wolta_spotpris` |
+| `sensor.wolta_spot_price_with_forecast` | `sensor.wolta_spotpris_med_prognos` |
 | `sensor.wolta_status` | `sensor.wolta_status` |
 | `button.wolta_recompute` | `button.wolta_rakna_om` |
 

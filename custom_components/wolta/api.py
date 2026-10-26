@@ -82,6 +82,9 @@ INTERACTIVE_MINT_TIMEOUT = aiohttp.ClientTimeout(total=25)
 # it in a broad except). A wait longer than the step takes to draw therefore costs
 # the user everything and buys nothing - keep it the shortest of the three.
 PREFILL_TIMEOUT = aiohttp.ClientTimeout(total=8)
+# Same bound for any optional public lookup (prices) that must not hang on aiohttp's
+# default 300 s total timeout.
+PUBLIC_LOOKUP_TIMEOUT = PREFILL_TIMEOUT
 
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
@@ -407,6 +410,16 @@ class WoltaApiClient:
         steget i fem minuter för ett förslag som ändå är frivilligt."""
         data = await self._request("GET", "/control-systems", timeout=PREFILL_TIMEOUT)
         return data if isinstance(data, list) else []
+
+    async def get_prices_now(self, zone: str) -> dict:
+        """GET /prices/now?zone=<zone> (public, no Authorization header): current,
+        today's and tomorrow's spot prices and, where available, the price forecast.
+
+        Bound by PUBLIC_LOOKUP_TIMEOUT: the price sensors are optional and must not hang
+        on aiohttp's default 300 s total timeout."""
+        return await self._request(
+            "GET", "/prices/now", params={"zone": zone}, timeout=PUBLIC_LOOKUP_TIMEOUT
+        )
 
     async def adopt_profile(self, token: str, client_plant_id: str | None = None) -> dict:
         """Convert a web-created (upload-kind) profile into an integration profile.

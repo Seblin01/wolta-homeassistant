@@ -48,6 +48,12 @@ ENTRY_DATA = {
 }
 
 
+def _close_task(hass, coro, name=None):
+    """Stand-in for ConfigEntry.async_create_background_task on a MagicMock entry:
+    close the coroutine so it is not reported as never awaited."""
+    coro.close()
+
+
 def _make_mock_coordinator():
     """Return a mock WoltaCoordinator."""
     coord = MagicMock()
@@ -81,6 +87,7 @@ async def test_async_setup_entry_sets_runtime_data_and_forwards_platforms(
     mock_entry.entry_id = "test_entry_id"
     mock_entry.domain = DOMAIN
     mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    mock_entry.async_create_background_task = _close_task  # the price refresh, see __init__
 
     with (
         patch(
@@ -123,6 +130,7 @@ async def test_async_setup_entry_survives_mint_link_failure(
     mock_entry.entry_id = "test_entry_id"
     mock_entry.domain = DOMAIN
     mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    mock_entry.async_create_background_task = _close_task  # the price refresh, see __init__
 
     with (
         patch(
@@ -165,6 +173,7 @@ async def test_async_setup_entry_survives_mint_link_offline(
     mock_entry.entry_id = "test_entry_id"
     mock_entry.domain = DOMAIN
     mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    mock_entry.async_create_background_task = _close_task  # the price refresh, see __init__
 
     with (
         patch(
@@ -424,6 +433,7 @@ async def _setup_with(hass, aioclient_mock, data, entry_id="01J9ZK3Q8V4X6Y2B7C5D
     mock_entry.entry_id = entry_id
     mock_entry.domain = DOMAIN
     mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    mock_entry.async_create_background_task = _close_task  # the price refresh, see __init__
     with (
         patch("custom_components.wolta.WoltaCoordinator", return_value=_make_mock_coordinator()),
         patch("homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
@@ -480,6 +490,7 @@ async def test_setup_survives_failed_identity_migration(hass, aioclient_mock):
     mock_entry.entry_id = "01J9ZK3Q8V4X6Y2B7C5D0E1F2G"
     mock_entry.domain = DOMAIN
     mock_entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+    mock_entry.async_create_background_task = _close_task  # the price refresh, see __init__
     with (
         patch("custom_components.wolta.WoltaCoordinator", return_value=_make_mock_coordinator()),
         patch("homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
