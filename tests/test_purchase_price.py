@@ -565,10 +565,10 @@ async def test_forgetting_the_purchase_response_drops_the_kept_one(
 
 async def _gated_fetch_during_forget(
     aioclient_mock: AiohttpClientMocker, coordinator: WoltaPriceCoordinator, *, forget_first: bool
-) -> None:
+) -> dict | None:
     """One poll whose /profile/prices request is held open and answered with a priced series;
     the tariff save (async_forget_purchase) happens before the request starts
-    (forget_first) or while it is in flight."""
+    (forget_first) or while it is in flight. Returns the purchase data of that poll."""
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -589,6 +589,7 @@ async def _gated_fetch_during_forget(
         release.set()
         await asyncio.wait_for(refresh, timeout=5)
     assert coordinator.last_update_success is True
+    return coordinator.data[PURCHASE_KEY]
 
 
 @pytest.mark.asyncio
@@ -604,6 +605,40 @@ async def test_fetch_in_flight_during_a_tariff_save_is_not_kept(
     await _gated_fetch_during_forget(aioclient_mock, coordinator, forget_first=False)
 
     assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_in_flight_during_a_tariff_save_returns_none_to_the_poll(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The old tariff's series is not handed to the coordinator either (it could overwrite
+    newer data when it finishes last): the sensor is unavailable until the refresh queued by
+    the save lands."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+
+    answer = await _gated_fetch_during_forget(aioclient_mock, coordinator, forget_first=False)
+
+    assert answer is None
+
+
+@pytest.mark.asyncio
+async def test_stale_fetch_does_not_log_recovery(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, caplog: pytest.LogCaptureFixture
+):
+    """A response that is discarded as stale says nothing about the endpoint working again:
+    no "available again" line, and the outage stays one outage (later failures log at debug)."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    with caplog.at_level(logging.DEBUG, logger="custom_components.wolta.price_coordinator"):
+        await _poll_purchase(aioclient_mock, coordinator, status=500)
+        assert len(_own_records(caplog, logging.INFO)) == 1  # the outage starts
+
+        await _gated_fetch_during_forget(aioclient_mock, coordinator, forget_first=False)
+        await _poll_purchase(aioclient_mock, coordinator, status=500)
+
+        assert len(_own_records(caplog, logging.INFO)) == 1
+        assert not [m for m in _own_records(caplog, logging.DEBUG) if "available again" in m]
 
 
 @pytest.mark.asyncio

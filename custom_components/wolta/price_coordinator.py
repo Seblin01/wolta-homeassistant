@@ -311,7 +311,8 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Drop the kept purchase response. The options flow calls it when the owner saves a
         changed tariff: the kept series was priced with the old one, and must not be shown if
         the refresh that follows the save fails. A /profile/prices request already in flight
-        was started with the old tariff: it is not kept either when it answers."""
+        was started with the old tariff: when it answers it is neither kept nor returned
+        (None), and it does not count as the endpoint working again."""
         self._purchase_generation += 1
         self._last_purchase = None
 
@@ -342,11 +343,15 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if kept is not None and kept[0] != zone:
                 self._last_purchase = kept = None
             return None if kept is None else kept[1]
+        if generation != self._purchase_generation:
+            # Started before a tariff save: the old tariff's answer. Not kept, not shown, and
+            # no word on whether the endpoint works again; the refresh queued by the save
+            # fetches the new one.
+            return None
         if self._purchase_failing:
             _LOGGER.info("The purchase price is available again")
             self._purchase_failing = False
-        if generation == self._purchase_generation:
-            self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
+        self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
         return purchase
 
     async def _fetch_full_forecast(self, zone: str) -> dict[str, Any] | None:
