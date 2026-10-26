@@ -397,3 +397,97 @@ def test_options_fixed_part_error_names_the_tariffs_section(path: Path):
 def test_swedish_copy_uses_typographic_quotes():
     text = _at(_load(_TRANSLATIONS / "sv.json"), ("options", "error", "grid_fixed_required"))
     assert '"' not in text
+
+
+# --- sale price (HACS 0.54.0): grid benefit fields, retailer terms, the export-split issues ----
+
+_BENEFIT_FIELDS = ("grid_benefit_ore", "grid_benefit_peak_ore", "export_extra_ore",
+                   "export_extra_pct")
+_BENEFIT_ERRORS = ("grid_benefit_fixed_required", "grid_benefit_peak_requires_base",
+                   "grid_benefit_zone")
+
+
+def _tariffs(path: Path) -> dict:
+    return _load(path)["options"]["step"]["settings"]["sections"]["tariffs"]
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_tariffs_section_has_label_and_description_for_the_export_fields(path: Path) -> None:
+    tariffs = _tariffs(path)
+    for field in _BENEFIT_FIELDS:
+        assert tariffs["data"][field], f"{path.name}: {field} label"
+        assert tariffs["data_description"][field], f"{path.name}: {field} description"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_retailer_terms_field_says_it_is_not_the_grid_benefit(path: Path) -> None:
+    """The reason the fields were split: a number in the retailer's field that is really the
+    grid benefit is counted twice, so the field must point at the other one."""
+    tariffs = _tariffs(path)
+    label = tariffs["data"]["export_extra_ore"].lower()
+    text = tariffs["data_description"]["export_extra_ore"].lower()
+    benefit = {"en.json": "grid benefit", "strings.json": "grid benefit",
+               "sv.json": "nätnytta"}[path.name]
+    retailer = {"en.json": "retailer", "strings.json": "retailer", "sv.json": "elhandel"}[path.name]
+    assert retailer in label
+    assert benefit in text
+    # The old catch-all wording is gone from both fields.
+    for old in ("grid/export agreement", "nät-/exportavtal", "exportjustering",
+                "export premium/discount"):
+        assert old not in label and old not in text, f"{path.name}: {old}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_percent_field_is_the_grid_benefit_not_a_generic_export_compensation(path: Path) -> None:
+    label = _tariffs(path)["data"]["export_extra_pct"].lower()
+    needle = "nätnytta" if path.name == "sv.json" else "grid benefit"
+    assert needle in label, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_benefit_field_errors_exist_for_options(path: Path) -> None:
+    errors = _load(path)["options"]["error"]
+    for code in _BENEFIT_ERRORS:
+        assert errors[code], f"{path.name}: {code}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_benefit_errors_name_the_field_they_ask_for(path: Path) -> None:
+    """Field errors render next to the field, but the text still has to say which one to fill."""
+    label = {"en.json": "Grid benefit, rest of the year", "strings.json": "Grid benefit, rest of the year",
+             "sv.json": "Nätnytta, övrig tid"}[path.name]
+    errors = _load(path)["options"]["error"]
+    assert label in errors["grid_benefit_fixed_required"], path.name
+    assert label in errors["grid_benefit_peak_requires_base"], path.name
+    # The label the error quotes must be the label the field has.
+    assert _tariffs(path)["data"]["grid_benefit_ore"].startswith(label), path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("issue, placeholder", [
+    ("export_split_unclear", "{export_extra}"),
+    ("grid_benefit_fixed_missing", "{export_pct}"),
+])
+def test_export_issues_exist_are_not_fixable_and_show_the_owners_figure(
+    path: Path, issue: str, placeholder: str
+) -> None:
+    node = _load(path)["issues"][issue]
+    assert node["title"]
+    assert "fix_flow" not in node
+    assert placeholder in node["description"], f"{path.name}: {issue}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("issue", ["export_split_unclear", "grid_benefit_fixed_missing"])
+def test_export_issue_text_names_the_real_menu_path(path: Path, issue: str) -> None:
+    text = _at(_load(path), ("issues", issue, "description"))
+    assert _SETTINGS_PATH[path.name] in text, f"{path.name}: {issue}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_export_split_issue_says_the_grid_benefit_is_counted_twice(path: Path) -> None:
+    text = _at(_load(path), ("issues", "export_split_unclear", "description"))
+    needle = {"en.json": "counted twice", "strings.json": "counted twice",
+              "sv.json": "räknas den två gånger"}[path.name]
+    assert needle in text, path.name
+    assert "5 öre" in text, path.name

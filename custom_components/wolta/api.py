@@ -321,6 +321,8 @@ class WoltaApiClient:
         export_extra_ore: float | None = None,
         grid_var_pct: float | None = None,
         export_extra_pct: float | None = None,
+        grid_benefit_ore: float | None = None,
+        grid_benefit_peak_ore: float | None = None,
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
@@ -359,6 +361,13 @@ class WoltaApiClient:
             payload["grid_var_pct"] = grid_var_pct
         if export_extra_pct is not None:
             payload["export_extra_pct"] = export_extra_pct
+        # The owner's grid benefit (api 0.119.0, SE1-SE4). 0 is an answer ("none"), so only
+        # None is omitted. On a re-onboarding of a row that still exists the server keeps its
+        # own tariff and ignores this; a row created after a purge takes it from here.
+        if grid_benefit_ore is not None:
+            payload["grid_benefit_ore"] = grid_benefit_ore
+        if grid_benefit_peak_ore is not None:
+            payload["grid_benefit_peak_ore"] = grid_benefit_peak_ore
         # Plain `is not None` (not `or None`): reserve_pct=0 is a legitimate value
         # (a user whose control system keeps zero reserve floor) and must reach
         # the backend, not be swallowed as "unset". Mirrors the tariff fields above.

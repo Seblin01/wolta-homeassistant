@@ -1190,3 +1190,49 @@ async def test_create_profile_plain_409_is_not_plant_claimed(aioclient_mock: Aio
         await client.create_profile(zone="SE3", has_solar=False, share_profile=True,
                                     battery_kwh=10, battery_kw=5)
     assert not isinstance(exc.value, WoltaPlantClaimed)
+
+
+# ---------------------------------------------------------------------------
+# create_profile / patch_profile with the owner's grid benefit (api 0.119.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_profile_sends_the_grid_benefit_fields_including_zero(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """0 is an answer ("no grid benefit"), so it is sent; None is omitted."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False,
+        grid_benefit_ore=0.0, grid_benefit_peak_ore=25.5, export_extra_ore=-3.0,
+    )
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    assert body["grid_benefit_ore"] == 0.0
+    assert body["grid_benefit_peak_ore"] == 25.5
+    assert body["export_extra_ore"] == -3.0
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_the_grid_benefit_when_none(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    assert "grid_benefit_ore" not in body
+    assert "grid_benefit_peak_ore" not in body
+
+
+@pytest.mark.asyncio
+async def test_patch_profile_passes_the_grid_benefit_through(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.patch(f"{BASE_URL}/api/v1/profile", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.patch_profile(
+        TOKEN, grid_benefit_ore=10.4, grid_benefit_peak_ore=None, export_extra_ore=5.0)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "patch"][0][2]
+    assert body == {"grid_benefit_ore": 10.4, "grid_benefit_peak_ore": None,
+                    "export_extra_ore": 5.0}

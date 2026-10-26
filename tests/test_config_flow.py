@@ -33,6 +33,8 @@ from custom_components.wolta.const import (
     CONF_EXPORT_EXTRA_PCT,
     CONF_EXTERNAL_CONTROL,
     CONF_FLEX_COMPENSATION,
+    CONF_GRID_BENEFIT_ORE,
+    CONF_GRID_BENEFIT_PEAK_ORE,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
@@ -1122,7 +1124,7 @@ _SYNC_KEYS = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
-    CONF_REDUCED_ENERGY_TAX,
+    CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
 )
 
 
@@ -1143,6 +1145,7 @@ _OPT_SECTION_OF = {
     CONF_COST_SEK: "economy", CONF_PURCHASE_DATE: "economy",
     CONF_GRID_VAR_ORE: "tariffs", CONF_SURCHARGE_ORE: "tariffs",
     CONF_EXPORT_EXTRA_ORE: "tariffs",
+    CONF_GRID_BENEFIT_ORE: "tariffs", CONF_GRID_BENEFIT_PEAK_ORE: "tariffs",
     CONF_GRID_VAR_PCT: "tariffs", CONF_EXPORT_EXTRA_PCT: "tariffs",
     CONF_REDUCED_ENERGY_TAX: "tariffs",
 }
@@ -5540,3 +5543,290 @@ async def test_link_flow_mirrors_the_reduced_energy_tax_answer(hass: HomeAssista
             result["flow_id"], STEP_ENTITIES_DATA)
 
     assert result["data"][CONF_REDUCED_ENERGY_TAX] is False
+
+
+# ---------------------------------------------------------------------------
+# Försäljningspris (HACS 0.54.0, server api 0.119.0): the owner's grid benefit has its own
+# fields, export_extra_ore becomes the retailer's terms, and the server's three new 422s are
+# explained AT THE FIELD (never cannot_connect, never base).
+# ---------------------------------------------------------------------------
+
+# What WoltaApiError carries for each of the server's 422s (one line, JSON escaped as sent).
+_BENEFIT_FIXED_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"export_extra_pct kr\\u00e4ver '
+    'grid_benefit_ore (n\\u00e4tnyttans fasta del, 0 om du bara har procent)"}')
+_BENEFIT_PEAK_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"grid_benefit_peak_ore '
+    'kr\\u00e4ver grid_benefit_ore (n\\u00e4tnyttan i \\u00f6vrig tid)"}')
+_BENEFIT_ZONE_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"grid_benefit_ore och '
+    'grid_benefit_peak_ore g\\u00e4ller bara SE1\\u2013SE4"}')
+
+
+@pytest.mark.asyncio
+async def test_options_tariffs_section_orders_the_benefit_fields_before_the_retailer_terms(
+    hass: HomeAssistant,
+) -> None:
+    """Grid benefit rest-of-year, grid benefit high-load, retailer terms, grid benefit % of spot."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+    fields = _tariff_fields(result)
+    order = [CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
+             CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT]
+    assert all(f in fields for f in order)
+    assert [fields.index(f) for f in order] == sorted(fields.index(f) for f in order)
+    for field in (CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE):
+        _, sel = _tariff_field(result, field)
+        assert (sel.config["min"], sel.config["max"]) == (-20.0, 50.0)
+
+
+@pytest.mark.asyncio
+async def test_options_benefit_fields_are_hidden_outside_se1_se4(hass: HomeAssistant) -> None:
+    """The server refuses them outside SE1-SE4 (422), so the form does not offer them, and a
+    save there leaves a cached value alone instead of PATCHing null over it."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_ZONE: "FI", CONF_GRID_BENEFIT_ORE: 10.4})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        fields = _tariff_fields(result)
+        assert CONF_GRID_BENEFIT_ORE not in fields
+        assert CONF_GRID_BENEFIT_PEAK_ORE not in fields
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core()))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_grid_benefit_patches_both_benefit_and_retailer_terms(
+    hass: HomeAssistant,
+) -> None:
+    """The owner who enters the grid benefit sees and confirms the retailer value: both go."""
+    entry = _make_mock_entry(hass, extra_data={CONF_EXPORT_EXTRA_ORE: 5.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_BENEFIT_ORE] == 10.4
+    assert updated.data[CONF_EXPORT_EXTRA_ORE] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_options_changed_retailer_terms_send_the_unchanged_benefit_too(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: -3.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: -3.0}
+
+
+@pytest.mark.asyncio
+async def test_options_benefit_without_retailer_terms_confirms_zero(hass: HomeAssistant) -> None:
+    """An empty retailer field next to a grid benefit is answered 0 (the retailer pays pure
+    spot): the server counts a missing value as 0 anyway, and the stored value is then one the
+    owner has seen."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 0.0})))
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_BENEFIT_ORE: 0.0, CONF_EXPORT_EXTRA_ORE: 0.0}
+
+
+@pytest.mark.asyncio
+async def test_options_untouched_benefit_and_terms_patch_nothing(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail, code",
+    [
+        (_BENEFIT_FIXED_DETAIL, "grid_benefit_fixed_required"),
+        (_BENEFIT_PEAK_DETAIL, "grid_benefit_peak_requires_base"),
+        (_BENEFIT_ZONE_DETAIL, "grid_benefit_zone"),
+    ],
+    ids=["percent-needs-fixed", "peak-needs-base", "zone"],
+)
+async def test_options_server_422_for_the_benefit_rules_shows_at_the_field(
+    hass: HomeAssistant, detail: str, code: str,
+) -> None:
+    """Never cannot_connect and never base: the error is on grid_benefit_ore, the field that
+    is missing (or, for the zone rule, the one that is refused), and the section opens."""
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError(detail, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 10.4})))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: code}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+
+
+@pytest.mark.asyncio
+async def test_options_export_percent_without_benefit_fixed_part_shows_the_error_first(
+    hass: HomeAssistant,
+) -> None:
+    """The server's rule, said before sending: a non-zero percentage needs the fixed part
+    (0 if there is none). Nothing is sent."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_PCT: -2.8})))
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_fixed_required"}
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_export_percent_zero_needs_no_benefit(hass: HomeAssistant) -> None:
+    """The server flags and refuses only a percentage that is not 0."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_PCT: 0.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_EXPORT_EXTRA_PCT: 0.0}
+
+
+@pytest.mark.asyncio
+async def test_options_peak_without_base_shows_the_error_first(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_BENEFIT_PEAK_ORE: 20.0})))
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_peak_requires_base"}
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_legacy_export_percent_profile_can_still_save_other_fields(
+    hass: HomeAssistant,
+) -> None:
+    """Mirror of the import-side rule: the server checks a PATCH only when it touches the
+    percentage or the benefit, so an unrelated save is never locked out by a legacy row."""
+    entry = _make_mock_entry(hass, extra_data={CONF_EXPORT_EXTRA_PCT: -2.8})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_BATTERY_KWH: 25.0, CONF_EXPORT_EXTRA_PCT: -2.8})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_BATTERY_KWH: 25.0}
+
+
+@pytest.mark.parametrize(
+    "detail, code",
+    [
+        (_BENEFIT_FIXED_DETAIL, "grid_benefit_fixed_required"),
+        (_BENEFIT_PEAK_DETAIL, "grid_benefit_peak_requires_base"),
+        (_BENEFIT_ZONE_DETAIL, "grid_benefit_zone"),
+        ('HTTP 422 from x: {"detail":"export_extra_pct kräver grid_benefit_ore (nätnyttans fasta del)"}',
+         "grid_benefit_fixed_required"),  # plain letters
+        ('HTTP 422 from x: {"detail":"export_extra_pct and grid_benefit_ore must be numbers"}', None),
+        ('HTTP 422 from x: {"detail":"grid_benefit_ore kräver export_extra_pct"}', None),
+        ('HTTP 422 from x: {"detail":"grid_var_pct kräver grid_var_ore (nätavgiftens fasta del)"}',
+         None),
+    ],
+    ids=["fixed", "peak", "zone", "plain", "other-422-both-fields", "reversed", "import-side-rule"],
+)
+def test_benefit_error_code_needs_the_rules_own_wording(detail, code) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.config_flow import _grid_benefit_error
+
+    assert _grid_benefit_error(WoltaApiError(detail, status=422)) == code
+    assert _grid_benefit_error(WoltaApiError(detail, status=500)) is None
+
+
+@pytest.mark.asyncio
+async def test_reauth_sends_the_cached_grid_benefit(hass: HomeAssistant) -> None:
+    """A new row after a purged profile takes the tariff from this call (a surviving row keeps
+    the server's), so the benefit and the retailer terms travel with it."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(
+        hass,
+        {**_REAUTH_BASE, CONF_GRID_BENEFIT_ORE: 10.4, CONF_GRID_BENEFIT_PEAK_ORE: 25.0,
+         CONF_EXPORT_EXTRA_ORE: 5.0},
+        mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert kwargs["grid_benefit_ore"] == 10.4
+    assert kwargs["grid_benefit_peak_ore"] == 25.0
+    assert kwargs["export_extra_ore"] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_reauth_without_a_benefit_sends_none(hass: HomeAssistant) -> None:
+    mock_client = _mock_client("new-token")
+    await _start_reauth(hass, dict(_REAUTH_BASE), mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert kwargs["grid_benefit_ore"] is None
+    assert kwargs["grid_benefit_peak_ore"] is None
+
+
+@pytest.mark.asyncio
+async def test_reauth_outside_se1_se4_does_not_send_a_cached_benefit(hass: HomeAssistant) -> None:
+    """The server refuses the benefit fields outside SE1-SE4, which would block the reauth
+    for a cache that outlived a zone correction."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(
+        hass, {**_REAUTH_BASE, CONF_ZONE: "FI", CONF_GRID_BENEFIT_ORE: 10.4}, mock_client)
+    assert mock_client.create_profile.call_args.kwargs["grid_benefit_ore"] is None
+
+
+@pytest.mark.asyncio
+async def test_link_flow_mirrors_the_grid_benefit(hass: HomeAssistant) -> None:
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value={
+        **LINK_PROFILE, CONF_GRID_BENEFIT_ORE: 10.4, CONF_GRID_BENEFIT_PEAK_ORE: 25.0})
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    assert result["data"][CONF_GRID_BENEFIT_ORE] == 10.4
+    assert result["data"][CONF_GRID_BENEFIT_PEAK_ORE] == 25.0

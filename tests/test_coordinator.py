@@ -2833,13 +2833,15 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_GRID_VAR_ORE,
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
         CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
-        CONF_SOC_ABSENT, CONF_REDUCED_ENERGY_TAX,
+        CONF_SOC_ABSENT, CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE,
+        CONF_GRID_BENEFIT_PEAK_ORE,
     )
 
     assert _PROFILE_SYNC_KEYS == (
         CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+        CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
         CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME, CONF_SOC_ABSENT,
         CONF_REDUCED_ENERGY_TAX,
     )
@@ -6859,3 +6861,156 @@ async def test_cs_issue_not_raised_when_the_server_has_a_control_system(hass, mo
         await _sync_refresh(hass, mock_entry, client)
     assert mock_entry.data["control_system"] == "tibber"
     assert _cs_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_mirrors_the_grid_benefit_including_zero(
+    hass: HomeAssistant, mock_entry
+):
+    """The owner's grid benefit is also edited on wolta.se. 0 is an answer ("none") and is
+    stored; None (PATCH null) drops the key, like every other tariff field."""
+    from custom_components.wolta.const import CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE
+
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "grid_benefit_ore": 0.0, "grid_benefit_peak_ore": 25.5})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert kwargs["data"][CONF_GRID_BENEFIT_ORE] == 0.0
+    assert kwargs["data"][CONF_GRID_BENEFIT_PEAK_ORE] == 25.5
+
+    mock_entry.data = {**mock_entry.data, CONF_GRID_BENEFIT_ORE: 10.4,
+                       CONF_GRID_BENEFIT_PEAK_ORE: 25.5}
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "grid_benefit_ore": None, "grid_benefit_peak_ore": None})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    assert CONF_GRID_BENEFIT_ORE not in kwargs["data"]
+    assert CONF_GRID_BENEFIT_PEAK_ORE not in kwargs["data"]
+
+
+# ---------------------------------------------------------------------------
+# export_split_unclear and grid_benefit_fixed_missing (server api 0.119.0): the export side's
+# two questions to the owner. The server derives both flags (tariff.tariff_check); the
+# integration only shows them, with the owner's own figure in the text.
+# ---------------------------------------------------------------------------
+
+_SPLIT_ISSUE_ID = "export_split_unclear_test_entry_id"
+_BENEFIT_FIXED_ISSUE_ID = "grid_benefit_fixed_missing_test_entry_id"
+
+
+def _export_check(**flags) -> dict:
+    return {"tariff_check": {"grid_var_implausible": False, "grid_var_limit_ore": 60.0, **flags}}
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_fires_with_the_owners_figure(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_ore": 7.5})
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == "export_split_unclear"
+    assert issue.is_fixable is False
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.translation_placeholders == {"export_extra": "7.5"}
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_shows_a_negative_figure_as_entered(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_ore": -3.0})
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID)
+    assert issue.translation_placeholders == {"export_extra": "-3"}
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_clears_when_the_server_says_false(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_ore": 7.5})
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_left_alone_when_the_server_lacks_the_flag(hass, mock_entry):
+    """A server before api 0.119.0 sends tariff_check without the flag: that is no answer,
+    so an open issue is not deleted and none is created."""
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_ore": 7.5})
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    c._evaluate_grid_fee_issue(_export_check())
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID) is not None
+    ir.async_delete_issue(hass, DOMAIN, _SPLIT_ISSUE_ID)
+    c._evaluate_grid_fee_issue(_export_check())
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_without_a_cached_figure_still_fires(hass, mock_entry):
+    """The flag is the server's; a cache that has not caught up must not hide the question."""
+    c = await _cap_coordinator(hass, mock_entry)
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_placeholders == {"export_extra": "-"}
+
+
+@pytest.mark.asyncio
+async def test_export_split_unclear_not_in_view_only(hass, mock_entry):
+    """View-only: the tariff is set on wolta.se, not under Configure here."""
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_ore": 7.5})
+    c._view_only = True
+    c._evaluate_grid_fee_issue(_export_check(export_split_unclear=True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _SPLIT_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_benefit_fixed_missing_fires_with_the_owners_percentage(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_pct": -2.8})
+    c._evaluate_grid_fee_issue(_export_check(grid_benefit_fixed_missing=True))
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _BENEFIT_FIXED_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == "grid_benefit_fixed_missing"
+    assert issue.is_fixable is False
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.translation_placeholders == {"export_pct": "-2.8"}
+
+
+@pytest.mark.asyncio
+async def test_grid_benefit_fixed_missing_clears_when_the_server_says_false(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_pct": -2.8})
+    c._evaluate_grid_fee_issue(_export_check(grid_benefit_fixed_missing=True))
+    c._evaluate_grid_fee_issue(_export_check(grid_benefit_fixed_missing=False))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BENEFIT_FIXED_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_grid_benefit_fixed_missing_left_alone_when_the_server_lacks_the_flag(
+    hass, mock_entry
+):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_pct": -2.8})
+    c._evaluate_grid_fee_issue(_export_check(grid_benefit_fixed_missing=True))
+    c._evaluate_grid_fee_issue(_export_check())
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BENEFIT_FIXED_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_grid_benefit_fixed_missing_not_in_view_only(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{"export_extra_pct": -2.8})
+    c._view_only = True
+    c._evaluate_grid_fee_issue(_export_check(grid_benefit_fixed_missing=True))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _BENEFIT_FIXED_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_export_issues_do_not_hide_the_import_side_issues(hass, mock_entry):
+    """Four different faults; one flag never hides another."""
+    c = await _cap_coordinator(
+        hass, mock_entry, **{"export_extra_ore": 7.5, "export_extra_pct": -2.8})
+    c._evaluate_grid_fee_issue(_export_check(
+        grid_var_implausible=True, grid_fixed_missing=True,
+        export_split_unclear=True, grid_benefit_fixed_missing=True))
+    reg = ir.async_get(hass)
+    for issue_id in (_GRID_ISSUE_ID, _FIXED_ISSUE_ID, _SPLIT_ISSUE_ID, _BENEFIT_FIXED_ISSUE_ID):
+        assert reg.async_get_issue(DOMAIN, issue_id) is not None, issue_id

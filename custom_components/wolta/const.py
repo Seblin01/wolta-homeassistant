@@ -31,7 +31,13 @@ CONF_COST_SEK = "cost_sek"
 CONF_PURCHASE_DATE = "purchase_date"
 CONF_GRID_VAR_ORE = "grid_var_ore"
 CONF_SURCHARGE_ORE = "surcharge_ore"
+# Since api 0.119.0 export_extra_ore is the RETAILER's terms for sold electricity (premium +,
+# deduction -), no longer a catch-all that also held the grid benefit. The owner's grid benefit
+# (nätnytta, the network operator's compensation for feeding in; öre/kWh excl. VAT) has its own
+# fields: the rest of the year, and optionally the high-load hours. SE1-SE4 only.
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
+CONF_GRID_BENEFIT_ORE = "grid_benefit_ore"
+CONF_GRID_BENEFIT_PEAK_ORE = "grid_benefit_peak_ore"
 # Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"

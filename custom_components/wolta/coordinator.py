@@ -58,6 +58,8 @@ from .const import (
     CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_BENEFIT_ORE,
+    CONF_GRID_BENEFIT_PEAK_ORE,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
@@ -799,6 +801,19 @@ _ISSUE_GRID_FEE_IMPLAUSIBLE = "grid_fee_implausible"
 # and keeps the sensor unavailable until the fixed part (0 if there is none) is entered.
 # Non-fixable: only the owner knows the figure.
 _ISSUE_GRID_FIXED_MISSING = "grid_fixed_missing"
+# The export side's two questions (results.tariff_check, server api 0.119.0). Both are for
+# SE1-SE4 only, where the owner's grid benefit has a field of its own.
+# export_split_unclear: an export premium that is not 0 and no grid benefit. The premium may be
+# the grid benefit (then Wolta's standard 5 öre on top counts it twice) or the retailer's terms;
+# the data cannot tell which, so the owner is asked and no number changes until they save.
+_ISSUE_EXPORT_SPLIT_UNCLEAR = "export_split_unclear"
+# grid_benefit_fixed_missing: an export percentage that is not 0 and no fixed part of the grid
+# benefit. Wolta then adds the standard 5 öre as the fixed part, a guess that looks like the
+# owner's figure.
+# The 5 öre in both texts is the server's DEFAULT_GRID_BENEFIT_ORE (simulate/tariff.py), the
+# standard used when the owner has given no grid benefit.
+# Both non-fixable: only the owner knows the figures.
+_ISSUE_GRID_BENEFIT_FIXED_MISSING = "grid_benefit_fixed_missing"
 # The server's archive of replaced rows is full (429 on open): a correction of the stored
 # history waits until Retry-After. Non-fixable, one per entry; the translation key says
 # which correction waits (_direction / _entities), the placeholder when it is retried.
@@ -886,6 +901,9 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+    # The owner's grid benefit (api 0.119.0), also edited on wolta.se. 0 is an answer and is
+    # stored; None drops the key.
+    CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
     # The control system is declared on wolta.se and can be switched and backdated there.
     # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
     # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
@@ -3898,6 +3916,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not isinstance(check, dict):
             return
         self._evaluate_grid_fixed_issue(check)
+        self._evaluate_export_issues(check)
         issue_id = f"{_ISSUE_GRID_FEE_IMPLAUSIBLE}_{self.config_entry.entry_id}"
         if not check.get("grid_var_implausible") or self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
@@ -3931,6 +3950,38 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             severity=ir.IssueSeverity.WARNING,
             translation_key=_ISSUE_GRID_FIXED_MISSING,
         )
+
+    def _evaluate_export_issues(self, check: dict) -> None:
+        """The two export-side questions in results.tariff_check (server api 0.119.0).
+
+        Same shape as the import-side warnings above: the flags are the server's
+        (tariff.export_split_unclear / grid_benefit_fixed_missing), read here, never derived. A
+        tariff_check without a flag is a server before api 0.119.0 and leaves whatever is open as
+        it is. The text carries the owner's own figure from the mirrored profile; the flag is the
+        server's, so a cache that has not caught up still raises the question (with "-" for the
+        figure). Never in view-only mode: the tariff is set on wolta.se there."""
+        data = self.config_entry.data
+        for flag, issue, placeholder, key in (
+            ("export_split_unclear", _ISSUE_EXPORT_SPLIT_UNCLEAR, "export_extra",
+             CONF_EXPORT_EXTRA_ORE),
+            ("grid_benefit_fixed_missing", _ISSUE_GRID_BENEFIT_FIXED_MISSING, "export_pct",
+             CONF_EXPORT_EXTRA_PCT),
+        ):
+            if flag not in check:
+                continue
+            issue_id = f"{issue}_{self.config_entry.entry_id}"
+            if check.get(flag) is not True or self._view_only:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            value = data.get(key)
+            ir.async_create_issue(
+                self.hass, DOMAIN, issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=issue,
+                translation_placeholders={
+                    placeholder: f"{value:g}" if isinstance(value, (int, float)) else "-"},
+            )
 
     @staticmethod
     def _direction_reversed(betyg: dict) -> bool:

@@ -79,6 +79,8 @@ from .const import (
     CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_BENEFIT_ORE,
+    CONF_GRID_BENEFIT_PEAK_ORE,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
@@ -245,6 +247,38 @@ def _is_grid_fixed_error(err: WoltaApiError) -> bool:
     happens to name both fields (a type error, say) is not this rule."""
     return (getattr(err, "status", None) == 422
             and _GRID_FIXED_RULE.search(str(err)) is not None)
+
+
+# The server's three 422s for the owner's grid benefit (api 0.119.0), each matched on the rule's own
+# wording (the "ä" plain or as the JSON escape, as for _GRID_FIXED_RULE) and mapped to the error
+# code the options form shows at the field:
+#   export_extra_pct kräver grid_benefit_ore (nätnyttans fasta del, 0 om du bara har procent)
+#   grid_benefit_peak_ore kräver grid_benefit_ore (nätnyttan i övrig tid)
+#   grid_benefit_ore och grid_benefit_peak_ore gäller bara SE1–SE4
+_GRID_BENEFIT_RULES = (
+    (re.compile(r"export_extra_pct\s+kr(?:ä|\\u00e4)ver\s+grid_benefit_ore", re.IGNORECASE),
+     "grid_benefit_fixed_required"),
+    (re.compile(r"grid_benefit_peak_ore\s+kr(?:ä|\\u00e4)ver\s+grid_benefit_ore", re.IGNORECASE),
+     "grid_benefit_peak_requires_base"),
+    (re.compile(r"grid_benefit_ore\s+och\s+grid_benefit_peak_ore\s+g(?:ä|\\u00e4)ller\s+bara",
+                re.IGNORECASE),
+     "grid_benefit_zone"),
+)
+
+
+def _grid_benefit_error(err: WoltaApiError) -> str | None:
+    """The options-form error code for one of the server's grid-benefit 422s, else None.
+
+    Like _is_grid_fixed_error, the match is the rule's own wording and not just the field names:
+    another 422 that happens to name the same fields (a type error, say) is not these rules.
+    All three are shown at grid_benefit_ore, the field the owner has to fill in or clear."""
+    if getattr(err, "status", None) != 422:
+        return None
+    text = str(err)
+    for rule, code in _GRID_BENEFIT_RULES:
+        if rule.search(text):
+            return code
+    return None
 
 
 def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -1064,7 +1098,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
             CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_SOC_ABSENT,
-            CONF_REDUCED_ENERGY_TAX,
+            CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -1098,6 +1132,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
                 CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
                 CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX,
+                CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
             ):
                 if prof.get(key) is not None:
                     entry_data[key] = prof[key]
@@ -1212,6 +1247,15 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     export_extra_ore=entry_data.get(CONF_EXPORT_EXTRA_ORE),
                     grid_var_pct=entry_data.get(CONF_GRID_VAR_PCT),
                     export_extra_pct=entry_data.get(CONF_EXPORT_EXTRA_PCT),
+                    # The grid benefit (api 0.119.0). A row that survived keeps the server's
+                    # tariff and ignores this; a NEW row after a purge takes it from here, so
+                    # the cache is the only copy of it. Omitted outside SE1-SE4, which the
+                    # server refuses (422): a value cached from before a zone correction
+                    # would block the reauth, as the energy-tax answer below.
+                    grid_benefit_ore=(entry_data.get(CONF_GRID_BENEFIT_ORE)
+                                      if _benefit_zone(entry_data[CONF_ZONE]) else None),
+                    grid_benefit_peak_ore=(entry_data.get(CONF_GRID_BENEFIT_PEAK_ORE)
+                                           if _benefit_zone(entry_data[CONF_ZONE]) else None),
                     nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
                     nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
@@ -1381,8 +1425,9 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         CONF_EFF, CONF_RESERVE_PCT,
     ),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
-    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
-                   CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX),
+    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_GRID_VAR_PCT,
+                   CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
+                   CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX),
 }
 # The energy-tax answer is tri-state on the server (null / false / true) and a boolean selector
 # can only give true/false, so the form uses a list select whose values map to those three.
@@ -1392,6 +1437,18 @@ _TAX_CHOICES = (_TAX_NOT_SET, "no", "yes")
 # in SE4 (spec 2026-10-26-inkopspris, boio.se/el/elomrade), so SE4 and other countries never see
 # it; the wolta.se form hides it the same way.
 _REDUCED_TAX_ZONES = ("SE1", "SE2", "SE3")
+# Zones with a grid-benefit field. The server refuses the benefit fields outside SE1-SE4
+# (tariff.check_grid_benefit_zone, 422), so the form does not offer them elsewhere.
+_BENEFIT_ZONES = ("SE1", "SE2", "SE3", "SE4")
+# Span of the two grid-benefit fields, öre/kWh excl. VAT: the server's own (api 0.119.0,
+# simulate/tariff.py); a value outside it is refused with 422.
+_BENEFIT_MIN_ORE = -20.0
+_BENEFIT_MAX_ORE = 50.0
+
+
+def _benefit_zone(zone: Any) -> bool:
+    """Whether the owner's grid benefit can be given in this zone."""
+    return str(zone).upper() in _BENEFIT_ZONES
 
 
 def _tax_to_choice(value: Any) -> str:
@@ -1450,6 +1507,12 @@ class WoltaOptionsFlow(OptionsFlow):
         if len(_zone_group(self.config_entry.data.get(CONF_ZONE, ""))) > 1:
             options.append("zone_correction")
         return self.async_show_menu(step_id="init", menu_options=options)
+
+    def _benefit_asked(self) -> bool:
+        """Whether the grid-benefit fields apply: the plant's zone (the server's, else the
+        cached one) is SE1-SE4."""
+        zone = (self._server or {}).get(CONF_ZONE) or self.config_entry.data.get(CONF_ZONE) or ""
+        return _benefit_zone(zone)
 
     def _tax_asked(self) -> bool:
         """Whether the energy-tax question applies: the plant's zone (the server's, else the
@@ -1608,6 +1671,8 @@ class WoltaOptionsFlow(OptionsFlow):
             # is hidden its absence is not "not set": the stored answer must survive, so the
             # diff skips the key (same reasoning as plant_scoped_cost above).
             tax_asked = self._tax_asked()
+            # Same for the grid-benefit fields, which only exist in SE1-SE4.
+            benefit_asked = self._benefit_asked()
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
@@ -1616,6 +1681,9 @@ class WoltaOptionsFlow(OptionsFlow):
                     if key == CONF_COST_SEK and plant_scoped_cost:
                         continue
                     if key == CONF_REDUCED_ENERGY_TAX and not tax_asked:
+                        continue
+                    if (key in (CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE)
+                            and not benefit_asked):
                         continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
@@ -1649,6 +1717,41 @@ class WoltaOptionsFlow(OptionsFlow):
             ):
                 errors["base"] = "grid_fixed_required"
 
+            # The grid benefit and the retailer's terms are two halves of what used to be one
+            # number (export_extra_ore), and a legacy value in the retailer's field is often the
+            # grid benefit. The owner who touches either sees and confirms both, so both go in
+            # the PATCH. An empty retailer field next to a grid benefit is answered 0 (the
+            # retailer pays plain spot), which is what the server counts a missing one as.
+            if CONF_GRID_BENEFIT_ORE in patch_fields or CONF_EXPORT_EXTRA_ORE in patch_fields:
+                benefit_in = flat.get(CONF_GRID_BENEFIT_ORE) if benefit_asked else None
+                terms_in = flat.get(CONF_EXPORT_EXTRA_ORE)
+                if benefit_in is not None:
+                    patch_fields[CONF_GRID_BENEFIT_ORE] = benefit_in
+                    patch_fields[CONF_EXPORT_EXTRA_ORE] = 0.0 if terms_in is None else terms_in
+                elif terms_in is not None:
+                    patch_fields[CONF_EXPORT_EXTRA_ORE] = terms_in
+
+            # The server's two grid-benefit combination rules, said before sending. Both are
+            # checked on the state after the save and only when the save touches one of their
+            # fields, like the server (tariff.patch_override_updates): a legacy profile with just
+            # a percentage can still save an unrelated change, and the repair
+            # grid_benefit_fixed_missing asks for the fixed part. Shown at grid_benefit_ore, the
+            # field that is missing.
+            if benefit_asked:
+                benefit_after = flat.get(CONF_GRID_BENEFIT_ORE)
+                peak_after = flat.get(CONF_GRID_BENEFIT_PEAK_ORE)
+                pct_after = flat.get(CONF_EXPORT_EXTRA_PCT)
+                if (
+                    {CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE} & patch_fields.keys()
+                    and peak_after is not None and benefit_after is None
+                ):
+                    errors[CONF_GRID_BENEFIT_ORE] = "grid_benefit_peak_requires_base"
+                elif (
+                    {CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_PCT} & patch_fields.keys()
+                    and pct_after not in (None, 0) and benefit_after is None
+                ):
+                    errors[CONF_GRID_BENEFIT_ORE] = "grid_benefit_fixed_required"
+
             if patch_fields and not errors:
                 try:
                     await client.patch_profile(token, **patch_fields)
@@ -1656,8 +1759,13 @@ class WoltaOptionsFlow(OptionsFlow):
                     _LOGGER.error("Failed to patch Wolta profile: %s", err)
                     # The same refusal from the server (a cache that is out of step with it)
                     # reads as the same fault, not as a connection problem.
-                    errors["base"] = (
-                        "grid_fixed_required" if _is_grid_fixed_error(err) else "cannot_connect")
+                    benefit_err = _grid_benefit_error(err)
+                    if benefit_err is not None:
+                        errors[CONF_GRID_BENEFIT_ORE] = benefit_err
+                    else:
+                        errors["base"] = (
+                            "grid_fixed_required" if _is_grid_fixed_error(err)
+                            else "cannot_connect")
 
             if not errors:
                 # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -1813,8 +1921,20 @@ class WoltaOptionsFlow(OptionsFlow):
         tariff_rows = [
             _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
-            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")),
+        ]
+        if self._benefit_asked():
+            # The grid benefit first, then the retailer's terms next to it (spec
+            # 2026-10-26-forsaljningspris): the owner who enters the benefit sees the retailer
+            # value and confirms it.
+            benefit_selector = _number_selector(
+                min_val=_BENEFIT_MIN_ORE, max_val=_BENEFIT_MAX_ORE, step=0.1, unit="öre per kWh")
+            tariff_rows += [
+                _opt(CONF_GRID_BENEFIT_ORE, benefit_selector),
+                _opt(CONF_GRID_BENEFIT_PEAK_ORE, benefit_selector),
+            ]
+        tariff_rows += [
+            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
         ]
         if self._tax_asked():
@@ -1834,10 +1954,12 @@ class WoltaOptionsFlow(OptionsFlow):
             vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),
             vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
             # Open when the fixed-part error is shown: base errors render at the top of the
-            # form, and the field they ask for sits in this section.
+            # form, and the field they ask for sits in this section. Also open for a grid-benefit
+            # field error, which sits on a field inside it.
             vol.Required(_SEC_TARIFFS): section(
                 tariffs_schema,
-                {"collapsed": errors.get("base") != "grid_fixed_required"}),
+                {"collapsed": not (errors.get("base") == "grid_fixed_required"
+                                   or CONF_GRID_BENEFIT_ORE in errors)}),
             vol.Required(
                 CONF_INVERT_BATTERY,
                 default=bool(desired_invert_intervals(entry.data)),
