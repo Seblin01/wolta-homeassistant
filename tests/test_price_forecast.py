@@ -281,14 +281,19 @@ async def test_forecast_interest_is_counted(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [500, 404, 429, 200])
+@pytest.mark.parametrize("status", [500, 404, 429, "null", "empty"])
 async def test_forecast_failure_keeps_prices_now(
-    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, status: int
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, status
 ):
-    """/prices/forecast failing or answering null must not fail the coordinator."""
+    """/prices/forecast failing, answering a literal JSON null (the API's "no forecast")
+    or an empty body must not fail the coordinator."""
     aioclient_mock.get(PRICES_URL, json=_resp(forecast=_NOW_FORECAST))
-    if status == 200:
-        aioclient_mock.get(FORECAST_URL, json=None)
+    if status == "null":
+        aioclient_mock.get(
+            FORECAST_URL, text="null", headers={"Content-Type": "application/json"}
+        )
+    elif status == "empty":
+        aioclient_mock.get(FORECAST_URL, text="")
     else:
         aioclient_mock.get(FORECAST_URL, status=status)
     coordinator = _coordinator(hass)
@@ -343,6 +348,104 @@ async def test_forecast_failure_is_logged_once(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def _own_records(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "custom_components.wolta.price_coordinator" and r.levelno >= level
+    ]
+
+
+@pytest.mark.asyncio
+async def test_forecast_recovery_and_second_outage_are_each_logged_once(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, caplog: pytest.LogCaptureFixture
+):
+    """Log once when it breaks, once when it is back, and again for a later outage."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_full_forecast()
+
+    async def _polls(forecast_ok: bool, n: int) -> None:
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+        if forecast_ok:
+            aioclient_mock.get(FORECAST_URL, json=_three_days())
+        else:
+            aioclient_mock.get(FORECAST_URL, status=500)
+        for _ in range(n):
+            await coordinator.async_refresh()
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.wolta.price_coordinator"):
+        await _polls(True, 2)
+        assert _own_records(caplog, logging.INFO) == []
+        await _polls(False, 3)
+        assert len(_own_records(caplog, logging.INFO)) == 1  # broke
+        await _polls(True, 2)
+        recovered = _own_records(caplog, logging.INFO)
+        assert len(recovered) == 2 and "available again" in recovered[1]
+        await _polls(False, 2)
+        assert len(_own_records(caplog, logging.INFO)) == 3  # a second outage
+    assert not _own_records(caplog, logging.WARNING)
+
+
+@pytest.mark.asyncio
+async def test_forecast_and_prices_now_are_requested_concurrently(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A slow /prices/forecast must not delay /prices/now: /prices/now only returns once
+    the forecast request has started, which sequential awaiting could never satisfy."""
+    import asyncio
+
+    coordinator = _coordinator(hass)
+    coordinator.async_request_full_forecast()
+    forecast_started = asyncio.Event()
+    release_forecast = asyncio.Event()
+    now_done = asyncio.Event()
+
+    async def _now(zone: str) -> dict:
+        await forecast_started.wait()
+        now_done.set()
+        return _resp(forecast=None)
+
+    async def _forecast(zone: str) -> dict:
+        forecast_started.set()
+        await release_forecast.wait()
+        return _three_days()
+
+    coordinator._client.get_prices_now = _now
+    coordinator._client.get_price_forecast = _forecast
+
+    refresh = asyncio.ensure_future(coordinator.async_refresh())
+    await asyncio.wait_for(now_done.wait(), timeout=5)
+    assert not refresh.done()  # still waiting for the slow forecast
+    release_forecast.set()
+    await asyncio.wait_for(refresh, timeout=5)
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data[FULL_FORECAST_KEY]["days"][2]["horizon"] == 3
+
+
+@pytest.mark.asyncio
+async def test_api_error_message_truncates_the_response_body(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """An HTML error page from a proxy must not end up in a log line."""
+    from custom_components.wolta.api import WoltaApiError
+
+    html = "<html>\n<body>\n" + "bad gateway " * 100 + "\n</body></html>"
+    aioclient_mock.get(FORECAST_URL, status=502, text=html)
+    client = WoltaApiClient(async_get_clientsession(hass), base_url=WOLTA_API_BASE)
+
+    with pytest.raises(WoltaApiError) as exc:
+        await client.get_price_forecast("SE3")
+
+    message = str(exc.value)
+    assert exc.value.status == 502
+    assert message.startswith("HTTP 502 from ")
+    assert "\n" not in message
+    assert len(message.split(": ", 1)[1]) <= 200
+    assert len(message) < 400
+
+
 @pytest.mark.asyncio
 async def test_forecast_recovers_after_failure(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
@@ -363,7 +466,7 @@ async def test_forecast_recovers_after_failure(
 
 
 @pytest.mark.asyncio
-async def test_prices_now_failure_still_fails_the_coordinator_without_forecast_request(
+async def test_prices_now_failure_still_fails_the_coordinator_and_ignores_the_forecast(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
     aioclient_mock.get(PRICES_URL, status=500)
@@ -374,7 +477,7 @@ async def test_prices_now_failure_still_fails_the_coordinator_without_forecast_r
     await coordinator.async_refresh()
 
     assert coordinator.last_update_success is False
-    assert _forecast_calls(aioclient_mock) == []
+    assert coordinator.data is None
 
 
 @pytest.mark.asyncio

@@ -294,6 +294,32 @@ async def test_forecast_sensor_makes_one_forecast_request_per_poll(
 
 
 @pytest.mark.asyncio
+async def test_disabling_the_forecast_sensor_stops_forecast_requests(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry = await _setup(
+        hass,
+        aioclient_mock,
+        prices_json=_resp(forecast=_NOW_FORECAST),
+        forecast_json=_three_days(),
+        enable_forecast=True,
+    )
+    prices = entry.runtime_data.prices
+    assert len(_forecast_calls(aioclient_mock)) == 1
+
+    # Disabling the entity removes it from hass, which withdraws its interest.
+    er.async_get(hass).async_update_entity(
+        _entity_id(hass, FORECAST_ID), disabled_by=er.RegistryEntryDisabler.USER
+    )
+    await hass.async_block_till_done()
+    await prices.async_refresh()
+
+    assert len(_forecast_calls(aioclient_mock)) == 1
+    assert prices.last_update_success is True
+    assert hass.states.get(_entity_id(hass, SPOT_ID)).state == "0.523"
+
+
+@pytest.mark.asyncio
 async def test_forecast_sensor_series_has_three_days(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):

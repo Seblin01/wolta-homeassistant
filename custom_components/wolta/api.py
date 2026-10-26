@@ -268,7 +268,9 @@ class WoltaApiClient:
                     retry_after = 3600
                 raise WoltaRateLimitError(retry_after=retry_after)
             if not (200 <= resp.status < 300):
-                body = await resp.text()
+                # One line, at most 200 characters: an HTML error page from a proxy must
+                # not end up in a log line (the exception message is logged by callers).
+                body = " ".join((await resp.text()).split())[:200]
                 raise WoltaApiError(f"HTTP {resp.status} from {url}: {body}", status=resp.status)
             # Return JSON body for 2xx responses (None for no-content)
             if resp.status == 204:

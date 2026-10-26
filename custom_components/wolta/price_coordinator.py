@@ -11,6 +11,7 @@ coordinator keeps the /prices/now data and only the days beyond tomorrow are mis
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -206,7 +207,9 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._full_forecast_failing = True
             return None
-        self._full_forecast_failing = False
+        if self._full_forecast_failing:
+            _LOGGER.info("The price forecast for the days after tomorrow is available again")
+            self._full_forecast_failing = False
         return forecast
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -220,12 +223,22 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Price zone {zone} is not a Swedish zone; the spot price sensors "
                 "are unavailable until the integration is reloaded"
             )
-        try:
-            data = await self._client.get_prices_now(zone)
-        except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
-            raise UpdateFailed(f"Could not fetch Wolta prices: {err}") from err
-        if not isinstance(data, dict):
-            raise UpdateFailed("Unexpected response from Wolta prices endpoint")
+        # The two requests run concurrently, so a slow /prices/forecast adds no time on top
+        # of /prices/now (each is bounded by PUBLIC_LOOKUP_TIMEOUT). No interest, no request.
+        forecast_task: asyncio.Task[dict[str, Any] | None] | None = None
         if self._full_forecast_requests > 0:
-            data = {**data, FULL_FORECAST_KEY: await self._fetch_full_forecast(zone)}
-        return data
+            forecast_task = asyncio.create_task(self._fetch_full_forecast(zone))
+        try:
+            try:
+                data = await self._client.get_prices_now(zone)
+            except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
+                raise UpdateFailed(f"Could not fetch Wolta prices: {err}") from err
+            if not isinstance(data, dict):
+                raise UpdateFailed("Unexpected response from Wolta prices endpoint")
+            if forecast_task is not None:
+                data = {**data, FULL_FORECAST_KEY: await forecast_task}
+            return data
+        finally:
+            # /prices/now failed (or this poll was cancelled): the forecast result is of no use.
+            if forecast_task is not None and not forecast_task.done():
+                forecast_task.cancel()

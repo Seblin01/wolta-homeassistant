@@ -71,7 +71,7 @@ Two extra sensors show the day-ahead spot price. They exist for the **Swedish pr
 
 **Enable the forecast sensor** under *Settings → Devices & services → Wolta → entities*: open the disabled *Spot price with forecast* entity and switch it on. The two sensors poll the public Wolta price endpoint every 15 minutes and need no account or token. They are unavailable until the first data has arrived, and while Wolta has no exchange rate to convert the prices to SEK. The zone is read when the integration is set up: if you change it with *Correct the price zone* between a Swedish and a non-Swedish zone, the price sensors become unavailable until the integration is reloaded (or Home Assistant restarted); after a reload they are created, or not, to match the new zone.
 
-**The forecast covers up to three days ahead.** `horizon` says how far ahead a forecast point is: `1` is tomorrow, `2` the day after tomorrow and `3` the day after that. Once the day-ahead prices for tomorrow are out (normally around 13:00), the published prices replace tomorrow's forecast, so forecast points never overlap real prices; from then on the forecast starts at the following day. The list may hold fewer than three forecast days, and when no forecast is available the forecast sensor has no forecast points and behaves like the plain spot price sensor. The points are in time order and no timestamp appears twice.
+**The forecast covers up to three days ahead.** `horizon` says how far ahead a forecast point is: `1` is tomorrow, `2` the day after tomorrow and `3` the day after that. Once the day-ahead prices for tomorrow are out (normally around 13:00), the published prices replace tomorrow's forecast, so forecast points never overlap real prices; from then on the forecast starts at the following day. The list may hold fewer than three forecast days, and when no forecast is available the forecast sensor has no forecast points and behaves like the plain spot price sensor. The points are in time order and no timestamp appears twice. The `horizon` values follow the server (currently 1 to 3). If a template or automation treats every `forecast: true` point as tomorrow, as was true before v0.52.0, filter on `horizon == 1`.
 
 **The further ahead, the less certain the forecast is.** A forecast two or three days out depends on weather forecasts that are further out, so expect it to be worse than tomorrow's; use it to see the rough shape of the coming days (a windy, cheap day or a still, expensive one), not to plan around single quarters. Each day has its own issue time and accuracy. `forecast_issued_at` and `forecast_accuracy` (explained below) describe tomorrow's forecast, and the attribute `forecast_days` holds the same for the later days, without the points (those are in `prices`):
 
@@ -80,26 +80,26 @@ forecast_days:
   - date: "2026-10-28"
     horizon: 2
     issued_at: "2026-10-26T09:05:00Z"
-    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 22 }
+    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 25 }
   - date: "2026-10-29"
     horizon: 3
     issued_at: "2026-10-26T09:10:00Z"
-    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 22 }
+    accuracy: { basis: upstream, days: 0, window_days: 30, upstream_mae_ore_kwh: 25 }
 ```
 
-The forecast sensor makes one extra request to the public Wolta price endpoint per poll to get days 2 and 3; the plain spot price sensor makes none, so with the forecast sensor disabled nothing changes. If that extra request fails, the sensor keeps today, tomorrow and tomorrow's forecast, and `forecast_days` is an empty list until the next successful poll. `prices` now holds up to roughly 400 points; that is why it is not stored by the recorder (see below).
+The forecast sensor makes one extra request to the public Wolta price endpoint per poll to get days 2 and 3; the plain spot price sensor makes none, so with the forecast sensor disabled nothing changes. If that extra request fails, the sensor keeps today, tomorrow and tomorrow's forecast, and `forecast_days` is an empty list until the next successful poll. `prices` holds up to roughly 400 points, which is why it is not stored by the recorder (see below).
 
 **What the forecast is based on, and how good it is.** The forecast comes from the open-source [EpexPredictor](https://github.com/b3nn0/EpexPredictor), which predicts day-ahead prices from weather forecasts (Open-Meteo), expected generation and load (energy-charts) and recent price history. Wolta measures how good the forecast was: it compares the forecast that was actually shown before 13:00 with the prices that were then published. The attribute `forecast_accuracy` carries the result:
 
 | Key | Meaning |
 | --- | --- |
-| `basis` | `wolta` when at least 14 days have been measured, otherwise `upstream`. |
+| `basis` | `wolta` when at least 14 days have been measured for that horizon, otherwise `upstream`. Days 2 and 3 are measured separately from tomorrow, so they show `upstream` for a while. |
 | `days`, `window_days` | How many days Wolta has measured, and the window it looks at (30 days). |
 | `mae_ore_kwh` | With `basis: wolta`: Wolta's own mean absolute error per quarter, in öre/kWh excluding VAT, over the window. `null` otherwise. |
 | `peak_mae_ore_kwh` | With `basis: wolta`: the same error over the day's 8 most expensive quarters, the ones that matter most for charging and discharging decisions. `null` otherwise. |
-| `upstream_mae_ore_kwh` | The predictor project's own backtest error for your zone for a forecast one day ahead, about 18–26 öre/kWh. It was measured with actual weather, so the real-world error is somewhat larger. |
+| `upstream_mae_ore_kwh` | The predictor project's own backtest error for your zone, per horizon: in `forecast_accuracy` it is the figure for tomorrow, and inside each `forecast_days` entry it is the figure for that day's horizon. At current rates it is roughly 18–26 öre/kWh for tomorrow and about 21–29 öre/kWh for days 2 and 3 across SE1–SE4. The developers measured it with actual weather, so the real-world error is larger, and more so for days 2 and 3 than for tomorrow. |
 
-Until Wolta has measured 14 days, treat the upstream figure as the best available estimate. A forecast with this error is good for judging which hours of tomorrow are likely to be cheap or expensive; it is not a price to rely on to the öre. The `accuracy` of a later day in `forecast_days` has the same keys, and the error for days 2 and 3 should be expected to be larger than for tomorrow.
+Until Wolta has measured 14 days for a horizon, treat the upstream figure as the best available estimate for it. A forecast with this error is good for judging which hours of tomorrow are likely to be cheap or expensive; it is not a price to rely on to the öre. The `accuracy` of a later day in `forecast_days` has the same keys.
 
 **The `prices` attribute is not stored by the recorder.** With three forecast days it holds up to roughly 400 points (about 100 per day at quarter-hour resolution) and would otherwise be written to the database on every change. Read it live from the state, for example in a template or an automation; it does not appear in the history graph.
 
@@ -107,7 +107,7 @@ Until Wolta has measured 14 days, treat the upstream figure as the best availabl
 
 ### Example: feeding the prices to EMHASS
 
-A template sensor can turn the `prices` attribute into a plain list, for example for EMHASS's `load_cost_forecast`. This is an illustration, not a tested configuration: adapt the horizon (here 96 quarters, 24 hours) and the time step to your EMHASS setup. The prices in the attribute are excluding VAT; the template already multiplies by `vat_factor`, so the list is VAT-inclusive (drop that factor for the raw prices). Grid tariffs and other taxes are not included. Points without a price (no exchange rate) are left out, which can shorten or shift the list, and EMHASS needs a list that matches its horizon: check the length before relying on it.
+A template sensor can turn the `prices` attribute into a plain list, for example for EMHASS's `load_cost_forecast`. This is an illustration, not a tested configuration: adapt the horizon (here 96 quarters, 24 hours) and the time step to your EMHASS setup. The prices in the attribute are excluding VAT; the template already multiplies by `vat_factor`, so the list is VAT-inclusive (drop that factor for the raw prices). Grid tariffs and other taxes are not included. Points without a price (no exchange rate) are left out, which can shorten or shift the list, and EMHASS needs a list that matches its horizon: check the length before relying on it. Since v0.52.0 the `prices` list can run well past 96 quarters (up to about three days of forecast), so keep the slice at the end of the template, or the list becomes longer than the EMHASS horizon; the days beyond tomorrow are the least certain part of it.
 
 ```yaml
 template:
