@@ -5088,8 +5088,12 @@ async def test_options_tariff_change_refreshes_the_purchase_price(
     await hass.async_block_till_done(wait_background_tasks=True)
     if refreshed:
         mock_coordinator.prices.async_request_refresh.assert_awaited_once()
+        # The kept answer was priced with the old tariff: it is dropped before the refresh.
+        names = [c[0] for c in mock_coordinator.prices.mock_calls]
+        assert names == ["async_forget_purchase", "async_request_refresh"]
     else:
         mock_coordinator.prices.async_request_refresh.assert_not_awaited()
+        mock_coordinator.prices.async_forget_purchase.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -5116,6 +5120,30 @@ async def test_options_save_does_not_wait_for_the_price_refresh(hass: HomeAssist
     release.set()
     await hass.async_block_till_done(wait_background_tasks=True)
     mock_coordinator.prices.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_price_refresh_task_belongs_to_the_entry(hass: HomeAssistant) -> None:
+    """The scheduled refresh is an entry background task, so unloading the entry cancels it."""
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _slow_refresh() -> None:
+        started.set()
+        await release.wait()
+
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock(side_effect=_slow_refresh)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_SURCHARGE_ORE: 11.5})))
+        await asyncio.wait_for(started.wait(), timeout=5)
+    assert len(entry._background_tasks) == 1
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 @pytest.mark.asyncio

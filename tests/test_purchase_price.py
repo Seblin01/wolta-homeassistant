@@ -17,7 +17,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.wolta.api import WoltaApiClient, WoltaAuthError, WoltaRateLimitError
-from custom_components.wolta.const import DOMAIN, WOLTA_API_BASE
+from custom_components.wolta.const import CONF_ZONE, DOMAIN, WOLTA_API_BASE
 from custom_components.wolta.price_coordinator import (
     PURCHASE_KEY,
     WoltaPriceCoordinator,
@@ -478,6 +478,89 @@ async def test_purchase_recovery_replaces_the_kept_response(
     await coordinator.async_refresh()
 
     assert coordinator.data[PURCHASE_KEY]["reason"] == "tariff_not_set"
+
+
+async def _poll_purchase(
+    aioclient_mock: AiohttpClientMocker, coordinator: WoltaPriceCoordinator, **purchase_mock
+) -> dict | None:
+    """One coordinator poll with /profile/prices mocked as given; the purchase data."""
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, **purchase_mock)
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    return coordinator.data[PURCHASE_KEY]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [{"status": 500}, {"status": 404}])
+async def test_unavailable_answer_is_not_kept_across_failures(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, failure: dict
+):
+    """`available: false` has no coverage to bound it, so a stale `reason` would outlive the
+    fix (or an outage, or an old server's 404) for good: after it, a failure is None."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    answer = await _poll_purchase(
+        aioclient_mock, coordinator, json=_purchase(available=False, reason="tariff_not_set"))
+    assert answer["reason"] == "tariff_not_set"
+
+    assert await _poll_purchase(aioclient_mock, coordinator, **failure) is None
+    assert await _poll_purchase(aioclient_mock, coordinator, **failure) is None
+
+
+@pytest.mark.asyncio
+async def test_unavailable_answer_replaces_a_kept_priced_response(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The server's newest answer wins: once it says "no price", an older priced series must
+    not come back after a later failure."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    await _poll_purchase(aioclient_mock, coordinator, json=_purchase())
+    await _poll_purchase(
+        aioclient_mock, coordinator, json=_purchase(available=False, reason="tariff_not_set"))
+
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+
+
+@pytest.mark.asyncio
+async def test_kept_response_is_dropped_when_the_zone_changes(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """"Correct the price zone" updates entry.data without a reload: a series fetched for
+    the old zone is another zone's price and must not be served for the new one."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    await _poll_purchase(aioclient_mock, coordinator, json=_purchase())
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is not None  # same zone
+
+    entry = coordinator.config_entry
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: "SE4"})
+
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+    # ... and going back to the first zone does not resurrect it either.
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ZONE: "SE3"})
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+
+
+@pytest.mark.asyncio
+async def test_forgetting_the_purchase_response_drops_the_kept_one(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """After a tariff save the kept series was priced with the OLD tariff: the options flow
+    forgets it, so a failed refresh right after the save cannot show it."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    await _poll_purchase(aioclient_mock, coordinator, json=_purchase())
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is not None
+
+    coordinator.async_forget_purchase()
+
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is None
+    # A later good answer is kept again.
+    await _poll_purchase(aioclient_mock, coordinator, json=_purchase())
+    assert await _poll_purchase(aioclient_mock, coordinator, status=500) is not None
 
 
 # --- sensor -----------------------------------------------------------------

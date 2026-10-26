@@ -10,8 +10,9 @@ The forecast endpoint is an optional extra on top of /prices/now: when it fails,
 coordinator keeps the /prices/now data and only the days beyond tomorrow are missing. The
 purchase-price endpoint is the same kind of optional extra: when it fails, the /prices/now
 data (and with it the spot sensors) is untouched and the coordinator keeps the last good
-purchase response. The purchase-price sensor then keeps its price for as long as that series
-still covers the current quarter-hour (purchase_covers) and goes unavailable when it does not.
+priced purchase response for the same zone. The purchase-price sensor then keeps its price
+for as long as that series still covers the current quarter-hour (purchase_covers) and goes
+unavailable when it does not, or when there is nothing kept.
 Nothing here is ever written back to the server.
 """
 
@@ -259,9 +260,13 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The same two things for the purchase-price endpoint.
         self._purchase_requests = 0
         self._purchase_failing = False
-        # The last /profile/prices response that arrived: served again while a poll fails, so
-        # one failed request does not blank a series that still covers now.
-        self._last_purchase: dict[str, Any] | None = None
+        # (zone, response) of the last /profile/prices answer that carried prices
+        # (`available` true): served again while a poll fails, so one failed request does not
+        # blank a series that still covers now. Only a priced answer is kept (purchase_covers
+        # bounds it; an "available: false" answer has no coverage and would keep a stale
+        # `reason` for good), only for the zone it was fetched for (a zone correction does
+        # not reload the entry), and it is dropped on a tariff save (async_forget_purchase).
+        self._last_purchase: tuple[str, dict[str, Any]] | None = None
 
     @callback
     def async_request_full_forecast(self) -> Callable[[], None]:
@@ -297,14 +302,22 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return _release
 
+    @callback
+    def async_forget_purchase(self) -> None:
+        """Drop the kept purchase response. The options flow calls it when the owner saves a
+        changed tariff: the kept series was priced with the old one, and must not be shown if
+        the refresh that follows the save fails."""
+        self._last_purchase = None
+
     async def _fetch_purchase(self) -> dict[str, Any] | None:
-        """/profile/prices with the entry's profile token. On a failure the last good response
-        (None if there has been none). Never raises: it only adds the purchase price, so its
-        failure (404 from a server before 0.118.0, 429, a network error) must not fail the
-        coordinator and with it the spot price. The sensor decides whether the kept series
-        still covers now. The token
-        is read on every poll (a re-authentication replaces it) and only travels in the
-        Authorization header; the error text carries the URL, never the token."""
+        """/profile/prices with the entry's profile token. On a failure the last priced
+        response for the same zone, else None. Never raises: it only adds the purchase price,
+        so its failure (404 from a server before 0.118.0, 429, a network error) must not fail
+        the coordinator and with it the spot price. The sensor decides whether the kept
+        series still covers now. The token is read on every poll (a re-authentication
+        replaces it) and only travels in the Authorization header; the error text carries
+        the URL, never the token."""
+        zone = self.config_entry.data[CONF_ZONE]
         try:
             purchase = await self._client.get_purchase_prices(self.config_entry.data[CONF_TOKEN])
             if purchase is None:
@@ -312,17 +325,20 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             log = _LOGGER.debug if self._purchase_failing else _LOGGER.info
             log(
-                "Could not fetch the purchase price (%s); the purchase price sensor keeps "
-                "the last prices it has until they run out, then it is unavailable until "
-                "the fetch works again",
+                "Could not fetch the purchase price (%s); the purchase price sensor cannot "
+                "update until it works again (it shows prices it already has only for as "
+                "long as they cover the current quarter-hour)",
                 err,
             )
             self._purchase_failing = True
-            return self._last_purchase
+            kept = self._last_purchase
+            if kept is not None and kept[0] != zone:
+                self._last_purchase = kept = None
+            return None if kept is None else kept[1]
         if self._purchase_failing:
             _LOGGER.info("The purchase price is available again")
             self._purchase_failing = False
-        self._last_purchase = purchase
+        self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
         return purchase
 
     async def _fetch_full_forecast(self, zone: str) -> dict[str, Any] | None:

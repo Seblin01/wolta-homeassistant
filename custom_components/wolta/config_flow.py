@@ -1694,9 +1694,13 @@ class WoltaOptionsFlow(OptionsFlow):
                     # _refresh_prices).
                     # Scheduled, not awaited: the fetch can take up to the lookup timeout and
                     # the dialog must not wait for it. A background task, so Home Assistant
-                    # neither waits for it at startup nor leaves it running at shutdown.
-                    self.hass.async_create_background_task(
-                        _refresh_prices(prices), "wolta_options_price_refresh")
+                    # does not wait for it at startup.
+                    # The entry owns the task, so unloading it cancels the refresh. The kept
+                    # answer was priced with the old tariff: forget it first, so a failing
+                    # refresh cannot show it.
+                    prices.async_forget_purchase()
+                    entry.async_create_background_task(
+                        self.hass, _refresh_prices(prices), "wolta_options_price_refresh")
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
