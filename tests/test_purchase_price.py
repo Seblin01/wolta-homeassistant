@@ -417,6 +417,69 @@ async def test_prices_now_failure_still_fails_the_coordinator_and_cancels_the_pu
     await asyncio.wait_for(cancelled.wait(), timeout=5)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [{"status": 500}, {"status": 404}, {"exc": aiohttp.ClientError("boom")}, {"exc": TimeoutError()}]
+)
+async def test_failed_purchase_fetch_keeps_the_last_good_response(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, failure: dict
+):
+    """One failed poll must not blank the purchase data: the sensor guards staleness itself
+    (purchase_covers), so the previous series is still the best answer while it covers now."""
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, json=_purchase())
+    await coordinator.async_refresh()
+    good = coordinator.data[PURCHASE_KEY]
+    assert good["available"] is True
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, **failure)
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data[PURCHASE_KEY] == good
+
+
+@pytest.mark.asyncio
+async def test_purchase_failure_without_a_previous_good_response_is_none(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, status=500)
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+
+    await coordinator.async_refresh()
+
+    assert coordinator.data[PURCHASE_KEY] is None
+
+
+@pytest.mark.asyncio
+async def test_purchase_recovery_replaces_the_kept_response(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    coordinator = _coordinator(hass)
+    coordinator.async_request_purchase_prices()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, json=_purchase())
+    await coordinator.async_refresh()
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, status=500)
+    await coordinator.async_refresh()
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, json=_purchase(available=False, reason="tariff_not_set"))
+    await coordinator.async_refresh()
+
+    assert coordinator.data[PURCHASE_KEY]["reason"] == "tariff_not_set"
+
+
 # --- sensor -----------------------------------------------------------------
 
 
@@ -595,6 +658,39 @@ async def test_purchase_endpoint_error_makes_only_the_sensor_unavailable(
     assert purchase.attributes.get("reason") is None
     assert spot.state == "0.523"
     assert len(spot.attributes["prices"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_purchase_sensor_keeps_its_price_through_a_failed_poll_while_the_series_covers_now(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    entry = await _setup_purchase(hass, aioclient_mock)
+    entity_id = _entity_id(hass, PURCHASE_ID)
+    assert hass.states.get(entity_id).state == "1.234"
+
+    # The next poll (T+15 min) fails; the series from the good poll still covers 10:20.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, status=500)
+    base = len(_purchase_calls(aioclient_mock))
+
+    prices = entry.runtime_data.prices
+
+    async def _poll(at: str) -> None:
+        freezer.move_to(at)
+        await prices.async_refresh()
+        await hass.async_block_till_done()
+
+    await _poll("2026-10-26T10:20:05+00:00")
+
+    assert len(_purchase_calls(aioclient_mock)) == base + 1  # the poll really ran and failed
+    assert hass.states.get(entity_id).state == "1.3"
+
+    # Once the kept series no longer covers now, the sensor is unavailable, not stale.
+    await _poll("2026-10-26T10:35:05+00:00")
+
+    assert len(_purchase_calls(aioclient_mock)) == base + 2
+    assert hass.states.get(entity_id).state == "unavailable"
 
 
 def test_purchase_prices_attribute_not_recorded():

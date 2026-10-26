@@ -882,8 +882,10 @@ class WoltaPurchasePriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorE
     @property
     def available(self) -> bool:
         # Unavailable: /prices/now failed (the coordinator fails, like the spot sensors),
-        # there is no purchase data (not fetched yet, the request failed, a server before
-        # 0.118.0) or the data is stale (no quarter covers now).
+        # there is no purchase data (not fetched yet, a server before 0.118.0, or the request
+        # failed with no earlier answer to fall back on) or the data is stale (no quarter
+        # covers now). A failed poll alone does not make it unavailable: the coordinator keeps
+        # the last good response, and this check ends it once that series no longer covers now.
         #
         # When the server ANSWERED that it has no price (available: false, with a `reason`),
         # or the covering quarter has none (that year's energy-tax rule is missing), the

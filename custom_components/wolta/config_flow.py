@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import secrets
 from typing import Any
 
@@ -230,16 +231,51 @@ def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSele
     )
 
 
+# "grid_var_pct kräver grid_var_ore": the "ä" plain or as the JSON escape (backslash, u00e4).
+_GRID_FIXED_RULE = re.compile(r"grid_var_pct\s+kr(?:ä|\\u00e4)ver\s+grid_var_ore", re.IGNORECASE)
+
+
 def _is_grid_fixed_error(err: WoltaApiError) -> bool:
     """The server's 422 for "a percentage of spot without the fixed part of the grid fee".
 
     The detail is the sentence `grid_var_pct kräver grid_var_ore (nätavgiftens fasta del, 0 om
-    du bara har procent)`. api.py reduces an error body to one escaped line, so the Swedish
-    letters may arrive as unicode escapes; the two field names are plain ASCII and identify the rule
-    on their own, so the match does not depend on the wording or the escaping."""
-    text = str(err)
+    du bara har procent)`. api.py reduces an error body to one line and the server escapes
+    non-ASCII in its JSON, so the "ä" may arrive as six characters (backslash, u00e4). The match is
+    the rule's own wording in either form, not just the two field names: another 422 that
+    happens to name both fields (a type error, say) is not this rule."""
     return (getattr(err, "status", None) == 422
-            and "grid_var_pct" in text and "grid_var_ore" in text)
+            and _GRID_FIXED_RULE.search(str(err)) is not None)
+
+
+def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
+    """`user_input` as suggested values for the re-shown form, a cleared field included.
+
+    A cleared field is absent from the submitted section, and add_suggested_values_to_schema
+    leaves a field it has no value for on the suggestion the schema was built with, which is
+    the STORED value. Re-showing that would let the next submit save the old value the user
+    just removed. So a section field that carries a stored suggestion but is absent from
+    what was submitted is suggested as empty (None)."""
+    out = dict(user_input)
+    for sec_key, sec in schema.schema.items():
+        if not isinstance(sec, section):
+            continue
+        submitted = user_input.get(sec_key.schema)
+        typed = dict(submitted) if isinstance(submitted, dict) else {}
+        for field in sec.schema.schema:
+            description = getattr(field, "description", None) or {}
+            if field.schema not in typed and description.get("suggested_value") is not None:
+                typed[field.schema] = None
+        out[sec_key.schema] = typed
+    return out
+
+
+async def _refresh_prices(prices: Any) -> None:
+    """Refresh the price coordinator after a tariff save. Run as a background task, so it
+    swallows everything: nothing is left to retrieve the exception from."""
+    try:
+        await prices.async_request_refresh()
+    except Exception:  # pylint: disable=broad-except
+        _LOGGER.debug("Options flow: price refresh failed.", exc_info=True)
 
 
 def _number_selector(
@@ -1654,11 +1690,13 @@ class WoltaOptionsFlow(OptionsFlow):
                     # The purchase-price sensor shows what THIS tariff costs: refresh it now
                     # instead of at the next 15-minute poll. A request on top of the poll, and
                     # only if the owner changed the tariff; it fetches /profile/prices only when
-                    # that sensor is enabled. Never lets a price problem fail the save.
-                    try:
-                        await prices.async_request_refresh()
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug("Options flow: price refresh failed.", exc_info=True)
+                    # that sensor is enabled. A price problem never fails the save (see
+                    # _refresh_prices).
+                    # Scheduled, not awaited: the fetch can take up to the lookup timeout and
+                    # the dialog must not wait for it. A background task, so Home Assistant
+                    # neither waits for it at startup nor leaves it running at shutdown.
+                    self.hass.async_create_background_task(
+                        _refresh_prices(prices), "wolta_options_price_refresh")
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
@@ -1802,7 +1840,9 @@ class WoltaOptionsFlow(OptionsFlow):
             ): BooleanSelector(BooleanSelectorConfig()),
         })
         # Re-show after an error keeps what the user typed (suggested values, section by
-        # section), so a refused save does not send them back to the stored values.
+        # section), so a refused save does not send them back to the stored values. A field
+        # the user cleared is absent from user_input and re-shows empty, not as the stored value.
         if errors and user_input is not None:
-            schema = self.add_suggested_values_to_schema(schema, user_input)
+            schema = self.add_suggested_values_to_schema(
+                schema, _with_cleared_fields_empty(schema, user_input))
         return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)

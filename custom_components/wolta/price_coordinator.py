@@ -9,8 +9,10 @@ endpoint only makes the price sensors unavailable; it never touches the existing
 The forecast endpoint is an optional extra on top of /prices/now: when it fails, the
 coordinator keeps the /prices/now data and only the days beyond tomorrow are missing. The
 purchase-price endpoint is the same kind of optional extra: when it fails, the /prices/now
-data (and with it the spot sensors) is untouched and only the purchase-price sensor goes
-unavailable. Nothing here is ever written back to the server.
+data (and with it the spot sensors) is untouched and the coordinator keeps the last good
+purchase response. The purchase-price sensor then keeps its price for as long as that series
+still covers the current quarter-hour (purchase_covers) and goes unavailable when it does not.
+Nothing here is ever written back to the server.
 """
 
 from __future__ import annotations
@@ -257,6 +259,9 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The same two things for the purchase-price endpoint.
         self._purchase_requests = 0
         self._purchase_failing = False
+        # The last /profile/prices response that arrived: served again while a poll fails, so
+        # one failed request does not blank a series that still covers now.
+        self._last_purchase: dict[str, Any] | None = None
 
     @callback
     def async_request_full_forecast(self) -> Callable[[], None]:
@@ -293,9 +298,11 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return _release
 
     async def _fetch_purchase(self) -> dict[str, Any] | None:
-        """/profile/prices with the entry's profile token, or None. Never raises: it only
-        adds the purchase price, so its failure (404 from a server before 0.118.0, 429, a
-        network error) must not fail the coordinator and with it the spot price. The token
+        """/profile/prices with the entry's profile token. On a failure the last good response
+        (None if there has been none). Never raises: it only adds the purchase price, so its
+        failure (404 from a server before 0.118.0, 429, a network error) must not fail the
+        coordinator and with it the spot price. The sensor decides whether the kept series
+        still covers now. The token
         is read on every poll (a re-authentication replaces it) and only travels in the
         Authorization header; the error text carries the URL, never the token."""
         try:
@@ -305,15 +312,17 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             log = _LOGGER.debug if self._purchase_failing else _LOGGER.info
             log(
-                "Could not fetch the purchase price (%s); the purchase price sensor is "
-                "unavailable until it works again",
+                "Could not fetch the purchase price (%s); the purchase price sensor keeps "
+                "the last prices it has until they run out, then it is unavailable until "
+                "the fetch works again",
                 err,
             )
             self._purchase_failing = True
-            return None
+            return self._last_purchase
         if self._purchase_failing:
             _LOGGER.info("The purchase price is available again")
             self._purchase_failing = False
+        self._last_purchase = purchase
         return purchase
 
     async def _fetch_full_forecast(self, zone: str) -> dict[str, Any] | None:

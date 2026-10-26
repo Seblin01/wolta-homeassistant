@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import string
 
@@ -5083,10 +5084,58 @@ async def test_options_tariff_change_refreshes_the_purchase_price(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=_opts(**_core(**fields)))
     assert result["type"] == FlowResultType.CREATE_ENTRY
+    # The refresh runs as a background task: the save does not wait for it.
+    await hass.async_block_till_done(wait_background_tasks=True)
     if refreshed:
         mock_coordinator.prices.async_request_refresh.assert_awaited_once()
     else:
         mock_coordinator.prices.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_save_does_not_wait_for_the_price_refresh(hass: HomeAssistant) -> None:
+    """The refresh fetches /profile/prices (up to the lookup timeout): a slow or hanging
+    price endpoint must not hold the Configure dialog open."""
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    release = asyncio.Event()
+
+    async def _slow_refresh() -> None:
+        await release.wait()
+
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock(side_effect=_slow_refresh)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await asyncio.wait_for(
+            hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input=_opts(**_core(**{CONF_SURCHARGE_ORE: 11.5}))),
+            timeout=5)
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    mock_coordinator.prices.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_options_price_refresh_error_is_swallowed(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock(side_effect=RuntimeError("boom"))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_SURCHARGE_ORE: 11.5})))
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_coordinator.prices.async_request_refresh.assert_awaited_once()
+    assert not [r for r in caplog.records
+                if r.name.startswith("custom_components.wolta") and r.levelname == "ERROR"]
+    assert "Task exception was never retrieved" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -5192,6 +5241,49 @@ async def test_options_error_form_keeps_what_the_user_typed(hass: HomeAssistant)
 
 
 @pytest.mark.asyncio
+async def test_options_cleared_field_stays_empty_on_the_error_form(hass: HomeAssistant) -> None:
+    """A cleared field is absent from user_input. The re-shown form must not fall back to
+    the stored value for it, or resubmitting would silently save the old value."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PCT: 5.6,
+                          CONF_SURCHARGE_ORE: 7.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        marker, _ = _tariff_field(result, CONF_GRID_VAR_ORE)
+        assert (marker.description or {}).get("suggested_value") == 20.0  # first show: stored
+        # The fixed part is cleared (absent); the percentage and the markup are kept.
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_VAR_PCT: 5.6, CONF_SURCHARGE_ORE: 7.0})))
+    assert result["errors"] == {"base": "grid_fixed_required"}
+    marker, _ = _tariff_field(result, CONF_GRID_VAR_ORE)
+    assert (marker.description or {}).get("suggested_value") is None
+    for field, expected in ((CONF_GRID_VAR_PCT, 5.6), (CONF_SURCHARGE_ORE, 7.0)):
+        marker, _ = _tariff_field(result, field)
+        assert (marker.description or {}).get("suggested_value") == expected
+
+
+@pytest.mark.asyncio
+async def test_options_cleared_economy_fields_stay_empty_on_the_error_form(
+    hass: HomeAssistant,
+) -> None:
+    """The same for the other sections: a cleared cost does not come back from the snapshot."""
+    entry = _make_mock_entry(hass, extra_data={CONF_COST_SEK: 99000.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_VAR_PCT: 5.6})))  # cost cleared, error
+    assert result["errors"] == {"base": "grid_fixed_required"}
+    outer = result["data_schema"].schema
+    econ = next(k for k in outer if (k.schema if hasattr(k, "schema") else str(k)) == "economy")
+    marker = next(k for k in outer[econ].schema.schema if k.schema == CONF_COST_SEK)
+    assert (marker.description or {}).get("suggested_value") is None
+
+
+@pytest.mark.asyncio
 async def test_options_clearing_the_fixed_part_under_a_percentage_is_refused(
     hass: HomeAssistant,
 ) -> None:
@@ -5261,6 +5353,27 @@ async def test_options_server_422_for_the_fixed_part_gives_the_same_error(
             user_input=_opts(**_core(**{CONF_GRID_VAR_ORE: 30.0})))
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "grid_fixed_required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail, matched",
+    [
+        (_GRID_FIXED_DETAIL, True),  # unicode-escaped, as api.py reduces the body
+        ('HTTP 422 from x: {"detail":"grid_var_pct kräver grid_var_ore (nätavgiftens fasta del)"}',
+         True),  # plain letters
+        ('HTTP 422 from x: {"detail":"grid_var_pct and grid_var_ore must be numbers"}', False),
+        ('HTTP 422 from x: {"detail":"grid_var_ore kräver grid_var_pct"}', False),
+        ('HTTP 422 from x: {"detail":"grid_var_pct kräver something_else"}', False),
+    ],
+    ids=["escaped", "plain", "other-422-both-fields", "reversed", "other-requirement"],
+)
+def test_is_grid_fixed_error_needs_the_rules_own_wording(detail, matched) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.config_flow import _is_grid_fixed_error
+
+    assert _is_grid_fixed_error(WoltaApiError(detail, status=422)) is matched
+    assert _is_grid_fixed_error(WoltaApiError(detail, status=500)) is False
 
 
 @pytest.mark.asyncio

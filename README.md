@@ -156,7 +156,7 @@ recorder:
 | `reason` | `null` while the sensor has a price; otherwise why it has none (the table below). |
 | `tomorrow_complete` | Whether all of tomorrow's quarters are published. |
 
-**When the sensor has no price, `reason` says what to do.** The state is then `unknown` (not `unavailable`, because Home Assistant hides every attribute of an unavailable entity and `reason` is the point). The fixes below name *Configure → Settings → Tariffs*; for a view-only plant the tariff is set on wolta.se instead:
+**When the sensor has no price, `reason` says what to do.** The state is then `unknown` (not `unavailable`, because Home Assistant hides every attribute of an unavailable entity and `reason` is the point). Most fixes below are in *Configure → Settings → Tariffs* (for a view-only plant the tariff is set on wolta.se instead); the last two rows (`fx_missing`, `zone_not_supported`) say what to do instead:
 
 | `reason` | What it means and what you do |
 |----------|-------------------------------|
@@ -168,7 +168,7 @@ recorder:
 
 A single quarter can also have no price (`purchase` is `null` in `prices`, and the state is `unknown` while it lasts) when Wolta does not have the energy-tax rate for that calendar year yet. It never reuses last year's tax.
 
-The state is `unavailable` when the data is missing altogether: the Wolta server could not be reached, the answer was an error, or the data is out of date. A Wolta server older than **API 0.118.0** does not have the endpoint and answers 404, which also shows as `unavailable`. The integration then logs one line when it breaks and one when it works again, and the spot price sensors are not affected.
+The state is `unavailable` when the data is missing altogether: the Wolta server could not be reached and there is no earlier answer to fall back on, or the data is out of date. A single failed poll does not do it: the integration keeps the last answer it received and the sensor keeps showing the price of the current quarter-hour from it for as long as that answer still covers it; only when it no longer does is the state `unavailable`. A Wolta server older than **API 0.118.0** does not have the endpoint and answers 404, which also shows as `unavailable`. The integration logs one line when the fetch starts failing and one when it works again, and the spot price sensors are not affected.
 
 **One extra request, only when you use it.** While the sensor is enabled the integration asks the Wolta server for the prices once per 15-minute poll, alongside the spot price request, with your plant's token in the `Authorization` header. With the sensor disabled nothing extra is requested. Saving a changed tariff under *Configure* refreshes it straight away.
 
