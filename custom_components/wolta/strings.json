@@ -570,7 +570,7 @@
       "grid_fixed_required": "A grid fee given as a percentage of spot needs its fixed part too. Fill in \"Grid fee\" in the Tariffs section (0 if you only have a percentage).",
       "grid_benefit_fixed_required": "A grid benefit given as a percentage of spot needs its fixed part too. Fill in \"Grid benefit, rest of the year\" in the Tariffs section (0 if you only have a percentage).",
       "grid_benefit_peak_requires_base": "The high-load grid benefit is an exception to the rest of the year, so fill in \"Grid benefit, rest of the year\" too.",
-      "grid_benefit_zone": "The grid benefit can only be given in price zones SE1–SE4. Clear the field.",
+      "grid_benefit_zone": "The grid benefit can only be given in price zones SE1–SE4, so it cannot be saved for this plant's zone.",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },

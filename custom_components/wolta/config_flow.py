@@ -1736,7 +1736,10 @@ class WoltaOptionsFlow(OptionsFlow):
             # fields, like the server (tariff.patch_override_updates): a legacy profile with just
             # a percentage can still save an unrelated change, and the repair
             # grid_benefit_fixed_missing asks for the fixed part. Shown at grid_benefit_ore, the
-            # field that is missing.
+            # field that is missing, and ALSO on base (same code), exactly like
+            # battery_pair_incomplete above: the field sits inside a section, which the frontend
+            # may not render field errors for, and a form that refuses to save without saying
+            # why is the worst outcome. The texts name the field and the section.
             if benefit_asked:
                 benefit_after = flat.get(CONF_GRID_BENEFIT_ORE)
                 peak_after = flat.get(CONF_GRID_BENEFIT_PEAK_ORE)
@@ -1745,12 +1748,12 @@ class WoltaOptionsFlow(OptionsFlow):
                     {CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE} & patch_fields.keys()
                     and peak_after is not None and benefit_after is None
                 ):
-                    errors[CONF_GRID_BENEFIT_ORE] = "grid_benefit_peak_requires_base"
+                    errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = "grid_benefit_peak_requires_base"
                 elif (
                     {CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_PCT} & patch_fields.keys()
                     and pct_after not in (None, 0) and benefit_after is None
                 ):
-                    errors[CONF_GRID_BENEFIT_ORE] = "grid_benefit_fixed_required"
+                    errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = "grid_benefit_fixed_required"
 
             if patch_fields and not errors:
                 try:
@@ -1761,7 +1764,10 @@ class WoltaOptionsFlow(OptionsFlow):
                     # reads as the same fault, not as a connection problem.
                     benefit_err = _grid_benefit_error(err)
                     if benefit_err is not None:
-                        errors[CONF_GRID_BENEFIT_ORE] = benefit_err
+                        # Field AND base, as for the prechecks above. A zone refusal can come
+                        # while the field is hidden (a cache out of step), where base is the
+                        # only place the owner can read it.
+                        errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
                     else:
                         errors["base"] = (
                             "grid_fixed_required" if _is_grid_fixed_error(err)

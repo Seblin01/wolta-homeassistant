@@ -570,7 +570,7 @@
       "grid_fixed_required": "En nätavgift som anges som procent av spot behöver också sin fasta del. Fyll i ”Nätavgift” i sektionen Tariffer (0 om du bara har procent).",
       "grid_benefit_fixed_required": "En nätnytta som anges som andel av spot behöver också sin fasta del. Fyll i ”Nätnytta, övrig tid” i sektionen Tariffer (0 om du bara har procent).",
       "grid_benefit_peak_requires_base": "Nätnyttan för höglasttid är ett undantag från övrig tid, så fyll i ”Nätnytta, övrig tid” också.",
-      "grid_benefit_zone": "Nätnytta kan bara anges i elområde SE1–SE4. Rensa fältet.",
+      "grid_benefit_zone": "Nätnytta kan bara anges i elområde SE1–SE4, så den kan inte sparas för anläggningens elområde.",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },

@@ -5679,8 +5679,10 @@ async def test_options_untouched_benefit_and_terms_patch_nothing(hass: HomeAssis
 async def test_options_server_422_for_the_benefit_rules_shows_at_the_field(
     hass: HomeAssistant, detail: str, code: str,
 ) -> None:
-    """Never cannot_connect and never base: the error is on grid_benefit_ore, the field that
-    is missing (or, for the zone rule, the one that is refused), and the section opens."""
+    """Never cannot_connect: the specific code is on grid_benefit_ore, the field that is missing
+    (or, for the zone rule, the one that is refused), AND on base, like battery_pair_incomplete,
+    because the field sits inside a section and the frontend may not render field errors there.
+    The section opens."""
     from custom_components.wolta.api import WoltaApiError
 
     entry = _make_mock_entry(hass)
@@ -5691,7 +5693,7 @@ async def test_options_server_422_for_the_benefit_rules_shows_at_the_field(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 10.4})))
     assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: code}
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: code, "base": code}
     assert _section_options(result, "tariffs")["collapsed"] is False
 
 
@@ -5707,7 +5709,8 @@ async def test_options_export_percent_without_benefit_fixed_part_shows_the_error
         result = await _settings_session(hass, entry)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_PCT: -2.8})))
-    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_fixed_required"}
+    assert result["errors"] == {
+        CONF_GRID_BENEFIT_ORE: "grid_benefit_fixed_required", "base": "grid_benefit_fixed_required"}
     mock_client.patch_profile.assert_not_awaited()
 
 
@@ -5732,7 +5735,9 @@ async def test_options_peak_without_base_shows_the_error_first(hass: HomeAssista
         result = await _settings_session(hass, entry)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_BENEFIT_PEAK_ORE: 20.0})))
-    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_peak_requires_base"}
+    assert result["errors"] == {
+        CONF_GRID_BENEFIT_ORE: "grid_benefit_peak_requires_base",
+        "base": "grid_benefit_peak_requires_base"}
     mock_client.patch_profile.assert_not_awaited()
 
 
@@ -5830,3 +5835,24 @@ async def test_link_flow_mirrors_the_grid_benefit(hass: HomeAssistant) -> None:
 
     assert result["data"][CONF_GRID_BENEFIT_ORE] == 10.4
     assert result["data"][CONF_GRID_BENEFIT_PEAK_ORE] == 25.0
+
+
+@pytest.mark.asyncio
+async def test_options_zone_422_is_readable_on_base_when_the_field_is_hidden(
+    hass: HomeAssistant,
+) -> None:
+    """A cache out of step with the server: the form has no benefit field for this zone, so
+    base is the only place the refusal can be read (review M1)."""
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass, extra_data={CONF_ZONE: "FI"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_BENEFIT_ZONE_DETAIL, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        assert CONF_GRID_BENEFIT_ORE not in _tariff_fields(result)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_ORE: 5.0})))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"]["base"] == "grid_benefit_zone"
