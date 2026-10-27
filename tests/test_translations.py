@@ -674,10 +674,28 @@ def test_contract_selector_has_plain_language_options(path: Path) -> None:
     selector = _load(path)["selector"]
     models = selector["retail_price_model"]["options"]
     if path.name == "sv.json":
-        assert models == {"quarter": "Kvartspris", "month": "Månadspris", "fixed": "Fastpris"}
+        assert models == {"not_stated": "Inte angivet", "quarter": "Kvartspris",
+                          "month": "Månadspris", "fixed": "Fastpris"}
     else:
-        assert models == {"quarter": "Quarter-hour price", "month": "Monthly price",
-                          "fixed": "Fixed price"}
+        assert models == {"not_stated": "Not stated", "quarter": "Quarter-hour price",
+                          "month": "Monthly price", "fixed": "Fixed price"}
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_contract_help_says_what_not_stated_means(path: Path) -> None:
+    """Code review C1: the select offers "Not stated" while Wolta has no contract type stored. The
+    help says what it is counted as and that the first choice applies to all of the history, with
+    the option's own label."""
+    data = _load(path)
+    text = _tariffs(path)["data_description"]["retail_price_model"]
+    label = data["selector"]["retail_price_model"]["options"]["not_stated"]
+    if path.name == "sv.json":
+        needle = (f"{label}: Wolta räknar med kvartspris tills du väljer, och ditt första val "
+                  "gäller hela din historik.")
+    else:
+        needle = (f"{label}: Wolta counts quarter-hour price until you choose; your first choice "
+                  "applies to all of your history.")
+    assert needle in text, path.name
 
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)

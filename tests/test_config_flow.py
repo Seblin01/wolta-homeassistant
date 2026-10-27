@@ -5964,9 +5964,11 @@ async def test_options_contract_field_selectors_match_the_servers_ranges(
     with _options_patched(mock_client):
         result = await _settings_session(hass, entry)
     marker, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
-    assert _selector_values(sel) == ["quarter", "month", "fixed"]
+    # The server has no contract type stored (and no history): "not stated" leads (code review
+    # C1, see test_options_unanswered_contract_*).
+    assert _selector_values(sel) == ["not_stated", "quarter", "month", "fixed"]
     assert sel.config["translation_key"] == "retail_price_model"
-    assert marker.default() == "quarter"
+    assert marker.default() == "not_stated"
     _, sel = _tariff_field(result, CONF_RETAIL_FIXED_ORE)
     assert (sel.config["min"], sel.config["max"]) == (0.0, 500.0)
     # The fixed price exists in SE1-SE4 only, where the unit is öre.
@@ -6045,6 +6047,118 @@ async def test_options_server_quarter_and_untouched_form_patch_nothing(
             result["flow_id"], user_input=_opts(**_core(**submitted)))
     assert result["type"] == FlowResultType.CREATE_ENTRY
     mock_client.patch_profile.assert_not_awaited()
+
+
+# --- Code review C1: an explicit quarter-hour price can be answered from here. The server counts
+# the contract type as unanswered while it has none stored and no contract history (its ruling 14:
+# the first answer then applies to all of the history), and stores an answer literally (ruling 15).
+# Without a "not stated" choice the select showed "Quarter-hour price" as its default and never
+# sent it, so an owner on a quarter-hour price could not say so, and a later switch to a monthly
+# or fixed price applied from the start of the history. ---
+
+
+def _unanswered_entry(hass, **server):
+    """An SE3 entry whose server snapshot has no contract type and no contract history."""
+    entry = _make_mock_entry(hass, extra_data={CONF_SURCHARGE_ORE: 6.0})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, **{CONF_RETAIL_PRICE_MODEL: None, **server}))
+    return entry, mock_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_form", ["not_stated", None], ids=["form-not-stated", "form-absent"])
+async def test_options_unanswered_contract_defaults_to_not_stated_and_sends_nothing(
+    hass: HomeAssistant, in_form
+) -> None:
+    """(a) "Not stated" is offered first and is the default; an untouched save PATCHes nothing,
+    and "not_stated" never reaches the server or the cache."""
+    entry, mock_client = _unanswered_entry(hass)
+    submitted = {CONF_SURCHARGE_ORE: 6.0}
+    if in_form is not None:
+        submitted[CONF_RETAIL_PRICE_MODEL] = in_form
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        marker, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
+        assert _selector_values(sel) == ["not_stated", "quarter", "month", "fixed"]
+        assert marker.default() == "not_stated"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**submitted)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+    assert CONF_RETAIL_PRICE_MODEL not in hass.config_entries.async_get_entry(entry.entry_id).data
+
+
+@pytest.mark.asyncio
+async def test_options_unanswered_contract_sends_an_explicit_quarter_hour_price(
+    hass: HomeAssistant,
+) -> None:
+    """(b) Choosing "Quarter-hour price" is an answer: it is sent, and the cache follows."""
+    entry, mock_client = _unanswered_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_SURCHARGE_ORE: 6.0, CONF_RETAIL_PRICE_MODEL: "quarter"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_RETAIL_PRICE_MODEL: "quarter"}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[
+        CONF_RETAIL_PRICE_MODEL] == "quarter"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server", [{CONF_RETAIL_PRICE_MODEL: "quarter"},
+                                    {"retail_events": _BRONAS_EVENTS}],
+                         ids=["stored-quarter", "history-without-model"])
+async def test_options_answered_contract_has_no_not_stated_choice(
+    hass: HomeAssistant, server
+) -> None:
+    """(c) With a stored contract type (or a contract history) the question is answered: no "not
+    stated" choice, the default is the server's (else quarter), an untouched save PATCHes
+    nothing."""
+    entry, mock_client = _unanswered_entry(hass, **server)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        marker, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
+        assert _selector_values(sel) == ["quarter", "month", "fixed"]
+        assert marker.default() == "quarter"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_SURCHARGE_ORE: 6.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_unanswered_contract_fixed_price_is_sent_as_before(
+    hass: HomeAssistant,
+) -> None:
+    """(d) Choosing a fixed price with its price sends both and no markup, as before."""
+    entry, mock_client = _unanswered_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_SURCHARGE_ORE: 6.0, CONF_RETAIL_PRICE_MODEL: "fixed",
+                CONF_RETAIL_FIXED_ORE: 85.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 85.0}
+
+
+@pytest.mark.asyncio
+async def test_options_not_stated_with_a_new_markup_sends_only_the_markup(
+    hass: HomeAssistant,
+) -> None:
+    """"Not stated" counts as a quarter-hour price for the contract rules (the server counts it
+    so): a markup is allowed next to it and is sent alone."""
+    entry, mock_client = _unanswered_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_SURCHARGE_ORE: 7.5, CONF_RETAIL_PRICE_MODEL: "not_stated"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_SURCHARGE_ORE: 7.5}
 
 
 # --- Review Focus 5: with time periods the form shows a summary, an untouched save PATCHes

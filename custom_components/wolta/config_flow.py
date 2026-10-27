@@ -297,6 +297,18 @@ _CONTRACT_KEYS = (CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE)
 _SELECT_DEFAULTS = {
     CONF_RETAIL_PRICE_MODEL: DEFAULT_RETAIL_PRICE_MODEL,
 }
+# The contract type's extra choice while the server has none stored and no contract history (code
+# review C1). The server counts the type as unanswered then (its ruling 14: the first answer
+# applies to all of the history) and prices it as a quarter-hour price; an answer is stored
+# literally, "quarter" included (ruling 15). Without this choice the select showed "Quarter-hour
+# price" as its default and never sent it, so an owner on a quarter-hour price could not say so.
+# A form value only: never sent to the server, never cached.
+_RETAIL_NOT_STATED = "not_stated"
+
+
+def _contract_unanswered(server: dict[str, Any]) -> bool:
+    """Whether the server has neither a contract type nor a contract history for the plant."""
+    return server.get(CONF_RETAIL_PRICE_MODEL) is None and not server.get(KEY_RETAIL_EVENTS)
 
 
 def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -1864,6 +1876,15 @@ class WoltaOptionsFlow(OptionsFlow):
                         continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
+                    if key == CONF_RETAIL_PRICE_MODEL and val == _RETAIL_NOT_STATED:
+                        # Only offered while the server has no answer: nothing to send.
+                        continue
+                    if (key == CONF_RETAIL_PRICE_MODEL and val
+                            and _contract_unanswered(self._server)):
+                        # The form offered "not stated", so any type chosen is an answer, the
+                        # default quarter-hour price included (code review C1).
+                        patch_fields[key] = val
+                        continue
                     if key in _SELECT_DEFAULTS:
                         # Always filled in the form, and "not set" on the server is the default.
                         default = _SELECT_DEFAULTS[key]
@@ -1950,7 +1971,10 @@ class WoltaOptionsFlow(OptionsFlow):
             # save that touches one of the contract's fields is checked, like the server.
             dropped: set[str] = set()
             if benefit_asked:
-                model_after = flat.get(CONF_RETAIL_PRICE_MODEL) or DEFAULT_RETAIL_PRICE_MODEL
+                model_after = flat.get(CONF_RETAIL_PRICE_MODEL)
+                if model_after in (None, "", _RETAIL_NOT_STATED):
+                    # Not stated is priced as a quarter-hour price, by the server too.
+                    model_after = DEFAULT_RETAIL_PRICE_MODEL
                 # A fixed price carries no markup and only a fixed price carries a fixed price: the
                 # server drops the one that no longer applies when the contract changes type. The
                 # form still shows the old value, so a cleared one is not sent back and the cache
@@ -2154,14 +2178,19 @@ class WoltaOptionsFlow(OptionsFlow):
         se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
 
         def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
-                        mode: SelectSelectorMode) -> tuple[Any, Any]:
+                        mode: SelectSelectorMode, *, not_stated: bool = False) -> tuple[Any, Any]:
             """A select that always carries a value: the server's, else the default. A value this
             version does not know (a newer server) is offered as one more option, its raw key as
             its label: the select validates against its options, so without it the injected value
             would be refused and no save could pass. Untouched, it is sent back unchanged and the
-            diff finds nothing to PATCH."""
-            current = srv.get(key) or default
-            options = list(known) if current in known else [*known, current]
+            diff finds nothing to PATCH. With `not_stated` the select leads with "not stated" and
+            starts on it (the server has no answer; see _RETAIL_NOT_STATED)."""
+            if not_stated:
+                current = _RETAIL_NOT_STATED
+                options = [_RETAIL_NOT_STATED, *known]
+            else:
+                current = srv.get(key) or default
+                options = list(known) if current in known else [*known, current]
             return (vol.Optional(key, default=current),
                     SelectSelector(SelectSelectorConfig(
                         options=options, mode=mode, translation_key=translation_key)))
@@ -2178,10 +2207,12 @@ class WoltaOptionsFlow(OptionsFlow):
         if contract_asked:
             tariff_rows += [
                 # default (not suggested_value), like the energy-tax select: it always carries a
-                # value, so the form always submits one; "not set" on the server is the default.
+                # value, so the form always submits one. Without a stored type or history it is
+                # "not stated" (an untouched save sends nothing); otherwise the server's type, or
+                # the quarter-hour price when the server mirrors none.
                 _select_row(CONF_RETAIL_PRICE_MODEL, RETAIL_PRICE_MODELS,
                             DEFAULT_RETAIL_PRICE_MODEL, CONF_RETAIL_PRICE_MODEL,
-                            SelectSelectorMode.LIST),
+                            SelectSelectorMode.LIST, not_stated=_contract_unanswered(srv)),
                 _opt(CONF_RETAIL_FIXED_ORE, se_ore_selector),
             ]
         tariff_rows.append(_opt(CONF_SURCHARGE_ORE, ore_selector))
