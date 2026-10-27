@@ -34,10 +34,35 @@ CONF_SURCHARGE_ORE = "surcharge_ore"
 # Since api 0.119.0 export_extra_ore is the RETAILER's terms for sold electricity (premium +,
 # deduction -), no longer a catch-all that also held the grid benefit. The owner's grid benefit
 # (nätnytta, the network operator's compensation for feeding in; öre/kWh excl. VAT) has its own
-# fields: the rest of the year, and optionally the high-load hours. SE1-SE4 only.
+# fields: the amount, and optionally the amount in high-load hours (its calendar is below). SE1-SE4 only.
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
 CONF_GRID_BENEFIT_ORE = "grid_benefit_ore"
 CONF_GRID_BENEFIT_PEAK_ORE = "grid_benefit_peak_ore"
+# Market adaptation (api 0.119.0, SE1-SE4 only; the server owns every rule and range).
+# The variable grid fee during the network operator's high-load hours (time-of-use tariff,
+# öre/kWh excl. VAT; needs grid_var_ore for the rest of the time), and two high-load
+# calendars, one per side of the meter: grid_fee_peak_* for the fee you pay (purchase) and
+# grid_benefit_peak_* for the benefit you are paid (sale). Hours are local time (0-23 start,
+# 1-24 end, start before end, end exclusive); the holiday rule is one of PEAK_HOLIDAY_RULES.
+# Months (November-March) and weekdays (Monday-Friday) are fixed.
+CONF_GRID_VAR_PEAK_ORE = "grid_var_peak_ore"
+CONF_GRID_FEE_PEAK_START_HOUR = "grid_fee_peak_start_hour"
+CONF_GRID_FEE_PEAK_END_HOUR = "grid_fee_peak_end_hour"
+CONF_GRID_FEE_PEAK_HOLIDAYS = "grid_fee_peak_holidays"
+CONF_GRID_BENEFIT_PEAK_START_HOUR = "grid_benefit_peak_start_hour"
+CONF_GRID_BENEFIT_PEAK_END_HOUR = "grid_benefit_peak_end_hour"
+CONF_GRID_BENEFIT_PEAK_HOLIDAYS = "grid_benefit_peak_holidays"
+# The electricity contract: how the retailer prices the electricity you buy. `quarter` (the
+# default: the spot price per quarter-hour), `month` (the month's average price, set after the
+# fact) or `fixed` (a fixed price, retail_fixed_ore). From `retail_price_model_since` (YYYY-MM-DD,
+# required with month/fixed) the chosen model applies in the history; quarter before.
+CONF_RETAIL_PRICE_MODEL = "retail_price_model"
+CONF_RETAIL_FIXED_ORE = "retail_fixed_ore"
+CONF_RETAIL_PRICE_MODEL_SINCE = "retail_price_model_since"
+PEAK_HOLIDAY_RULES = ("none", "public", "public_eves", "public_eves_maundy")
+DEFAULT_PEAK_HOLIDAYS = "public_eves"
+RETAIL_PRICE_MODELS = ("quarter", "month", "fixed")
+DEFAULT_RETAIL_PRICE_MODEL = "quarter"
 # Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"

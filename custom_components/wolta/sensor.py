@@ -846,6 +846,10 @@ class _WoltaProfilePriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorE
     `reason` (that side's reason) and stays available, because Home Assistant drops every
     attribute of an unavailable entity and the reason is the point of the answer. It is
     `unavailable` only when there is no data at all (see `available`).
+
+    The purchase side has no quarter-hour price with a monthly-price contract (`reason`
+    `monthly_price_contract`: the price is set after the month is over). `prices` of the
+    purchase sensors carries `grid_fee_peak` per quarter, the grid fee's own high-load calendar.
     """
 
     _attr_has_entity_name = True
@@ -996,8 +1000,9 @@ class WoltaSalePriceSensor(_WoltaProfilePriceSensor):
     """What the owner is paid for sold electricity right now: SEK/kWh EXCLUDING VAT (a
     private person sells without VAT), for the current quarter-hour: spot + the grid benefit
     of that quarter (the high-load amount in high-load hours when one is set) + the
-    retailer's terms + the tax reduction for micro-production. `prices` carries `grid_peak`
-    per quarter so the owner can see why the grid benefit differs.
+    retailer's terms + the tax reduction for micro-production. `prices` carries
+    `grid_benefit_peak` per quarter so the owner can see why the grid benefit differs (the grid
+    benefit has its own high-load calendar).
 
     `reason` is the server's `sale_reason`: `grid_benefit_not_set` (enter the grid benefit
     under Configure -> Settings -> Tariffs), `fx_missing` or `zone_not_supported`.

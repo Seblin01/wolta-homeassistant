@@ -1236,3 +1236,59 @@ async def test_patch_profile_passes_the_grid_benefit_through(aioclient_mock: Aio
     body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "patch"][0][2]
     assert body == {"grid_benefit_ore": 10.4, "grid_benefit_peak_ore": None,
                     "export_extra_ore": 5.0}
+
+
+# ---------------------------------------------------------------------------
+# create_profile / patch_profile with the market-adaptation fields (api 0.119.0)
+# ---------------------------------------------------------------------------
+
+_MARKET_PAYLOAD = {
+    "grid_var_peak_ore": 61.2,
+    "grid_fee_peak_start_hour": 7, "grid_fee_peak_end_hour": 22,
+    "grid_fee_peak_holidays": "public_eves_maundy",
+    "grid_benefit_peak_start_hour": 0, "grid_benefit_peak_end_hour": 24,
+    "grid_benefit_peak_holidays": "none",
+    "retail_price_model": "fixed", "retail_fixed_ore": 0.0,
+    "retail_price_model_since": "2026-01-01",
+}
+
+
+@pytest.mark.asyncio
+async def test_create_profile_sends_the_market_fields_including_zero(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """Hour 0 and a fixed price of 0 are answers, so only None is omitted."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False,
+        **_MARKET_PAYLOAD)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    for key, value in _MARKET_PAYLOAD.items():
+        assert body[key] == value, key
+        assert type(body[key]) is type(value), key
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_the_market_fields_when_none(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    for key in _MARKET_PAYLOAD:
+        assert key not in body, key
+
+
+@pytest.mark.asyncio
+async def test_patch_profile_passes_the_market_fields_through(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.patch(f"{BASE_URL}/api/v1/profile", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.patch_profile(
+        TOKEN, retail_price_model="month", retail_price_model_since="2026-01-01",
+        retail_fixed_ore=None)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "patch"][0][2]
+    assert body == {"retail_price_model": "month", "retail_price_model_since": "2026-01-01",
+                    "retail_fixed_ore": None}

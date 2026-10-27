@@ -207,7 +207,10 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
 
     Every point has "start": ts_utc, the kind's price in SEK/kWh ("purchase" INCLUDING
     VAT, "sale" EXCLUDING VAT, i.e. the server's öre/kWh / 100) and "spot" (SEK/kWh
-    EXCLUDING VAT); the sale kind adds "grid_peak" (bool, None when the server sent none).
+    EXCLUDING VAT) and the kind's own high-load flag: "grid_fee_peak" on the purchase kind (the
+    grid fee's calendar) and "grid_benefit_peak" on the sale kind (the grid benefit's calendar),
+    bool, None when the server sent none. The two calendars are independent, so a quarter can be
+    high-load on one side only.
     with_forecast adds "forecast": bool to every point and, on forecast points, "horizon"."""
     if not isinstance(purchase, dict):
         return []
@@ -226,9 +229,9 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
                 key: _ore_to_sek(point.get(field)),
                 "spot": _ore_to_sek(point.get("spot_ore_kwh")),
             }
-            if key == "sale":
-                peak = point.get("grid_peak")
-                item["grid_peak"] = peak if isinstance(peak, bool) else None
+            peak_key = "grid_benefit_peak" if key == "sale" else "grid_fee_peak"
+            peak = point.get(peak_key)
+            item[peak_key] = peak if isinstance(peak, bool) else None
             if with_forecast:
                 item["forecast"] = is_forecast
                 if horizon is not None:
@@ -249,7 +252,8 @@ def purchase_series(purchase: Any) -> list[dict[str, Any]]:
     then tomorrow, sorted by start with no timestamp repeated (the first source wins).
 
     Each point is {"start": ts_utc, "purchase": SEK/kWh INCLUDING VAT | None, "spot":
-    SEK/kWh EXCLUDING VAT | None}. The two prices are on different VAT bases on purpose:
+    SEK/kWh EXCLUDING VAT | None, "grid_fee_peak": bool | None} (whether the quarter is a
+    high-load quarter of the grid fee's calendar). The two prices are on different VAT bases on purpose:
     the server's `purchase_ore_kwh` is what the owner pays (VAT on everything), its
     `spot_ore_kwh` is the market price the existing spot sensor also shows. Never raises:
     the attributes are rebuilt on every state write."""
@@ -258,11 +262,12 @@ def purchase_series(purchase: Any) -> list[dict[str, Any]]:
 
 def sale_series(purchase: Any) -> list[dict[str, Any]]:
     """Price points for the sale-price sensor from the same response: {"start": ts_utc,
-    "sale": SEK/kWh EXCLUDING VAT | None, "spot": SEK/kWh EXCLUDING VAT | None, "grid_peak":
-    bool | None}. The sale price is what a private person is paid per sold kWh: spot + grid
+    "sale": SEK/kWh EXCLUDING VAT | None, "spot": SEK/kWh EXCLUDING VAT | None,
+    "grid_benefit_peak": bool | None}. The sale price is what a private person is paid per sold kWh: spot + grid
     benefit + retailer's terms + tax reduction, all without VAT (the server's
-    `sale_ore_kwh`, which is null when the sale side is unavailable). `grid_peak` says
-    whether the quarter is a high-load quarter, i.e. which grid benefit was used."""
+    `sale_ore_kwh`, which is null when the sale side is unavailable). `grid_benefit_peak`
+    says whether the quarter is a high-load quarter of the grid benefit's calendar, i.e. which
+    grid benefit was used."""
     return _profile_series(purchase, "sale", with_forecast=False)
 
 

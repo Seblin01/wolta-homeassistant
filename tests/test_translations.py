@@ -454,8 +454,8 @@ def test_benefit_field_errors_exist_for_options(path: Path) -> None:
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
 def test_benefit_errors_name_the_field_they_ask_for(path: Path) -> None:
     """Field errors render next to the field, but the text still has to say which one to fill."""
-    label = {"en.json": "Grid benefit, rest of the year", "strings.json": "Grid benefit, rest of the year",
-             "sv.json": "Nätnytta, övrig tid"}[path.name]
+    label = {"en.json": "Grid benefit", "strings.json": "Grid benefit",
+             "sv.json": "Nätnytta"}[path.name]
     errors = _load(path)["options"]["error"]
     assert label in errors["grid_benefit_fixed_required"], path.name
     assert label in errors["grid_benefit_peak_requires_base"], path.name
@@ -491,3 +491,203 @@ def test_export_split_issue_says_the_grid_benefit_is_counted_twice(path: Path) -
               "sv.json": "räknas den två gånger"}[path.name]
     assert needle in text, path.name
     assert "5 öre" in text, path.name
+
+
+# --- market adaptation (HACS 0.54.0): grid-fee high-load hours, two calendars, the contract ---
+
+_MARKET_FIELDS = (
+    "grid_var_peak_ore",
+    "grid_fee_peak_start_hour", "grid_fee_peak_end_hour", "grid_fee_peak_holidays",
+    "grid_benefit_peak_start_hour", "grid_benefit_peak_end_hour", "grid_benefit_peak_holidays",
+    "retail_price_model", "retail_fixed_ore", "retail_price_model_since",
+)
+_MARKET_ERRORS = ("grid_var_peak_requires_base", "peak_hours_invalid", "retail_fixed_invalid",
+                  "retail_since_invalid", "tariff_zone_se_only")
+
+# The labels of the web form, so the same field has the same name on both surfaces.
+_LABELS = {
+    "en.json": {
+        "grid_var_ore": "Grid fee (transfer)",
+        "grid_var_peak_ore": "Grid fee, high-load hours (optional, time-of-use tariff)",
+        "grid_benefit_ore": "Grid benefit",
+        "grid_benefit_peak_ore": "Grid benefit, high-load hours (optional)",
+        "retail_price_model": "Electricity contract",
+    },
+    "sv.json": {
+        "grid_var_ore": "Nätavgift (överföring)",
+        "grid_var_peak_ore": "Nätavgift i höglasttid (valfritt, tidstariff)",
+        "grid_benefit_ore": "Nätnytta",
+        "grid_benefit_peak_ore": "Nätnytta i höglasttid (valfritt)",
+        "retail_price_model": "Elhandelsavtal",
+    },
+}
+_LABELS["strings.json"] = _LABELS["en.json"]
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_tariff_labels_are_the_webs(path: Path) -> None:
+    tariffs = _tariffs(path)["data"]
+    for field, label in _LABELS[path.name].items():
+        assert tariffs[field].startswith(label), (path.name, field, tariffs[field])
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_the_old_rest_of_the_year_label_is_gone_everywhere(path: Path) -> None:
+    """The field is just "Grid benefit" now. The old label would survive in an error or a repair
+    that quotes it, naming a field that no longer exists."""
+    raw = path.read_text(encoding="utf-8")
+    for old in ("Grid benefit, rest of the year", "Nätnytta, övrig tid"):
+        assert old not in raw, (path.name, old)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_every_market_field_has_a_label_and_a_description(path: Path) -> None:
+    tariffs = _tariffs(path)
+    for field in _MARKET_FIELDS:
+        assert tariffs["data"][field], f"{path.name}: {field} label"
+        assert tariffs["data_description"][field], f"{path.name}: {field} description"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_the_two_calendars_have_distinct_labels(path: Path) -> None:
+    """Two hours-and-holidays blocks sit in the same section: the labels must say which price
+    each belongs to, or the owner cannot tell them apart."""
+    data = _tariffs(path)["data"]
+    labels = [data[f] for f in _MARKET_FIELDS
+              if f.startswith(("grid_fee_peak_", "grid_benefit_peak_"))]
+    assert len(labels) == len(set(labels)) == 6
+    fee = {"en.json": "grid fee", "strings.json": "grid fee", "sv.json": "nätavgift"}[path.name]
+    benefit = {"en.json": "grid benefit", "strings.json": "grid benefit",
+               "sv.json": "nätnytta"}[path.name]
+    for field in _MARKET_FIELDS:
+        if field.startswith("grid_fee_peak_"):
+            assert fee in data[field].lower(), (path.name, field)
+        if field.startswith("grid_benefit_peak_"):
+            assert benefit in data[field].lower(), (path.name, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_hour_labels_say_the_range(path: Path) -> None:
+    data = _tariffs(path)["data"]
+    for field in ("grid_fee_peak_start_hour", "grid_benefit_peak_start_hour"):
+        assert "0–23" in data[field], (path.name, field)
+    for field in ("grid_fee_peak_end_hour", "grid_benefit_peak_end_hour"):
+        assert "1–24" in data[field], (path.name, field)
+
+
+_EXCL_VAT = {"en.json": "excluding VAT", "strings.json": "excluding VAT",
+             "sv.json": "exklusive moms"}
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("field", ["grid_var_peak_ore", "retail_fixed_ore"])
+def test_amount_fields_say_excluding_vat(path: Path, field: str) -> None:
+    assert _EXCL_VAT[path.name] in _tariffs(path)["data_description"][field], (path.name, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_contract_help_states_the_limits_of_the_model(path: Path) -> None:
+    """Monthly price: the retailer's volume-weighting cost belongs in the markup. An hourly-price
+    contract is counted per quarter-hour and can differ within the hour. A mix is not supported."""
+    desc = _tariffs(path)["data_description"]
+    en = path.name != "sv.json"
+    model = desc["retail_price_model"].lower()
+    markup = desc["surcharge_ore"].lower()
+    assert ("volume weighting" if en else "volymvägning") in model + markup
+    assert ("volume weighting" if en else "volymvägning") in markup
+    assert ("hourly" if en else "timpris") in model
+    assert ("within the hour" if en else "inom timmen") in model
+    assert ("mix" if en else "mixavtal") in model
+    assert ("average" if en else "medel") in model
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_fixed_contract_help_says_the_markup_is_not_used(path: Path) -> None:
+    desc = _tariffs(path)["data_description"]
+    en = path.name != "sv.json"
+    assert ("not used" if en else "används inte") in desc["retail_fixed_ore"].lower()
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_contract_date_help_says_what_it_decides(path: Path) -> None:
+    text = _tariffs(path)["data_description"]["retail_price_model_since"].lower()
+    en = path.name != "sv.json"
+    assert ("quarter" if en else "kvartspris") in text
+    assert ("history" if en else "historik") in text
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_high_load_help_names_the_fixed_months_and_weekdays(path: Path) -> None:
+    desc = _tariffs(path)["data_description"]
+    en = path.name != "sv.json"
+    for field in ("grid_var_peak_ore", "grid_fee_peak_holidays", "grid_benefit_peak_holidays"):
+        text = desc[field]
+        assert ("November to March" if en else "november till mars") in text, (path.name, field)
+        assert ("weekdays" if en else "vardagar") in text, (path.name, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_peak_holiday_and_contract_selectors_have_plain_language_options(path: Path) -> None:
+    selector = _load(path)["selector"]
+    assert set(selector["peak_holidays"]["options"]) == {
+        "none", "public", "public_eves", "public_eves_maundy"}
+    assert set(selector["retail_price_model"]["options"]) == {"quarter", "month", "fixed"}
+    options = selector["peak_holidays"]["options"]
+    models = selector["retail_price_model"]["options"]
+    if path.name == "sv.json":
+        assert options["none"] == "Inga helgdagar"
+        assert options["public"] == "Allmänna helgdagar"
+        assert options["public_eves"] == "Allmänna helgdagar, julafton och nyårsafton"
+        assert options["public_eves_maundy"].endswith("och skärtorsdag")
+        assert models == {"quarter": "Kvartspris", "month": "Månadspris", "fixed": "Fastpris"}
+    else:
+        assert options["none"] == "No holidays"
+        assert options["public"] == "Public holidays"
+        assert options["public_eves"] == (
+            "Public holidays, Christmas Eve and New Year's Eve")
+        assert options["public_eves_maundy"].endswith("and Maundy Thursday")
+        assert models == {"quarter": "Quarter-hour price", "month": "Monthly price",
+                          "fixed": "Fixed price"}
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_market_field_errors_exist_for_options(path: Path) -> None:
+    errors = _load(path)["options"]["error"]
+    for code in _MARKET_ERRORS:
+        assert errors[code], f"{path.name}: {code}"
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_market_errors_name_the_field_they_ask_for(path: Path) -> None:
+    """The error also shows on base, far from the field, so it quotes the label it means."""
+    errors = _load(path)["options"]["error"]
+    data = _tariffs(path)["data"]
+    base_label = _LABELS[path.name]["grid_var_ore"]
+    assert base_label in errors["grid_var_peak_requires_base"], path.name
+    assert data["retail_price_model_since"].split(" (")[0] in errors["retail_since_invalid"]
+    assert data["retail_fixed_ore"].split(" (")[0] in errors["retail_fixed_invalid"]
+    assert _tariffs(path)["name"] in errors["retail_fixed_invalid"], path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_peak_hours_error_states_the_range_and_the_order(path: Path) -> None:
+    text = _load(path)["options"]["error"]["peak_hours_invalid"]
+    assert "0–23" in text and "1–24" in text, path.name
+
+
+def test_swedish_market_errors_use_typographic_quotes() -> None:
+    errors = _load(_TRANSLATIONS / "sv.json")["options"]["error"]
+    for code in _MARKET_ERRORS:
+        assert '"' not in errors[code], code
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_peak_fee_issue_names_the_limit_and_the_menu_path(path: Path) -> None:
+    issue = _load(path)["issues"]["grid_fee_peak_implausible"]
+    assert issue["title"]
+    assert "{limit}" in issue["description"]
+    assert "{" not in issue["title"]
+    assert "fix_flow" not in issue
+    assert _SETTINGS_PATH[path.name] in issue["description"], path.name
+    assert ("excluding VAT and energy tax" if path.name != "sv.json"
+            else "exklusive moms och energiskatt") in issue["description"]

@@ -34,17 +34,27 @@ from custom_components.wolta.const import (
     CONF_EXTERNAL_CONTROL,
     CONF_FLEX_COMPENSATION,
     CONF_GRID_BENEFIT_ORE,
+    CONF_GRID_BENEFIT_PEAK_END_HOUR,
+    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
     CONF_GRID_BENEFIT_PEAK_ORE,
+    CONF_GRID_BENEFIT_PEAK_START_HOUR,
+    CONF_GRID_FEE_PEAK_END_HOUR,
+    CONF_GRID_FEE_PEAK_HOLIDAYS,
+    CONF_GRID_FEE_PEAK_START_HOUR,
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
+    CONF_GRID_VAR_PEAK_ORE,
     CONF_INVERT_BATTERY,
     CONF_PREFILL_PURCHASE_DATE,
     CONF_PLANT_ID,
     CONF_PURCHASE_DATE,
     CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
+    CONF_RETAIL_FIXED_ORE,
+    CONF_RETAIL_PRICE_MODEL,
+    CONF_RETAIL_PRICE_MODEL_SINCE,
     CONF_SHARE,
     CONF_SOC,
     CONF_SOC_ABSENT,
@@ -1125,6 +1135,10 @@ _SYNC_KEYS = (
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
     CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
+    CONF_GRID_VAR_PEAK_ORE, CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR,
+    CONF_GRID_FEE_PEAK_HOLIDAYS, CONF_GRID_BENEFIT_PEAK_START_HOUR,
+    CONF_GRID_BENEFIT_PEAK_END_HOUR, CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
+    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
 )
 
 
@@ -1148,6 +1162,13 @@ _OPT_SECTION_OF = {
     CONF_GRID_BENEFIT_ORE: "tariffs", CONF_GRID_BENEFIT_PEAK_ORE: "tariffs",
     CONF_GRID_VAR_PCT: "tariffs", CONF_EXPORT_EXTRA_PCT: "tariffs",
     CONF_REDUCED_ENERGY_TAX: "tariffs",
+    CONF_GRID_VAR_PEAK_ORE: "tariffs",
+    CONF_GRID_FEE_PEAK_START_HOUR: "tariffs", CONF_GRID_FEE_PEAK_END_HOUR: "tariffs",
+    CONF_GRID_FEE_PEAK_HOLIDAYS: "tariffs",
+    CONF_GRID_BENEFIT_PEAK_START_HOUR: "tariffs", CONF_GRID_BENEFIT_PEAK_END_HOUR: "tariffs",
+    CONF_GRID_BENEFIT_PEAK_HOLIDAYS: "tariffs",
+    CONF_RETAIL_PRICE_MODEL: "tariffs", CONF_RETAIL_FIXED_ORE: "tariffs",
+    CONF_RETAIL_PRICE_MODEL_SINCE: "tariffs",
 }
 
 
@@ -5890,3 +5911,506 @@ async def test_options_zone_422_is_readable_on_base_when_the_field_is_hidden(
             result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_ORE: 5.0})))
     assert result["type"] == FlowResultType.FORM
     assert result["errors"]["base"] == "grid_benefit_zone"
+
+
+# ---------------------------------------------------------------------------
+# Market adaptation (HACS 0.54.0, server api 0.119.0): the grid fee's high-load hours, two
+# high-load calendars and the electricity contract. Every rule is the server's; the form says
+# the ones it can before sending and shows the server's own 422s at the field AND on base.
+# ---------------------------------------------------------------------------
+
+_MARKET_FIELDS = (
+    CONF_GRID_VAR_PEAK_ORE,
+    CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS,
+    CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
+    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
+    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
+)
+
+# The five 422 texts of the server, verbatim, as WoltaApiError carries them (one line, the
+# non-ASCII escaped the way the server's JSON sends it).
+_PEAK_BASE_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"grid_var_peak_ore kr\\u00e4ver '
+    'grid_var_ore (n\\u00e4tavgiften \\u00f6vrig tid)"}')
+_PEAK_HOURS_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"h\\u00f6glasttidens starttimme '
+    'm\\u00e5ste vara 0\\u201323, sluttimmen 1\\u201324 och starten f\\u00f6re slutet"}')
+_RETAIL_FIXED_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"retail_fixed_ore kr\\u00e4vs med '
+    'retail_price_model fixed och f\\u00e5r inte s\\u00e4ttas annars"}')
+_RETAIL_SINCE_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"retail_price_model_since '
+    'kr\\u00e4vs med retail_price_model month eller fixed och f\\u00e5r inte s\\u00e4ttas med '
+    'quarter"}')
+_TARIFF_ZONE_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"n\\u00e4tavgiftens h\\u00f6glast, '
+    'h\\u00f6glastkalendrarna och elhandelsavtalet g\\u00e4ller bara SE1\\u2013SE4"}')
+
+_FEE_CALENDAR = {
+    CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 61.2,
+    CONF_GRID_FEE_PEAK_START_HOUR: 7.0, CONF_GRID_FEE_PEAK_END_HOUR: 22.0,
+    CONF_GRID_FEE_PEAK_HOLIDAYS: "public_eves_maundy",
+}
+
+
+def _selector_values(selector) -> list[str]:
+    return [o if isinstance(o, str) else o["value"] for o in selector.config["options"]]
+
+
+@pytest.mark.asyncio
+async def test_options_tariffs_section_groups_the_market_fields_under_their_price(
+    hass: HomeAssistant,
+) -> None:
+    """Under the grid fee its high-load value and calendar, under the grid benefit the same,
+    the electricity contract with its fixed price and start date after the percentage."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+    fields = _tariff_fields(result)
+    groups = [
+        [CONF_GRID_VAR_ORE, CONF_GRID_VAR_PEAK_ORE, CONF_GRID_FEE_PEAK_START_HOUR,
+         CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS],
+        [CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE, CONF_GRID_BENEFIT_PEAK_START_HOUR,
+         CONF_GRID_BENEFIT_PEAK_END_HOUR, CONF_GRID_BENEFIT_PEAK_HOLIDAYS],
+        [CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE],
+    ]
+    for group in groups:
+        positions = [fields.index(f) for f in group]
+        assert positions == list(range(positions[0], positions[0] + len(group))), group
+    # The grid fee's block comes before the benefit's, the retailer's terms stay after it.
+    assert fields.index(CONF_GRID_VAR_ORE) < fields.index(CONF_GRID_BENEFIT_ORE)
+    assert fields.index(CONF_GRID_BENEFIT_PEAK_HOLIDAYS) < fields.index(CONF_EXPORT_EXTRA_ORE)
+
+
+@pytest.mark.asyncio
+async def test_options_market_field_selectors_match_the_servers_ranges(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+
+    _, sel = _tariff_field(result, CONF_GRID_VAR_PEAK_ORE)
+    assert (sel.config["min"], sel.config["max"]) == (0.0, 500.0)
+    for start in (CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_START_HOUR):
+        _, sel = _tariff_field(result, start)
+        assert (sel.config["min"], sel.config["max"], sel.config["step"]) == (0, 23, 1)
+    for end in (CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR):
+        _, sel = _tariff_field(result, end)
+        assert (sel.config["min"], sel.config["max"], sel.config["step"]) == (1, 24, 1)
+    _, sel = _tariff_field(result, CONF_RETAIL_FIXED_ORE)
+    assert (sel.config["min"], sel.config["max"]) == (0.0, 500.0)
+
+    for holidays in (CONF_GRID_FEE_PEAK_HOLIDAYS, CONF_GRID_BENEFIT_PEAK_HOLIDAYS):
+        marker, sel = _tariff_field(result, holidays)
+        assert _selector_values(sel) == ["none", "public", "public_eves", "public_eves_maundy"]
+        assert sel.config["translation_key"] == "peak_holidays"
+        assert marker.default() == "public_eves"
+    marker, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
+    assert _selector_values(sel) == ["quarter", "month", "fixed"]
+    assert sel.config["translation_key"] == "retail_price_model"
+    assert marker.default() == "quarter"
+
+    from homeassistant.helpers.selector import DateSelector
+    _, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL_SINCE)
+    assert isinstance(sel, DateSelector)
+
+
+@pytest.mark.asyncio
+async def test_options_market_fields_show_the_servers_values(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value={
+        **_server_profile(entry), CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 61.2,
+        CONF_GRID_FEE_PEAK_START_HOUR: 7, CONF_GRID_FEE_PEAK_HOLIDAYS: "none",
+        CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 85.0,
+        CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"})
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+    peak, _ = _tariff_field(result, CONF_GRID_VAR_PEAK_ORE)
+    assert peak.description["suggested_value"] == 61.2
+    start, _ = _tariff_field(result, CONF_GRID_FEE_PEAK_START_HOUR)
+    assert start.description["suggested_value"] == 7
+    holidays, _ = _tariff_field(result, CONF_GRID_FEE_PEAK_HOLIDAYS)
+    assert holidays.default() == "none"
+    model, _ = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
+    assert model.default() == "fixed"
+    since, _ = _tariff_field(result, CONF_RETAIL_PRICE_MODEL_SINCE)
+    assert since.description["suggested_value"] == "2026-01-01"
+
+
+@pytest.mark.asyncio
+async def test_options_market_fields_are_hidden_outside_se1_se4(hass: HomeAssistant) -> None:
+    """The server refuses them outside SE1-SE4 (422), so the form does not offer them and a save
+    there leaves a cached value alone instead of PATCHing null (or a default) over it."""
+    entry = _make_mock_entry(hass, extra_data={CONF_ZONE: "FI", CONF_GRID_VAR_PEAK_ORE: 40.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        fields = _tariff_fields(result)
+        for field in _MARKET_FIELDS:
+            assert field not in fields, field
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core()))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_untouched_market_defaults_patch_nothing(hass: HomeAssistant) -> None:
+    """The holiday rule and the contract always carry a value in the form (their defaults), so
+    an untouched form must not turn the server's "not set" into a PATCH of the default."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core()))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_grid_fee_peak_and_calendar_are_patched_with_integer_hours(
+    hass: HomeAssistant,
+) -> None:
+    """A number selector returns floats; the server takes integers (a bool or a float is a 422
+    there), so the hours are sent as ints."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**_FEE_CALENDAR)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    sent = mock_client.patch_profile.call_args.kwargs
+    assert sent == {
+        CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 61.2,
+        CONF_GRID_FEE_PEAK_START_HOUR: 7, CONF_GRID_FEE_PEAK_END_HOUR: 22,
+        CONF_GRID_FEE_PEAK_HOLIDAYS: "public_eves_maundy"}
+    assert type(sent[CONF_GRID_FEE_PEAK_START_HOUR]) is int
+    assert type(sent[CONF_GRID_FEE_PEAK_END_HOUR]) is int
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_GRID_VAR_PEAK_ORE] == 61.2
+    assert updated.data[CONF_GRID_FEE_PEAK_START_HOUR] == 7
+
+
+@pytest.mark.asyncio
+async def test_options_grid_benefit_calendar_is_patched(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{
+                CONF_GRID_BENEFIT_ORE: 10.0, CONF_GRID_BENEFIT_PEAK_ORE: 20.0,
+                CONF_GRID_BENEFIT_PEAK_START_HOUR: 6.0, CONF_GRID_BENEFIT_PEAK_END_HOUR: 21.0,
+                CONF_GRID_BENEFIT_PEAK_HOLIDAYS: "none"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    sent = mock_client.patch_profile.call_args.kwargs
+    assert sent[CONF_GRID_BENEFIT_PEAK_START_HOUR] == 6
+    assert sent[CONF_GRID_BENEFIT_PEAK_END_HOUR] == 21
+    assert sent[CONF_GRID_BENEFIT_PEAK_HOLIDAYS] == "none"
+    # The fee calendar was not touched: its default holiday rule is not a change.
+    assert CONF_GRID_FEE_PEAK_HOLIDAYS not in sent
+
+
+@pytest.mark.asyncio
+async def test_options_clearing_the_peak_value_and_hours_patches_null(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(hass, extra_data={
+        CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 61.2,
+        CONF_GRID_FEE_PEAK_START_HOUR: 7, CONF_GRID_FEE_PEAK_END_HOUR: 22})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_VAR_ORE: 20.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_VAR_PEAK_ORE: None, CONF_GRID_FEE_PEAK_START_HOUR: None,
+        CONF_GRID_FEE_PEAK_END_HOUR: None}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert CONF_GRID_VAR_PEAK_ORE not in updated.data
+
+
+@pytest.mark.asyncio
+async def test_options_month_contract_is_patched_with_its_start_date(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{
+                CONF_RETAIL_PRICE_MODEL: "month", CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_RETAIL_PRICE_MODEL: "month", CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"}
+
+
+@pytest.mark.asyncio
+async def test_options_fixed_contract_is_patched_with_its_price_and_start_date(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{
+                CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 85.0,
+                CONF_RETAIL_PRICE_MODEL_SINCE: "2026-03-01"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 85.0,
+        CONF_RETAIL_PRICE_MODEL_SINCE: "2026-03-01"}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_RETAIL_FIXED_ORE] == 85.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "new_model, dropped",
+    [("month", {CONF_RETAIL_FIXED_ORE}),
+     ("quarter", {CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE})],
+)
+async def test_options_leaving_the_fixed_contract_lets_the_server_drop_what_no_longer_applies(
+    hass: HomeAssistant, new_model: str, dropped: set[str]
+) -> None:
+    """The server drops retail_fixed_ore when the model leaves `fixed` and the start date when it
+    goes to `quarter`. The form still shows the old values, so they are not sent back (the server
+    would answer 422 for them), and the cache follows the server."""
+    stored = {CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 80.0,
+              CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"}
+    entry = _make_mock_entry(hass, extra_data=stored)
+    mock_client, _ = _mock_options_env(entry)
+    submitted = {CONF_RETAIL_PRICE_MODEL: new_model, CONF_RETAIL_FIXED_ORE: 80.0,
+                 CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"}
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**submitted)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_RETAIL_PRICE_MODEL: new_model}
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_RETAIL_PRICE_MODEL] == new_model
+    for key in dropped:
+        assert key not in updated.data, key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, field, code",
+    [
+        ({CONF_GRID_VAR_PEAK_ORE: 40.0}, CONF_GRID_VAR_ORE, "grid_var_peak_requires_base"),
+        ({CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 40.0,
+          CONF_GRID_FEE_PEAK_START_HOUR: 22.0, CONF_GRID_FEE_PEAK_END_HOUR: 6.0},
+         CONF_GRID_FEE_PEAK_START_HOUR, "peak_hours_invalid"),
+        ({CONF_GRID_BENEFIT_ORE: 5.0, CONF_GRID_BENEFIT_PEAK_START_HOUR: 10.0,
+          CONF_GRID_BENEFIT_PEAK_END_HOUR: 10.0},
+         CONF_GRID_BENEFIT_PEAK_START_HOUR, "peak_hours_invalid"),
+        ({CONF_RETAIL_PRICE_MODEL: "month"}, CONF_RETAIL_PRICE_MODEL_SINCE, "retail_since_invalid"),
+        ({CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"},
+         CONF_RETAIL_FIXED_ORE, "retail_fixed_invalid"),
+    ],
+    ids=["peak-needs-base", "fee-hours", "benefit-hours", "month-needs-date", "fixed-needs-price"],
+)
+async def test_options_market_rules_are_said_before_sending(
+    hass: HomeAssistant, fields, field: str, code: str
+) -> None:
+    """At the field AND on base (the field sits in a section the frontend may not render field
+    errors for), the section open, nothing sent."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        assert _section_options(result, "tariffs")["collapsed"] is True
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**fields)))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {field: code, "base": code}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_a_legacy_peak_without_base_does_not_block_an_unrelated_save(
+    hass: HomeAssistant,
+) -> None:
+    """Checked only when the save touches one of the fields, like the server."""
+    entry = _make_mock_entry(hass, extra_data={CONF_GRID_VAR_PEAK_ORE: 40.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_GRID_VAR_PEAK_ORE: 40.0, CONF_RESERVE_PCT: 10.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_RESERVE_PCT: 10.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail, fields, field, code",
+    [
+        (_PEAK_BASE_DETAIL, _FEE_CALENDAR, CONF_GRID_VAR_ORE, "grid_var_peak_requires_base"),
+        (_PEAK_HOURS_DETAIL, _FEE_CALENDAR, CONF_GRID_FEE_PEAK_START_HOUR, "peak_hours_invalid"),
+        (_PEAK_HOURS_DETAIL,
+         {CONF_GRID_BENEFIT_ORE: 5.0, CONF_GRID_BENEFIT_PEAK_START_HOUR: 7.0},
+         CONF_GRID_BENEFIT_PEAK_START_HOUR, "peak_hours_invalid"),
+        (_RETAIL_FIXED_DETAIL, {CONF_RETAIL_FIXED_ORE: 85.0},
+         CONF_RETAIL_FIXED_ORE, "retail_fixed_invalid"),
+        (_RETAIL_SINCE_DETAIL, {CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"},
+         CONF_RETAIL_PRICE_MODEL_SINCE, "retail_since_invalid"),
+        (_TARIFF_ZONE_DETAIL, _FEE_CALENDAR, CONF_GRID_VAR_PEAK_ORE, "tariff_zone_se_only"),
+    ],
+    ids=["peak-needs-base", "fee-hours", "benefit-hours", "fixed", "since", "zone"],
+)
+async def test_options_server_422_for_the_market_rules_shows_at_the_field_and_on_base(
+    hass: HomeAssistant, detail: str, fields, field: str, code: str
+) -> None:
+    """Never cannot_connect. The prechecks cannot see every case (a cache out of step with the
+    server, a rule that moved), so the server's own text is mapped to the same codes."""
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError(detail, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**fields)))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {field: code, "base": code}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+
+
+@pytest.mark.parametrize(
+    "detail, code",
+    [
+        (_PEAK_BASE_DETAIL, "grid_var_peak_requires_base"),
+        (_PEAK_HOURS_DETAIL, "peak_hours_invalid"),
+        (_RETAIL_FIXED_DETAIL, "retail_fixed_invalid"),
+        (_RETAIL_SINCE_DETAIL, "retail_since_invalid"),
+        (_TARIFF_ZONE_DETAIL, "tariff_zone_se_only"),
+        # Plain letters, as a server that does not escape would send them.
+        ('HTTP 422 from x: {"detail":"retail_fixed_ore krävs med retail_price_model fixed"}',
+         "retail_fixed_invalid"),
+        # Another 422 that names the same fields (a type error) is not these rules.
+        ('HTTP 422 from x: {"detail":"retail_fixed_ore must be a number"}', None),
+        ('HTTP 422 from x: {"detail":"grid_var_peak_ore must be a number"}', None),
+        ('HTTP 422 from x: {"detail":"grid_var_pct kr\\u00e4ver grid_var_ore (n\\u00e4t)"}', None),
+    ],
+)
+def test_market_tariff_error_matches_the_rules_own_wording(detail: str, code) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.config_flow import _market_tariff_error
+
+    assert _market_tariff_error(WoltaApiError(detail, status=422)) == code
+    assert _market_tariff_error(WoltaApiError(detail, status=500)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields", [{CONF_GRID_VAR_ORE: 20.0, CONF_GRID_VAR_PEAK_ORE: 40.0},
+               {CONF_RETAIL_PRICE_MODEL: "month", CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01"}],
+    ids=["peak", "contract"],
+)
+async def test_options_market_change_refreshes_the_purchase_price(
+    hass: HomeAssistant, fields
+) -> None:
+    """The high-load fee and the contract change what the owner pays: the kept /profile/prices
+    answer was priced without them, so it is dropped and a fresh one fetched."""
+    entry = _make_mock_entry(hass)
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock()
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**fields)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done(wait_background_tasks=True)
+    names = [c[0] for c in mock_coordinator.prices.mock_calls]
+    assert names == ["async_forget_purchase", "async_request_refresh"]
+
+
+def test_every_market_field_is_a_price_key_and_a_synced_field() -> None:
+    from custom_components.wolta.config_flow import _TARIFF_PRICE_KEYS
+    from custom_components.wolta.coordinator import _PROFILE_SYNC_KEYS
+
+    for field in _MARKET_FIELDS:
+        assert field in _TARIFF_PRICE_KEYS, field
+        assert field in _PROFILE_SYNC_KEYS, field
+
+
+_CACHED_MARKET = {
+    CONF_GRID_VAR_PEAK_ORE: 61.2,
+    CONF_GRID_FEE_PEAK_START_HOUR: 7, CONF_GRID_FEE_PEAK_END_HOUR: 22,
+    CONF_GRID_FEE_PEAK_HOLIDAYS: "public",
+    CONF_GRID_BENEFIT_PEAK_START_HOUR: 6, CONF_GRID_BENEFIT_PEAK_END_HOUR: 21,
+    CONF_GRID_BENEFIT_PEAK_HOLIDAYS: "none",
+    CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 85.0,
+    CONF_RETAIL_PRICE_MODEL_SINCE: "2026-01-01",
+}
+
+
+@pytest.mark.asyncio
+async def test_reauth_sends_the_cached_market_fields(hass: HomeAssistant) -> None:
+    """A surviving row keeps the server's values and ignores these; a row created after a purge
+    takes them from here, so the cache is the only copy."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(hass, {**_REAUTH_BASE, **_CACHED_MARKET}, mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    for key, value in _CACHED_MARKET.items():
+        assert kwargs[key] == value, key
+
+
+@pytest.mark.asyncio
+async def test_reauth_without_market_fields_sends_none(hass: HomeAssistant) -> None:
+    mock_client = _mock_client("new-token")
+    await _start_reauth(hass, dict(_REAUTH_BASE), mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    for key in _MARKET_FIELDS:
+        assert kwargs[key] is None, key
+
+
+@pytest.mark.asyncio
+async def test_reauth_outside_se1_se4_does_not_send_cached_market_fields(
+    hass: HomeAssistant,
+) -> None:
+    """The server refuses them outside SE1-SE4 (422), which would block the reauth for a cache
+    that outlived a zone correction."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(hass, {**_REAUTH_BASE, CONF_ZONE: "FI", **_CACHED_MARKET}, mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    for key in _MARKET_FIELDS:
+        assert kwargs[key] is None, key
+
+
+@pytest.mark.asyncio
+async def test_link_flow_mirrors_the_market_fields(hass: HomeAssistant) -> None:
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value={**LINK_PROFILE, **_CACHED_MARKET})
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+
+    with _patched(mock_client):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "link"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": LINK_TOKEN})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], STEP_ENTITIES_DATA)
+
+    for key, value in _CACHED_MARKET.items():
+        assert result["data"][key] == value, key

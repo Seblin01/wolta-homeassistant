@@ -55,6 +55,17 @@ _SALE_COMPONENTS = {
     "export_extra_ore": -1.0,
     "export_extra_pct": None,
     "export_credit_ore": {"2026": 0.0},
+    # Market adaptation: handed over as the server sends them.
+    "grid_var_peak_ore": 61.2,
+    "grid_fee_peak_start_hour": 6,
+    "grid_fee_peak_end_hour": 22,
+    "grid_fee_peak_holidays": "public_eves",
+    "grid_benefit_peak_start_hour": 6,
+    "grid_benefit_peak_end_hour": 22,
+    "grid_benefit_peak_holidays": "public_eves",
+    "retail_price_model": "quarter",
+    "retail_fixed_ore": None,
+    "retail_price_model_since": None,
 }
 
 
@@ -64,7 +75,11 @@ def _frozen_now(freezer) -> None:
 
 
 def _pt(ts, spot, purchase, sale, peak, *, with_purchase=True):
-    point = {"ts_utc": ts, "spot_ore_kwh": spot, "sale_ore_kwh": sale, "grid_peak": peak}
+    # `peak` is the SALE side's high-load flag (grid_benefit_peak). The purchase side has its own
+    # calendar (grid_fee_peak); here it is the opposite, so a series that read the other side's
+    # flag would show.
+    point = {"ts_utc": ts, "spot_ore_kwh": spot, "sale_ore_kwh": sale,
+             "grid_benefit_peak": peak, "grid_fee_peak": not peak}
     if with_purchase:
         point["purchase_ore_kwh"] = purchase
     return point
@@ -137,14 +152,14 @@ def _utc(*args) -> datetime:
 # --- sale series / current ----------------------------------------------------
 
 
-def test_sale_series_is_sek_per_kwh_with_grid_peak_and_keeps_null_sale():
+def test_sale_series_is_sek_per_kwh_with_grid_benefit_peak_and_keeps_null_sale():
     resp = _response()
     resp["tomorrow"][0]["sale_ore_kwh"] = None
 
     assert sale_series(resp) == [
-        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_peak": False},
-        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_peak": True},
-        {"start": "2026-10-27T10:00:00Z", "sale": None, "spot": 0.3, "grid_peak": False},
+        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_benefit_peak": False},
+        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_benefit_peak": True},
+        {"start": "2026-10-27T10:00:00Z", "sale": None, "spot": 0.3, "grid_benefit_peak": False},
     ]
 
 
@@ -160,19 +175,39 @@ def test_sale_series_tolerates_garbage(bad):
     assert sale_series(bad) == []
 
 
-def test_sale_series_tolerates_non_numeric_values_and_a_missing_grid_peak():
+def test_sale_series_tolerates_non_numeric_values_and_a_missing_grid_benefit_peak():
     resp = _response()
     resp["today"][0]["sale_ore_kwh"] = True
     resp["today"][0]["spot_ore_kwh"] = "52"
-    del resp["today"][0]["grid_peak"]
+    del resp["today"][0]["grid_benefit_peak"]
 
     assert sale_series(resp)[0] == {
-        "start": "2026-10-26T10:00:00Z", "sale": None, "spot": None, "grid_peak": None}
+        "start": "2026-10-26T10:00:00Z", "sale": None, "spot": None, "grid_benefit_peak": None}
 
 
-def test_purchase_series_is_unchanged_by_the_new_fields():
+def test_purchase_series_carries_the_purchase_sides_own_peak_flag():
+    """grid_fee_peak (the fee calendar), never the sale side's grid_benefit_peak."""
     assert purchase_series(_response())[0] == {
-        "start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523}
+        "start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee_peak": True}
+    assert [p["grid_fee_peak"] for p in purchase_series(_response())] == [True, False, True]
+    assert all("grid_benefit_peak" not in p for p in purchase_series(_response()))
+    assert all("grid_fee_peak" not in p for p in sale_series(_response()))
+
+
+def test_the_old_grid_peak_key_is_not_read_any_more():
+    """grid_peak was never released: an answer that only has it gives no flag."""
+    resp = _response()
+    for point in resp["today"] + resp["tomorrow"]:
+        point["grid_peak"] = True
+        del point["grid_benefit_peak"], point["grid_fee_peak"]
+    assert [p["grid_benefit_peak"] for p in sale_series(resp)] == [None, None, None]
+    assert [p["grid_fee_peak"] for p in purchase_series(resp)] == [None, None, None]
+
+
+def test_purchase_series_flag_is_none_for_a_non_boolean():
+    resp = _response()
+    resp["today"][0]["grid_fee_peak"] = "yes"
+    assert purchase_series(resp)[0]["grid_fee_peak"] is None
 
 
 def test_current_sale_follows_the_quarter_in_utc():
@@ -215,16 +250,16 @@ def test_sale_forecast_series_marks_forecast_points_and_never_repeats_a_timestam
     series = with_forecast_series(_response(), "sale")
 
     assert series == [
-        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_peak": False,
+        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_benefit_peak": False,
          "forecast": False},
-        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_peak": True,
+        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_benefit_peak": True,
          "forecast": False},
         # 2026-10-27T10:00 is tomorrow's published price; the forecast copy (999) loses.
-        {"start": "2026-10-27T10:00:00Z", "sale": 0.38, "spot": 0.3, "grid_peak": False,
+        {"start": "2026-10-27T10:00:00Z", "sale": 0.38, "spot": 0.3, "grid_benefit_peak": False,
          "forecast": False},
-        {"start": "2026-10-27T11:00:00Z", "sale": 0.33, "spot": 0.25, "grid_peak": True,
+        {"start": "2026-10-27T11:00:00Z", "sale": 0.33, "spot": 0.25, "grid_benefit_peak": True,
          "forecast": True, "horizon": 1},
-        {"start": "2026-10-28T10:00:00Z", "sale": 0.275, "spot": 0.2, "grid_peak": False,
+        {"start": "2026-10-28T10:00:00Z", "sale": 0.275, "spot": 0.2, "grid_benefit_peak": False,
          "forecast": True, "horizon": 2},
     ]
     starts = [p["start"] for p in series]
@@ -235,14 +270,16 @@ def test_purchase_forecast_series_has_purchase_and_the_same_marking():
     series = with_forecast_series(_response(), "purchase")
 
     assert series[0] == {
-        "start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "forecast": False}
+        "start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee_peak": True,
+        "forecast": False}
     assert series[2] == {
-        "start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "forecast": False}
+        "start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "grid_fee_peak": True,
+        "forecast": False}
     assert series[3] == {
-        "start": "2026-10-27T11:00:00Z", "purchase": 1.0, "spot": 0.25, "forecast": True,
-        "horizon": 1}
+        "start": "2026-10-27T11:00:00Z", "purchase": 1.0, "spot": 0.25, "grid_fee_peak": False,
+        "forecast": True, "horizon": 1}
     assert [p.get("horizon") for p in series] == [None, None, None, 1, 2]
-    assert all("grid_peak" not in p for p in series)
+    assert all("grid_benefit_peak" not in p for p in series)
 
 
 def test_forecast_series_without_a_forecast_is_just_the_published_prices():
@@ -435,9 +472,9 @@ async def test_sale_sensor_state_attributes_and_unit(
     assert state.attributes["components"] == _SALE_COMPONENTS
     assert state.attributes["tomorrow_complete"] is False
     assert state.attributes["prices"] == [
-        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_peak": False},
-        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_peak": True},
-        {"start": "2026-10-27T10:00:00Z", "sale": 0.38, "spot": 0.3, "grid_peak": False},
+        {"start": "2026-10-26T10:00:00Z", "sale": 0.6035, "spot": 0.523, "grid_benefit_peak": False},
+        {"start": "2026-10-26T10:15:00Z", "sale": 0.68, "spot": 0.6, "grid_benefit_peak": True},
+        {"start": "2026-10-27T10:00:00Z", "sale": 0.38, "spot": 0.3, "grid_benefit_peak": False},
     ]
     # Published prices only: no forecast key, nothing to filter out.
     assert "forecast_source" not in state.attributes
@@ -630,7 +667,8 @@ async def test_forecast_sensors_carry_forecast_points_source_and_attribution(
     assert [p["forecast"] for p in sale_fc.attributes["prices"]] == [False] * 3 + [True] * 2
     assert [p.get("horizon") for p in sale_fc.attributes["prices"]] == [None] * 3 + [1, 2]
     assert [p["forecast"] for p in purchase_fc.attributes["prices"]] == [False] * 3 + [True] * 2
-    assert sale_fc.attributes["prices"][-1]["grid_peak"] is False
+    assert sale_fc.attributes["prices"][-1]["grid_benefit_peak"] is False
+    assert purchase_fc.attributes["prices"][-1]["grid_fee_peak"] is True
     for state in (purchase_fc, sale_fc):
         assert state.attributes["forecast_source"] == FORECAST_SOURCE
         assert state.attributes["attribution"] == f"Price source {FORECAST_SOURCE}"
@@ -668,7 +706,7 @@ async def test_forecast_sensors_work_against_a_server_before_0_119_0(
     for key in ("sale_available", "sale_reason", "forecast", "forecast_source"):
         del resp[key]
     for point in resp["today"] + resp["tomorrow"]:
-        del point["sale_ore_kwh"], point["grid_peak"]
+        del point["sale_ore_kwh"], point["grid_benefit_peak"], point["grid_fee_peak"]
     await _setup_sensors(
         hass, aioclient_mock, (PURCHASE_ID, PURCHASE_FC_ID, SALE_ID), purchase_json=resp)
 

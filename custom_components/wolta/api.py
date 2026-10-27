@@ -323,6 +323,16 @@ class WoltaApiClient:
         export_extra_pct: float | None = None,
         grid_benefit_ore: float | None = None,
         grid_benefit_peak_ore: float | None = None,
+        grid_var_peak_ore: float | None = None,
+        grid_fee_peak_start_hour: int | None = None,
+        grid_fee_peak_end_hour: int | None = None,
+        grid_fee_peak_holidays: str | None = None,
+        grid_benefit_peak_start_hour: int | None = None,
+        grid_benefit_peak_end_hour: int | None = None,
+        grid_benefit_peak_holidays: str | None = None,
+        retail_price_model: str | None = None,
+        retail_fixed_ore: float | None = None,
+        retail_price_model_since: str | None = None,
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
@@ -368,6 +378,22 @@ class WoltaApiClient:
             payload["grid_benefit_ore"] = grid_benefit_ore
         if grid_benefit_peak_ore is not None:
             payload["grid_benefit_peak_ore"] = grid_benefit_peak_ore
+        # Market adaptation (api 0.119.0, SE1-SE4): the grid fee's high-load value, the two
+        # high-load calendars and the electricity contract. Same rule: hour 0 and a fixed price of
+        # 0 are answers, so only None is omitted, and a surviving row keeps the server's values.
+        market = {
+            "grid_var_peak_ore": grid_var_peak_ore,
+            "grid_fee_peak_start_hour": grid_fee_peak_start_hour,
+            "grid_fee_peak_end_hour": grid_fee_peak_end_hour,
+            "grid_fee_peak_holidays": grid_fee_peak_holidays,
+            "grid_benefit_peak_start_hour": grid_benefit_peak_start_hour,
+            "grid_benefit_peak_end_hour": grid_benefit_peak_end_hour,
+            "grid_benefit_peak_holidays": grid_benefit_peak_holidays,
+            "retail_price_model": retail_price_model,
+            "retail_fixed_ore": retail_fixed_ore,
+            "retail_price_model_since": retail_price_model_since,
+        }
+        payload.update({key: value for key, value in market.items() if value is not None})
         # Plain `is not None` (not `or None`): reserve_pct=0 is a legitimate value
         # (a user whose control system keeps zero reserve floor) and must reach
         # the backend, not be swallowed as "unset". Mirrors the tariff fields above.
@@ -456,9 +482,12 @@ class WoltaApiClient:
         purchase price per quarter-hour for today and tomorrow, in öre/kWh INCLUDING VAT
         (`purchase_ore_kwh`) next to the spot price EXCLUDING VAT (`spot_ore_kwh`), plus
         `available`, `reason` (why it is not available) and `components`. Server >= 0.119.0
-        adds the sale price (`sale_ore_kwh`, öre/kWh EXCLUDING VAT, with `grid_peak` per
-        point, `sale_available` / `sale_reason`) and `forecast` days. Null when the body is not
-        a JSON object.
+        adds the sale price (`sale_ore_kwh`, öre/kWh EXCLUDING VAT, `sale_available` /
+        `sale_reason`) and `forecast` days, and per point two high-load flags, one per side:
+        `grid_fee_peak` (the grid fee you pay) and `grid_benefit_peak` (the benefit you are
+        paid). With a monthly-price contract the purchase side has no quarter-hour price
+        (`available` false, `reason` `monthly_price_contract`). Null when the body is not a
+        JSON object.
 
         Read-only on the server. A 404 (unknown token, a profile that is not an integration
         profile, or a server before 0.118.0) arrives as WoltaAuthError and a 429 as
