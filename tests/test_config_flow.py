@@ -6130,6 +6130,57 @@ async def test_options_answered_contract_has_no_not_stated_choice(
     mock_client.patch_profile.assert_not_awaited()
 
 
+_UNTYPED_EVENTS = [
+    {"date": None, "retail_price_model": None, "surcharge_ore": 4.0},
+    {"date": "2026-10-27", "retail_price_model": None, "surcharge_ore": 6.0},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice, sent", [("not_stated", None),
+                                          ("month", {CONF_RETAIL_PRICE_MODEL: "month"}),
+                                          ("quarter", {CONF_RETAIL_PRICE_MODEL: "quarter"})],
+                         ids=["untouched", "month", "quarter"])
+async def test_options_history_without_a_type_today_offers_not_stated(
+    hass: HomeAssistant, choice, sent
+) -> None:
+    """Server ruling 22: a markup change on a plant without a contract type gives history entries
+    without a type, and the server mirrors no type. Today's entry has no type, so the select still
+    leads with "not stated" and starts on it; an untouched save PATCHes nothing, and a chosen type
+    is sent, the quarter-hour price included (the server then gives every entry that type)."""
+    entry, mock_client = _unanswered_entry(hass, retail_events=_UNTYPED_EVENTS)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        marker, sel = _tariff_field(result, CONF_RETAIL_PRICE_MODEL)
+        assert _selector_values(sel) == ["not_stated", "quarter", "month", "fixed"]
+        assert marker.default() == "not_stated"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_SURCHARGE_ORE: 6.0, CONF_RETAIL_PRICE_MODEL: choice})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    if sent is None:
+        mock_client.patch_profile.assert_not_awaited()
+    else:
+        assert mock_client.patch_profile.call_args.kwargs == sent
+
+
+@pytest.mark.parametrize("events, expected", [
+    # Today's entry has a type (an older one has none): answered, no "not stated".
+    ([_UNTYPED_EVENTS[0], {**_UNTYPED_EVENTS[1], "retail_price_model": "month"}], False),
+    # Order in the list does not matter: today's entry is the one with the latest date, and the
+    # entry "from the start" is the earliest whatever its place.
+    ([_UNTYPED_EVENTS[1], {**_UNTYPED_EVENTS[0], "retail_price_model": "month"}], True),
+    # A malformed history counts as none: the scalar decides (None here).
+    (["x"], True),
+], ids=["today-typed", "unsorted", "malformed"])
+def test_contract_unanswered_reads_todays_entry(events, expected) -> None:
+    from custom_components.wolta.config_flow import _contract_unanswered
+    assert _contract_unanswered({CONF_RETAIL_PRICE_MODEL: None, "retail_events": events}) is expected
+    # Without a history the scalar decides, as before.
+    assert _contract_unanswered({CONF_RETAIL_PRICE_MODEL: "quarter"}) is False
+    assert _contract_unanswered({}) is True
+
+
 @pytest.mark.asyncio
 async def test_options_unanswered_contract_fixed_price_is_sent_as_before(
     hass: HomeAssistant,

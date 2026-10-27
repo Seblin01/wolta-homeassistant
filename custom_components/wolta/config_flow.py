@@ -299,18 +299,28 @@ _CONTRACT_KEYS = (CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE)
 _SELECT_DEFAULTS = {
     CONF_RETAIL_PRICE_MODEL: DEFAULT_RETAIL_PRICE_MODEL,
 }
-# The contract type's extra choice while the server has none stored and no contract history (code
-# review C1). The server counts the type as unanswered then (its ruling 14: the first answer
-# applies to all of the history) and prices it as a quarter-hour price; an answer is stored
-# literally, "quarter" included (ruling 15). Without this choice the select showed "Quarter-hour
-# price" as its default and never sent it, so an owner on a quarter-hour price could not say so.
-# A form value only: never sent to the server, never cached.
+# The contract type's extra choice while the contract that applies today has no type (code review
+# C1, server rulings 14, 15 and 22). The server prices a contract without a type as a quarter-hour
+# price and keeps it without a type in the contract history: a markup change gives an entry with
+# no type, and the first type chosen while no entry has one applies to every entry, each with its
+# own markup. An answer is stored literally, "quarter" included (ruling 15). Without this choice
+# the select showed "Quarter-hour price" as its default and never sent it, so an owner on a
+# quarter-hour price could not say so. A form value only: never sent to the server, never cached.
 _RETAIL_NOT_STATED = "not_stated"
 
 
 def _contract_unanswered(server: dict[str, Any]) -> bool:
-    """Whether the server has neither a contract type nor a contract history for the plant."""
-    return server.get(CONF_RETAIL_PRICE_MODEL) is None and not server.get(KEY_RETAIL_EVENTS)
+    """Whether the contract that applies today has no type: today's entry of the contract history
+    (the one with the latest date; "from the start" is the earliest) when there is one, else the
+    server's scalar contract type. The server mirrors today's entry in the scalar, so both say the
+    same; the history is read so that a history whose today's entry has no type still offers "not
+    stated" (server ruling 22). A malformed history counts as none."""
+    events = server.get(KEY_RETAIL_EVENTS)
+    posts = [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
+    if posts:
+        today = max(posts, key=lambda e: (e.get("date") is not None, str(e.get("date") or "")))
+        return today.get(CONF_RETAIL_PRICE_MODEL) is None
+    return server.get(CONF_RETAIL_PRICE_MODEL) is None
 
 
 def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -1915,7 +1925,7 @@ class WoltaOptionsFlow(OptionsFlow):
                     val = flat.get(key)
                     server_val = self._server.get(key)
                     if key == CONF_RETAIL_PRICE_MODEL and val == _RETAIL_NOT_STATED:
-                        # Only offered while the server has no answer: nothing to send.
+                        # Only offered while today's contract has no type: nothing to send.
                         continue
                     if (key == CONF_RETAIL_PRICE_MODEL and val
                             and _contract_unanswered(self._server)):
@@ -2235,7 +2245,7 @@ class WoltaOptionsFlow(OptionsFlow):
             its label: the select validates against its options, so without it the injected value
             would be refused and no save could pass. Untouched, it is sent back unchanged and the
             diff finds nothing to PATCH. With `not_stated` the select leads with "not stated" and
-            starts on it (the server has no answer; see _RETAIL_NOT_STATED)."""
+            starts on it (today's contract has no type; see _RETAIL_NOT_STATED)."""
             if not_stated:
                 current = _RETAIL_NOT_STATED
                 options = [_RETAIL_NOT_STATED, *known]
@@ -2258,9 +2268,10 @@ class WoltaOptionsFlow(OptionsFlow):
         if contract_asked:
             tariff_rows += [
                 # default (not suggested_value), like the energy-tax select: it always carries a
-                # value, so the form always submits one. Without a stored type or history it is
-                # "not stated" (an untouched save sends nothing); otherwise the server's type, or
-                # the quarter-hour price when the server mirrors none.
+                # value, so the form always submits one. While today's contract has no type (no
+                # stored type, or a history whose today's entry has none) it is "not stated" (an
+                # untouched save sends nothing); otherwise the server's type, or the quarter-hour
+                # price when the server mirrors none.
                 _select_row(CONF_RETAIL_PRICE_MODEL, RETAIL_PRICE_MODELS,
                             DEFAULT_RETAIL_PRICE_MODEL, CONF_RETAIL_PRICE_MODEL,
                             SelectSelectorMode.LIST, not_stated=_contract_unanswered(srv)),

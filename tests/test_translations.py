@@ -625,19 +625,19 @@ def test_from_today_is_qualified_by_the_first_answer_everywhere(path: Path) -> N
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
 def test_contract_help_names_both_first_answers_that_apply_to_all_history(path: Path) -> None:
-    """Ruling 14: only two answers apply from the start of the history: the first contract type,
-    when none is stored yet, and a markup entered for the first time without changing the
-    contract type. Everything after that applies from today. Dropping either condition overstates
+    """Ruling 14 (widened by ruling 22): only two answers apply from the start of the history: the
+    first contract type, while no contract in the history has one, and a markup entered for the
+    first time without changing the contract type. Everything after that applies from today. Dropping either condition overstates
     or understates what a save does."""
     text = _tariffs(path)["data_description"]["retail_price_model"]
     if path.name == "sv.json":
         needles = ("hela din historik", "den första avtalstypen du väljer",
-                   "om Wolta inte har någon sparad för dig än",
+                   "så länge inget avtal i historiken har någon",
                    "ett påslag du anger för första gången utan att byta avtalstyp",
                    "Därefter gäller en ändring från i dag")
     else:
         needles = ("apply to all of your history", "the first contract type you choose",
-                   "if Wolta has none stored for you yet",
+                   "while no contract in your history has one",
                    "a markup you enter for the first time without changing the contract type",
                    "After that, a change applies from today")
     for needle in needles:
@@ -695,6 +695,51 @@ def test_contract_help_says_what_not_stated_means(path: Path) -> None:
     else:
         needle = (f"{label}: Wolta counts quarter-hour price until you choose; your first choice "
                   "applies to all of your history.")
+    assert needle in text, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_contract_help_says_not_stated_stays_in_the_history(path: Path) -> None:
+    """Server ruling 22: a markup change keeps the type not stated, in the contract history too,
+    and the first type chosen while no contract has one gives every contract that type with its
+    own markup. The old condition ("if Wolta has none stored for you yet") is gone: with a history
+    of contracts without a type the first choice still applies to all of them."""
+    text = _tariffs(path)["data_description"]["retail_price_model"]
+    if path.name == "sv.json":
+        needles = ("En ändring av påslaget lämnar avtalstypen inte angiven, också i avtalshistoriken",
+                   "varje avtal i historiken den typen, vart och ett med sitt påslag",
+                   "så länge inget avtal i historiken har någon")
+        gone = "om Wolta inte har någon sparad för dig än"
+    else:
+        needles = ("A markup change keeps the contract type not stated, in your contract history too",
+                   "every contract in the history that type, each with its own markup",
+                   "while no contract in your history has one")
+        gone = "if Wolta has none stored for you yet"
+    for needle in needles:
+        assert needle in text, (path.name, needle)
+    assert gone not in text, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_grid_benefit_help_says_price_lists_change_on_1_january(path: Path) -> None:
+    """Final review M2: the grid benefit usually changes with the network operator's price list
+    on 1 January, and the date of the change is entered on wolta.se."""
+    text = _tariffs(path)["data_description"]["grid_benefit_ore"]
+    needle = {"sv.json": "Nätföretagens prislistor ändras oftast 1 januari – ange datumet på wolta.se.",
+              }.get(path.name, "Network operators' price lists usually change on 1 January – enter "
+                               "the date on wolta.se.")
+    assert needle in text, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_export_split_issue_says_the_answer_corrects_all_history(path: Path) -> None:
+    """Server ruling 21: the answer to the split question (the grid benefit and the corrected
+    terms saved together) applies from the start, so the amount is counted once."""
+    text = _at(_load(path), ("issues", "export_split_unclear", "description"))
+    needle = {"sv.json": "Ditt svar rättar hela din historik: sparade tillsammans gäller nätnyttan "
+                         "och de rättade villkoren från början"}.get(
+        path.name, "Your answer corrects all of your history: saved together, the grid benefit "
+                   "and the corrected terms apply from the start")
     assert needle in text, path.name
 
 
