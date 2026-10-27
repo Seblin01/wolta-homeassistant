@@ -690,11 +690,13 @@ def test_contract_help_says_what_not_stated_means(path: Path) -> None:
     text = _tariffs(path)["data_description"]["retail_price_model"]
     label = data["selector"]["retail_price_model"]["options"]["not_stated"]
     if path.name == "sv.json":
-        needle = (f"{label}: Wolta räknar med kvartspris tills du väljer, och ditt första val "
-                  "gäller hela din historik.")
+        # Residual 5: bara när inget avtal har en typ än; på en blandad historik gäller typen
+        # från i dag.
+        needle = (f"{label}: Wolta räknar med kvartspris tills du väljer. Om inget av dina avtal "
+                  "har en typ än gäller ditt första val hela din historik")
     else:
-        needle = (f"{label}: Wolta counts quarter-hour price until you choose; your first choice "
-                  "applies to all of your history.")
+        needle = (f"{label}: Wolta counts quarter-hour price until you choose. If none of your "
+                  "contracts has a type yet, your first choice applies to all of your history")
     assert needle in text, path.name
 
 
@@ -706,14 +708,19 @@ def test_contract_help_says_not_stated_stays_in_the_history(path: Path) -> None:
     of contracts without a type the first choice still applies to all of them."""
     text = _tariffs(path)["data_description"]["retail_price_model"]
     if path.name == "sv.json":
-        needles = ("En ändring av påslaget lämnar avtalstypen inte angiven, också i avtalshistoriken",
+        needles = ("en ändring av påslaget lämnar avtalstypen inte angiven, också i avtalshistoriken",
                    "varje avtal i historiken den typen, vart och ett med sitt påslag",
-                   "så länge inget avtal i historiken har någon")
+                   "så länge inget avtal i historiken har någon",
+                   # Beslut 24: fastpris bara utan påslag i de otypade avtalen.
+                   "Fastpris gör det bara om inget av de avtalen har ett påslag",
+                   "annars gäller fastpriset från i dag")
         gone = "om Wolta inte har någon sparad för dig än"
     else:
-        needles = ("A markup change keeps the contract type not stated, in your contract history too",
+        needles = ("a markup change keeps the contract type not stated, in your contract history too",
                    "every contract in the history that type, each with its own markup",
-                   "while no contract in your history has one")
+                   "while no contract in your history has one",
+                   "A fixed price does so only if none of those contracts has a markup",
+                   "otherwise the fixed price applies from today")
         gone = "if Wolta has none stored for you yet"
     for needle in needles:
         assert needle in text, (path.name, needle)
@@ -736,10 +743,13 @@ def test_export_split_issue_says_the_answer_corrects_all_history(path: Path) -> 
     """Server ruling 21: the answer to the split question (the grid benefit and the corrected
     terms saved together) applies from the start, so the amount is counted once."""
     text = _at(_load(path), ("issues", "export_split_unclear", "description"))
-    needle = {"sv.json": "Ditt svar rättar hela din historik: sparade tillsammans gäller nätnyttan "
-                         "och de rättade villkoren från början"}.get(
-        path.name, "Your answer corrects all of your history: saved together, the grid benefit "
-                   "and the corrected terms apply from the start")
+    # Residual 2: bara när villkoren saknar historik; med en historik rättas den på wolta.se.
+    needle = {"sv.json": "Så länge elhandelns villkor inte har någon historik på wolta.se rättar ditt "
+                         "svar hela din historik: sparade tillsammans gäller nätnyttan och de rättade "
+                         "villkoren från början"}.get(
+        path.name, "While your retailer's terms have no history on wolta.se, your answer corrects "
+                   "all of your history: saved together, the grid benefit and the corrected terms "
+                   "apply from the start")
     assert needle in text, path.name
 
 

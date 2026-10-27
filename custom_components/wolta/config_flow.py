@@ -303,7 +303,9 @@ _SELECT_DEFAULTS = {
 # C1, server rulings 14, 15 and 22). The server prices a contract without a type as a quarter-hour
 # price and keeps it without a type in the contract history: a markup change gives an entry with
 # no type, and the first type chosen while no entry has one applies to every entry, each with its
-# own markup. An answer is stored literally, "quarter" included (ruling 15). Without this choice
+# own markup. A fixed price does so only when no such entry carries a markup (ruling 24: a markup
+# only exists in a spot contract); otherwise it applies from today. On a mixed history the server
+# applies a chosen type from today. An answer is stored literally, "quarter" included (ruling 15). Without this choice
 # the select showed "Quarter-hour price" as its default and never sent it, so an owner on a
 # quarter-hour price could not say so. A form value only: never sent to the server, never cached.
 _RETAIL_NOT_STATED = "not_stated"
