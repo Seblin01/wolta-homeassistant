@@ -321,6 +321,9 @@ class WoltaApiClient:
         export_extra_ore: float | None = None,
         grid_var_pct: float | None = None,
         export_extra_pct: float | None = None,
+        grid_benefit_ore: float | None = None,
+        retail_price_model: str | None = None,
+        retail_fixed_ore: float | None = None,
         reserve_pct: float | None = None,
         nameplate_kwh: float | None = None,
         nameplate_kw: float | None = None,
@@ -359,6 +362,19 @@ class WoltaApiClient:
             payload["grid_var_pct"] = grid_var_pct
         if export_extra_pct is not None:
             payload["export_extra_pct"] = export_extra_pct
+        # The owner's grid benefit (api 0.119.0, SE1-SE4). 0 is an answer ("none"), so only
+        # None is omitted. On a re-onboarding of a row that still exists the server keeps its
+        # own tariff and ignores this; a row created after a purge takes it from here.
+        if grid_benefit_ore is not None:
+            payload["grid_benefit_ore"] = grid_benefit_ore
+        # The electricity contract that applies today (api 0.119.0, SE1-SE4). Same rule: a fixed
+        # price of 0 is an answer, so only None is omitted, and a surviving row keeps the
+        # server's contract and its history. The time periods and the contract history are
+        # never sent from Home Assistant: they are edited on wolta.se.
+        if retail_price_model is not None:
+            payload["retail_price_model"] = retail_price_model
+        if retail_fixed_ore is not None:
+            payload["retail_fixed_ore"] = retail_fixed_ore
         # Plain `is not None` (not `or None`): reserve_pct=0 is a legitimate value
         # (a user whose control system keeps zero reserve floor) and must reach
         # the backend, not be swallowed as "unset". Mirrors the tariff fields above.
@@ -446,8 +462,14 @@ class WoltaApiClient:
         """GET /profile/prices (Bearer token; server >= 0.118.0): the owner's electricity
         purchase price per quarter-hour for today and tomorrow, in öre/kWh INCLUDING VAT
         (`purchase_ore_kwh`) next to the spot price EXCLUDING VAT (`spot_ore_kwh`), plus
-        `available`, `reason` (why it is not available) and `components`. Null when the
-        body is not a JSON object.
+        `available`, `reason` (why it is not available) and `components`. Server >= 0.119.0
+        adds the sale price (`sale_ore_kwh`, öre/kWh EXCLUDING VAT, `sale_available` /
+        `sale_reason`) and `forecast` days, and per point the grid fee and the grid benefit of
+        that quarter, öre/kWh EXCLUDING VAT (`grid_fee_ore`, the whole variable grid fee
+        including its percentage of spot, and `grid_benefit_ore`, the whole grid benefit
+        including its percentage of spot; null when the owner has not given the base price). With a monthly-price contract the purchase side has no quarter-hour price
+        (`available` false, `reason` `monthly_price_contract`). Null when the body is not a
+        JSON object.
 
         Read-only on the server. A 404 (unknown token, a profile that is not an integration
         profile, or a server before 0.118.0) arrives as WoltaAuthError and a 429 as

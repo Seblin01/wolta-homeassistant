@@ -31,7 +31,34 @@ CONF_COST_SEK = "cost_sek"
 CONF_PURCHASE_DATE = "purchase_date"
 CONF_GRID_VAR_ORE = "grid_var_ore"
 CONF_SURCHARGE_ORE = "surcharge_ore"
+# Since api 0.119.0 export_extra_ore is the RETAILER's terms for sold electricity (premium +,
+# deduction -), no longer a catch-all that also held the grid benefit. The owner's grid benefit
+# (nätnytta, the network operator's compensation for feeding in; öre/kWh excl. VAT) has a field of
+# its own. SE1-SE4 only.
 CONF_EXPORT_EXTRA_ORE = "export_extra_ore"
+CONF_GRID_BENEFIT_ORE = "grid_benefit_ore"
+# The electricity contract that applies today (api 0.119.0, SE1-SE4 only; the server owns every
+# rule and range): `quarter` (the default: the spot price per quarter-hour), `month` (the month's
+# average price, set after the fact) or `fixed` (a fixed price, retail_fixed_ore, which carries no
+# markup). The server keeps the contract history (retail_events) and mirrors today's entry into
+# these two fields and surcharge_ore; a change to them adds an entry dated today on the server.
+# The history itself, corrections back in time and the time periods below are edited on wolta.se.
+CONF_RETAIL_PRICE_MODEL = "retail_price_model"
+CONF_RETAIL_FIXED_ORE = "retail_fixed_ore"
+RETAIL_PRICE_MODELS = ("quarter", "month", "fixed")
+DEFAULT_RETAIL_PRICE_MODEL = "quarter"
+# Read-only here (shown as a summary in the options form, never sent from Home Assistant): the
+# time periods with a price of their own for the grid fee and the grid benefit, the contract
+# history and the sale side's history (spec 2026-10-27-marknadsanpassning Tillägg 5: the
+# retailer's terms per entry, export_events, and the grid benefit per entry, grid_benefit_events).
+# The base price (grid_var_ore / grid_benefit_ore) applies outside the periods. The server mirrors
+# today's sale entries into export_extra_ore and grid_benefit_ore / export_extra_pct, and a change
+# to those adds an entry dated today (or applies from the start: the server's rulings 18 and 19).
+KEY_GRID_FEE_PERIODS = "grid_fee_periods"
+KEY_GRID_BENEFIT_PERIODS = "grid_benefit_periods"
+KEY_RETAIL_EVENTS = "retail_events"
+KEY_EXPORT_EVENTS = "export_events"
+KEY_GRID_BENEFIT_EVENTS = "grid_benefit_events"
 # Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"

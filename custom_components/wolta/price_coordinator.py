@@ -1,6 +1,7 @@
 """Coordinator for the price endpoints: the public GET /api/v1/prices/now and, only while
 an entity has asked for them, GET /api/v1/prices/forecast (forecast sensor enabled) and
-GET /api/v1/profile/prices (purchase-price sensor enabled; needs the entry's profile token).
+GET /api/v1/profile/prices (a purchase- or sale-price sensor enabled; needs the entry's
+profile token).
 
 Deliberately separate from WoltaCoordinator. The price forecast is information for the
 user and must never influence the optimisation grade, so this module reads nothing the
@@ -8,11 +9,12 @@ grade, the upload or the profile use and writes nothing back to them. A failing 
 endpoint only makes the price sensors unavailable; it never touches the existing sensors.
 The forecast endpoint is an optional extra on top of /prices/now: when it fails, the
 coordinator keeps the /prices/now data and only the days beyond tomorrow are missing. The
-purchase-price endpoint is the same kind of optional extra: when it fails, the /prices/now
+/profile/prices endpoint is the same kind of optional extra: when it fails, the /prices/now
 data (and with it the spot sensors) is untouched and the coordinator keeps the last good
-priced purchase response for the same zone. The purchase-price sensor then keeps its price
-for as long as that series still covers the current quarter-hour (purchase_covers) and goes
-unavailable when it does not, or when there is nothing kept.
+priced response for the same zone (priced on the purchase side, the sale side or both). The
+purchase- and sale-price sensors then keep their price for as long as that series still
+covers the current quarter-hour (purchase_covers, sale_covers) and go unavailable when it
+does not, or when there is nothing kept.
 Nothing here is ever written back to the server.
 """
 
@@ -43,7 +45,7 @@ QUARTER = timedelta(minutes=15)
 # request failed or there was no forecast). Absent while no forecast sensor is enabled.
 FULL_FORECAST_KEY = "full_forecast"
 # Key under which the coordinator data carries the /profile/prices response (None when the
-# request failed). Absent while no purchase-price sensor is enabled.
+# request failed). Absent while none of the purchase/sale price sensors is enabled.
 PURCHASE_KEY = "purchase"
 
 
@@ -56,7 +58,7 @@ def _price(point: dict[str, Any]) -> float | None:
     return round(ore / 100, 5)
 
 
-def _purchase_ore(value: Any) -> float | None:
+def _ore_to_sek(value: Any) -> float | None:
     """SEK/kWh from an öre/kWh value of /profile/prices; None for a missing/null value (a
     quarter whose year has no energy-tax rule, no exchange rate, an unavailable purchase
     price) or anything that is not a number."""
@@ -175,34 +177,122 @@ def current_price(resp: dict[str, Any], now: datetime) -> float | None:
     return _price(best[1])
 
 
+def _forecast_days(purchase: dict[str, Any]) -> list[dict[str, Any]]:
+    """The forecast days of a /profile/prices response (`forecast`: [{date, horizon,
+    issued_at, points}]), well-formed ones only, in horizon order. A server before 0.119.0
+    has no such key and the result is empty."""
+    raw = purchase.get("forecast")
+    if not isinstance(raw, list):
+        return []
+    return sorted((d for d in raw if isinstance(d, dict)), key=_horizon)
+
+
+def forecast_day_info(purchase: Any) -> list[dict[str, Any]]:
+    """Per-day forecast metadata of a /profile/prices response: [{"date", "horizon",
+    "issued_at"}], no points (they are in the price series). Empty without a forecast."""
+    if not isinstance(purchase, dict):
+        return []
+    return [
+        {"date": day.get("date"), "horizon": _horizon(day), "issued_at": day.get("issued_at")}
+        for day in _forecast_days(purchase)
+    ]
+
+
+def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dict[str, Any]]:
+    """Points of a /profile/prices response for one price kind (`key`: "purchase" or
+    "sale"), today, then tomorrow, then (with_forecast) the forecast days; sorted by start
+    with no timestamp repeated, the first source winning, so a published price is never
+    replaced by a forecast copy of the same quarter. Never raises: the attributes are
+    rebuilt on every state write.
+
+    Every point has "start": ts_utc, the kind's price in SEK/kWh ("purchase" INCLUDING
+    VAT, "sale" EXCLUDING VAT, i.e. the server's öre/kWh / 100) and "spot" (SEK/kWh
+    EXCLUDING VAT) and the grid's part of that kind's price in SEK/kWh EXCLUDING VAT:
+    "grid_fee" on the purchase kind (the server's grid_fee_ore: the whole variable grid fee of
+    the quarter, its time-period or base price plus the percentage of spot, so nothing is added
+    here) and "grid_benefit" on the sale kind (grid_benefit_ore: the quarter's whole grid
+    benefit, its time-period or base price plus the percentage of spot, the server's
+    grid_benefit_term_ore, so nothing is added here either). None when the server sent none
+    (the owner has not given the base price, or the percentage could not be counted): never a
+    guess. The two follow their own time periods, so they can change at different quarters.
+    with_forecast adds "forecast": bool to every point and, on forecast points, "horizon"."""
+    if not isinstance(purchase, dict):
+        return []
+    series: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    field = f"{key}_ore_kwh"
+
+    def _add(points: list[dict[str, Any]], is_forecast: bool, horizon: int | None) -> None:
+        for point in points:
+            start = point["ts_utc"]
+            if start in seen:
+                continue
+            seen.add(start)
+            item: dict[str, Any] = {
+                "start": start,
+                key: _ore_to_sek(point.get(field)),
+                "spot": _ore_to_sek(point.get("spot_ore_kwh")),
+            }
+            grid_key = "grid_benefit" if key == "sale" else "grid_fee"
+            item[grid_key] = _ore_to_sek(point.get(f"{grid_key}_ore"))
+            if with_forecast:
+                item["forecast"] = is_forecast
+                if horizon is not None:
+                    item["horizon"] = horizon
+            series.append(item)
+
+    _add(_points(purchase, "today"), False, None)
+    _add(_points(purchase, "tomorrow"), False, None)
+    if with_forecast:
+        for day in _forecast_days(purchase):
+            _add(_points(day, "points"), True, _horizon(day))
+    series.sort(key=_start_key)
+    return series
+
+
 def purchase_series(purchase: Any) -> list[dict[str, Any]]:
     """Price points for the purchase-price sensor from a /profile/prices response: today,
     then tomorrow, sorted by start with no timestamp repeated (the first source wins).
 
     Each point is {"start": ts_utc, "purchase": SEK/kWh INCLUDING VAT | None, "spot":
-    SEK/kWh EXCLUDING VAT | None}. The two prices are on different VAT bases on purpose:
+    SEK/kWh EXCLUDING VAT | None, "grid_fee": SEK/kWh EXCLUDING VAT | None} (the quarter's whole
+    variable grid fee, so the owner can see why the price differs between quarters). The two
+    prices are on different VAT bases on purpose:
     the server's `purchase_ore_kwh` is what the owner pays (VAT on everything), its
     `spot_ore_kwh` is the market price the existing spot sensor also shows. Never raises:
     the attributes are rebuilt on every state write."""
-    if not isinstance(purchase, dict):
-        return []
-    series: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for key in ("today", "tomorrow"):
-        for point in _points(purchase, key):
-            start = point["ts_utc"]
-            if start in seen:
-                continue
-            seen.add(start)
-            series.append(
-                {
-                    "start": start,
-                    "purchase": _purchase_ore(point.get("purchase_ore_kwh")),
-                    "spot": _purchase_ore(point.get("spot_ore_kwh")),
-                }
-            )
-    series.sort(key=_start_key)
-    return series
+    return _profile_series(purchase, "purchase", with_forecast=False)
+
+
+def sale_series(purchase: Any) -> list[dict[str, Any]]:
+    """Price points for the sale-price sensor from the same response: {"start": ts_utc,
+    "sale": SEK/kWh EXCLUDING VAT | None, "spot": SEK/kWh EXCLUDING VAT | None,
+    "grid_benefit": SEK/kWh EXCLUDING VAT | None}. The sale price is what a private person is
+    paid per sold kWh: spot + grid benefit + retailer's terms + tax reduction, all without VAT
+    (the server's `sale_ore_kwh`, which is null when the sale side is unavailable).
+    `grid_benefit` is the whole grid benefit the quarter was priced with (its time-period price
+    or the base price, plus the percentage of spot), so the sale price is spot + grid_benefit +
+    the retailer's terms + the tax reduction."""
+    return _profile_series(purchase, "sale", with_forecast=False)
+
+
+def with_forecast_series(purchase: Any, key: str) -> list[dict[str, Any]]:
+    """purchase_series (key "purchase") or sale_series (key "sale") followed by the forecast
+    days of the response: today's and tomorrow's published points, then the forecast points
+    marked "forecast": True with their "horizon" (1 = tomorrow, 2, 3), in time order and
+    with no timestamp twice (the same contract as the spot forecast series)."""
+    if key not in ("purchase", "sale"):
+        raise ValueError(f"key must be 'purchase' or 'sale', not {key!r}")
+    return _profile_series(purchase, key, with_forecast=True)
+
+
+def purchase_has_points(purchase: Any) -> bool:
+    """True when the /profile/prices response holds any well-formed point for today or
+    tomorrow. An answer without any (a zone the server does not price, say) has nothing a
+    coverage check could be about."""
+    return isinstance(purchase, dict) and any(
+        _points(purchase, key) for key in ("today", "tomorrow")
+    )
 
 
 def purchase_covers(purchase: Any, now: datetime) -> bool:
@@ -235,7 +325,25 @@ def current_purchase(purchase: Any, now: datetime) -> float | None:
     if not isinstance(purchase, dict) or purchase.get("available") is not True:
         return None
     point = _covering_point(purchase, now)
-    return None if point is None else _purchase_ore(point.get("purchase_ore_kwh"))
+    return None if point is None else _ore_to_sek(point.get("purchase_ore_kwh"))
+
+
+def current_sale(purchase: Any, now: datetime) -> float | None:
+    """SEK/kWh (EXCLUDING VAT) of the quarter that covers `now`, computed locally from the
+    series like current_purchase. None when the server says the sale price is not available
+    (`sale_available` is not true: no grid benefit set, no exchange rate, a zone outside
+    SE1-SE4, or a server before API 0.119.0 that has no such field), no point covers `now`
+    or the covering point has no sale price."""
+    if not isinstance(purchase, dict) or purchase.get("sale_available") is not True:
+        return None
+    point = _covering_point(purchase, now)
+    return None if point is None else _ore_to_sek(point.get("sale_ore_kwh"))
+
+
+def sale_covers(purchase: Any, now: datetime) -> bool:
+    """True when a point of the response covers `now`. The same coverage as purchase_covers:
+    both prices come from the same quarter points, only the availability differs."""
+    return _covering_point(purchase, now) is not None
 
 
 class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -260,13 +368,14 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The same two things for the purchase-price endpoint.
         self._purchase_requests = 0
         self._purchase_failing = False
-        # (zone, response) of the last /profile/prices answer that carried prices
-        # (`available` true): served again while a poll fails, so one failed request does not
-        # blank a series that still covers now. Only a priced answer is kept (purchase_covers
-        # bounds it; an "available: false" answer has no coverage and would keep a stale
-        # `reason` for good), only for the zone it was fetched for (a zone correction does
-        # not reload the entry), and it is dropped on a tariff save (async_forget_purchase),
-        # which also keeps a request already in flight from storing the old tariff's answer.
+        # (zone, response) of the last /profile/prices answer that carried prices (the
+        # purchase side, `available`, or the sale side, `sale_available`, is true): served
+        # again while a poll fails, so one failed request does not blank a series that still
+        # covers now. Only a priced answer is kept (purchase_covers/sale_covers bound it; an
+        # answer with no price on either side would keep a stale `reason` for good), only
+        # for the zone it was fetched for (a zone correction does not reload the entry), and
+        # it is dropped on a tariff save (async_forget_purchase), which also keeps a request
+        # already in flight from storing the old tariff's answer.
         self._last_purchase: tuple[str, dict[str, Any]] | None = None
         # Bumped by every async_forget_purchase: a request that started before the bump is
         # answering for the old tariff, and its response is not kept.
@@ -291,7 +400,8 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @callback
     def async_request_purchase_prices(self) -> Callable[[], None]:
-        """Register interest in /profile/prices (the purchase price). While no registration
+        """Register interest in /profile/prices (the purchase and sale prices, with or
+        without the forecast: one request serves them all). While no registration
         exists the coordinator makes no such request. Returns the function that withdraws
         this registration (safe to call more than once)."""
         self._purchase_requests += 1
@@ -318,8 +428,9 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _fetch_purchase(self) -> dict[str, Any] | None:
         """/profile/prices with the entry's profile token. On a failure the last priced
-        response for the same zone, else None. Never raises: it only adds the purchase price,
-        so its failure (404 from a server before 0.118.0, 429, a network error) must not fail
+        response for the same zone (priced = the purchase side or the sale side has a price),
+        else None. Never raises: it only adds the purchase and sale prices, so its failure
+        (404 from a server before 0.118.0, 429, a network error) must not fail
         the coordinator and with it the spot price. The sensor decides whether the kept
         series still covers now. The token is read on every poll (a re-authentication
         replaces it) and only travels in the Authorization header; the error text carries
@@ -333,9 +444,9 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (WoltaApiError, aiohttp.ClientError, TimeoutError) as err:
             log = _LOGGER.debug if self._purchase_failing else _LOGGER.info
             log(
-                "Could not fetch the purchase price (%s); the purchase price sensor cannot "
-                "update until it works again (it shows prices it already has only for as "
-                "long as they cover the current quarter-hour)",
+                "Could not fetch the purchase price and the sale price (%s); the purchase price "
+                "and sale price sensors cannot update until it works again (they show prices "
+                "they already have only for as long as they cover the current quarter-hour)",
                 err,
             )
             self._purchase_failing = True
@@ -349,9 +460,10 @@ class WoltaPriceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # fetches the new one.
             return None
         if self._purchase_failing:
-            _LOGGER.info("The purchase price is available again")
+            _LOGGER.info("The purchase price and the sale price are available again")
             self._purchase_failing = False
-        self._last_purchase = (zone, purchase) if purchase.get("available") is True else None
+        priced = purchase.get("available") is True or purchase.get("sale_available") is True
+        self._last_purchase = (zone, purchase) if priced else None
         return purchase
 
     async def _fetch_full_forecast(self, zone: str) -> dict[str, Any] | None:

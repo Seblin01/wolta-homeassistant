@@ -1190,3 +1190,93 @@ async def test_create_profile_plain_409_is_not_plant_claimed(aioclient_mock: Aio
         await client.create_profile(zone="SE3", has_solar=False, share_profile=True,
                                     battery_kwh=10, battery_kw=5)
     assert not isinstance(exc.value, WoltaPlantClaimed)
+
+
+# ---------------------------------------------------------------------------
+# create_profile / patch_profile with the owner's grid benefit (api 0.119.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_profile_sends_the_grid_benefit_fields_including_zero(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """0 is an answer ("no grid benefit"), so it is sent; None is omitted."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False,
+        grid_benefit_ore=0.0, export_extra_ore=-3.0,
+    )
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    assert body["grid_benefit_ore"] == 0.0
+    assert body["export_extra_ore"] == -3.0
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_the_grid_benefit_when_none(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    assert "grid_benefit_ore" not in body
+
+
+@pytest.mark.asyncio
+async def test_patch_profile_passes_the_grid_benefit_through(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.patch(f"{BASE_URL}/api/v1/profile", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.patch_profile(
+        TOKEN, grid_benefit_ore=None, export_extra_ore=5.0)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "patch"][0][2]
+    assert body == {"grid_benefit_ore": None, "export_extra_ore": 5.0}
+
+
+# ---------------------------------------------------------------------------
+# create_profile / patch_profile with today's electricity contract (api 0.119.0). The time
+# periods and the contract history are never sent from Home Assistant.
+# ---------------------------------------------------------------------------
+
+_CONTRACT_PAYLOAD = {"retail_price_model": "fixed", "retail_fixed_ore": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_create_profile_sends_the_contract_including_zero(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """A fixed price of 0 is an answer, so only None is omitted."""
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False,
+        **_CONTRACT_PAYLOAD)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    for key, value in _CONTRACT_PAYLOAD.items():
+        assert body[key] == value, key
+        assert type(body[key]) is type(value), key
+
+
+@pytest.mark.asyncio
+async def test_create_profile_omits_the_contract_when_none(
+    aioclient_mock: AiohttpClientMocker,
+):
+    aioclient_mock.post(f"{BASE_URL}/api/v1/profile", status=201, json={"profile_token": TOKEN})
+    client = _client(aioclient_mock)
+    await client.create_profile(
+        zone="SE3", battery_kwh=22.0, battery_kw=5.0, has_solar=True, share_profile=False)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "post"][0][2]
+    for key in _CONTRACT_PAYLOAD:
+        assert key not in body, key
+
+
+@pytest.mark.asyncio
+async def test_patch_profile_passes_the_contract_through(aioclient_mock: AiohttpClientMocker):
+    aioclient_mock.patch(f"{BASE_URL}/api/v1/profile", status=200, json={})
+    client = _client(aioclient_mock)
+    await client.patch_profile(
+        TOKEN, retail_price_model="month", retail_fixed_ore=None)
+    body = [c for c in aioclient_mock.mock_calls if c[0].lower() == "patch"][0][2]
+    assert body == {"retail_price_model": "month", "retail_fixed_ore": None}

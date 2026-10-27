@@ -59,6 +59,11 @@ from .control_system_prefill import (
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
+    KEY_EXPORT_EVENTS,
+    KEY_GRID_BENEFIT_EVENTS,
+    KEY_GRID_BENEFIT_PERIODS,
+    KEY_GRID_FEE_PERIODS,
+    KEY_RETAIL_EVENTS,
     BATTERY_STATUS_NEEDS_INPUT,
     BATTERY_STATUS_NONE,
     BATTERY_STATUS_PENDING,
@@ -79,6 +84,7 @@ from .const import (
     CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_BENEFIT_ORE,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
@@ -89,6 +95,8 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
+    CONF_RETAIL_FIXED_ORE,
+    CONF_RETAIL_PRICE_MODEL,
     CONF_SHARE,
     CONF_SOC,
     CONF_SOC_ABSENT,
@@ -101,10 +109,12 @@ from .const import (
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
+    DEFAULT_RETAIL_PRICE_MODEL,
     DEFAULT_ZONE,
     DOMAIN,
     MIN_BATTERY_KW,
     MIN_BATTERY_KWH,
+    RETAIL_PRICE_MODELS,
     SUPPORTED_ZONES,
 )
 
@@ -245,6 +255,249 @@ def _is_grid_fixed_error(err: WoltaApiError) -> bool:
     happens to name both fields (a type error, say) is not this rule."""
     return (getattr(err, "status", None) == 422
             and _GRID_FIXED_RULE.search(str(err)) is not None)
+
+
+# The server's two 422s for the owner's grid benefit (api 0.119.0), each matched on the rule's own
+# wording (the "ä" plain or as the JSON escape, as for _GRID_FIXED_RULE) and mapped to the error
+# code the options form shows at the field:
+#   export_extra_pct kräver grid_benefit_ore (nätnyttans fasta del, 0 om du bara har procent)
+#   grid_benefit_ore gäller bara SE1–SE4
+_GRID_BENEFIT_RULES = (
+    (re.compile(r"export_extra_pct\s+kr(?:ä|\\u00e4)ver\s+grid_benefit_ore", re.IGNORECASE),
+     "grid_benefit_fixed_required"),
+    (re.compile(r"grid_benefit_ore\s+g(?:ä|\\u00e4)ller\s+bara", re.IGNORECASE),
+     "grid_benefit_zone"),
+)
+
+
+def _grid_benefit_error(err: WoltaApiError) -> str | None:
+    """The options-form error code for one of the server's grid-benefit 422s, else None.
+
+    Like _is_grid_fixed_error, the match is the rule's own wording and not just the field names:
+    another 422 that happens to name the same fields (a type error, say) is not these rules.
+    Both are shown at grid_benefit_ore, the field the owner has to fill in or clear."""
+    if getattr(err, "status", None) != 422:
+        return None
+    text = str(err)
+    for rule, code in _GRID_BENEFIT_RULES:
+        if rule.search(text):
+            return code
+    return None
+
+
+# The electricity contract that applies today (api 0.119.0), SE1-SE4 only: the contract type and
+# the fixed price. The markup (surcharge_ore) is part of the contract too, but exists in every
+# zone. The names are the profile's own, which are also the keyword names of
+# WoltaApiClient.create_profile. A change to any of the three adds an entry dated today to the
+# contract history on the server (or corrects today's entry); the history, corrections back in
+# time and the time periods are edited on wolta.se, never from here (spec
+# 2026-10-27-marknadsanpassning, Tillägg 2-4).
+_CONTRACT_KEYS = (CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE)
+# Select fields that always carry a value in the form (their default), so that an untouched form
+# does not turn the server's "not set" into a PATCH of the default: both sides of the comparison
+# read "not set" as the default, which is what the server does too.
+_SELECT_DEFAULTS = {
+    CONF_RETAIL_PRICE_MODEL: DEFAULT_RETAIL_PRICE_MODEL,
+}
+# The contract type's extra choice while the contract that applies today has no type (code review
+# C1, server rulings 14, 15 and 22). The server prices a contract without a type as a quarter-hour
+# price and keeps it without a type in the contract history: a markup change gives an entry with
+# no type, and the first type chosen while no entry has one applies to every entry, each with its
+# own markup. A fixed price does so only when no such entry carries a markup (ruling 24: a markup
+# only exists in a spot contract); otherwise it applies from today. On a mixed history the server
+# applies a chosen type from today. An answer is stored literally, "quarter" included (ruling 15). Without this choice
+# the select showed "Quarter-hour price" as its default and never sent it, so an owner on a
+# quarter-hour price could not say so. A form value only: never sent to the server, never cached.
+_RETAIL_NOT_STATED = "not_stated"
+
+
+def _contract_unanswered(server: dict[str, Any]) -> bool:
+    """Whether the contract that applies today has no type: today's entry of the contract history
+    (the one with the latest date; "from the start" is the earliest) when there is one, else the
+    server's scalar contract type. The server mirrors today's entry in the scalar, so both say the
+    same; the history is read so that a history whose today's entry has no type still offers "not
+    stated" (server ruling 22). A malformed history counts as none."""
+    events = server.get(KEY_RETAIL_EVENTS)
+    posts = [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
+    if posts:
+        today = max(posts, key=lambda e: (e.get("date") is not None, str(e.get("date") or "")))
+        return today.get(CONF_RETAIL_PRICE_MODEL) is None
+    return server.get(CONF_RETAIL_PRICE_MODEL) is None
+
+
+def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """The cached contract as create_profile keywords: the contract type and the fixed price
+    (None outside SE1-SE4, where the server refuses them with 422: a value cached from before a
+    zone correction would block the reauth, as the energy-tax answer does outside SE1-SE3), and
+    the markup, which is never sent with a fixed price (a fixed price is the retailer's whole
+    price and the server refuses a markup next to it)."""
+    asked = _benefit_zone(zone)
+    contract = {key: (data.get(key) if asked else None) for key in _CONTRACT_KEYS}
+    fixed = contract[CONF_RETAIL_PRICE_MODEL] == "fixed"
+    return {**contract, CONF_SURCHARGE_ORE: None if fixed else data.get(CONF_SURCHARGE_ORE)}
+
+
+# The server's 422s for the time periods, the contract and the grid benefit history (api 0.119.0)
+# that a save from here can meet. Each is matched on the rule's own wording and not on the field
+# names alone, so another 422 that happens to name the same fields (a type error, say) is not one
+# of them. The server escapes non-ASCII in its JSON and api.py reduces an error body to one line,
+# so the match runs on the text with \uXXXX escapes decoded:
+#   tidsperioder kräver ett baspris (grid_var_ore resp. grid_benefit_ore)
+#   retail_fixed_ore krävs med retail_price_model fixed och får inte sättas annars
+#   surcharge_ore får inte sättas med retail_price_model fixed (det fasta priset är elhandelns
+#     hela pris)
+#   tidsperioderna, helgdagsreglerna och elhandelsavtalet gäller bara SE1–SE4
+#   en nätnyttepost behöver datum (inte i framtiden, inte två på samma dag) och ett baspris
+#     (grid_benefit_ore)
+# The last is the grid benefit history's rule (Tillägg 5), which a save from here meets by
+# clearing the base price while the server keeps a grid benefit history: today's entry would have
+# no base price. The server checks it before the periods' rule, so it is matched first. The
+# retailer's terms have no such case (a cleared value is plain spot from today, the server's
+# ruling 10), so their list's rule is not here. The rules for the period lists themselves and
+# for the contract history are not here either: this form never sends them.
+_TARIFF_RULES = (
+    (re.compile(r"en\s+nätnyttepost\s+behöver\s+datum", re.IGNORECASE),
+     "grid_benefit_history_requires_base"),
+    (re.compile(r"tidsperioder\s+kräver\s+ett\s+baspris", re.IGNORECASE),
+     "periods_require_base"),
+    (re.compile(r"retail_fixed_ore\s+krävs\s+med", re.IGNORECASE), "retail_fixed_invalid"),
+    (re.compile(r"surcharge_ore\s+får\s+inte\s+sättas\s+med\s+retail_price_model\s+fixed",
+                re.IGNORECASE),
+     "retail_fixed_surcharge"),
+    (re.compile(r"elhandelsavtalet\s+gäller\s+bara", re.IGNORECASE), "tariff_zone_se_only"),
+)
+_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _tariff_rule_error(err: WoltaApiError) -> str | None:
+    """The options-form error code for one of the server's period, contract or grid benefit
+    history 422s, else None."""
+    if getattr(err, "status", None) != 422:
+        return None
+    text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(err))
+    for rule, code in _TARIFF_RULES:
+        if rule.search(text):
+            return code
+    return None
+
+
+def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
+    """The field a server period, contract or grid benefit history 422 is shown at.
+
+    The periods text names both base prices: the one this save cleared is the one (the grid
+    fee's when neither was cleared, a cache out of step with the server)."""
+    if code == "grid_benefit_history_requires_base":
+        return CONF_GRID_BENEFIT_ORE
+    if code == "periods_require_base":
+        if CONF_GRID_VAR_ORE not in patch_fields and CONF_GRID_BENEFIT_ORE in patch_fields:
+            return CONF_GRID_BENEFIT_ORE
+        return CONF_GRID_VAR_ORE
+    if code == "retail_fixed_invalid":
+        return CONF_RETAIL_FIXED_ORE
+    if code == "retail_fixed_surcharge":
+        return CONF_SURCHARGE_ORE
+    return CONF_RETAIL_PRICE_MODEL
+
+
+# The read-only summary of what is edited on wolta.se (the time periods, the contract history and
+# the sale side's history), in the user's HA language (sv/en, else English), like _zone_hint:
+# counts, dates and the holiday rule are formatted here, so the sentence is too. Empty when there
+# is nothing to summarise.
+_WEB_SUMMARY: dict[str, dict[str, str]] = {
+    "sv": {
+        "fee_one": "Nätavgiften har 1 tidsperiod med eget pris",
+        "fee_many": "Nätavgiften har {count} tidsperioder med eget pris",
+        "benefit_one": "Nätnyttan har 1 tidsperiod med eget pris",
+        "benefit_many": "Nätnyttan har {count} tidsperioder med eget pris",
+        "holidays": " (helgdagar som inte räknas som vardagar: {rule})",
+        "contract_one": "Avtalshistoriken har 1 avtal, som gäller hela historiken.",
+        "contract_many": "Avtalshistoriken har {count} avtal, det som gäller i dag sedan {date}.",
+        "benefit_history_one": "Nätnyttans historik har 1 post, som gäller hela historiken.",
+        "benefit_history_many": ("Nätnyttans historik har {count} poster, den som gäller i dag "
+                                 "sedan {date}."),
+        "export_one": ("Historiken för elhandelns villkor för såld el har 1 post, som gäller hela "
+                       "historiken."),
+        "export_many": ("Historiken för elhandelns villkor för såld el har {count} poster, den som "
+                        "gäller i dag sedan {date}."),
+        "tail": "De ändras på wolta.se.",
+    },
+    "en": {
+        "fee_one": "The grid fee has 1 time period with a price of its own",
+        "fee_many": "The grid fee has {count} time periods with a price of their own",
+        "benefit_one": "The grid benefit has 1 time period with a price of its own",
+        "benefit_many": "The grid benefit has {count} time periods with a price of their own",
+        "holidays": " (holidays not counted as weekdays: {rule})",
+        "contract_one": "The contract history has 1 contract, which applies to all of your history.",
+        "contract_many": "The contract history has {count} contracts, today's since {date}.",
+        "benefit_history_one": ("The grid benefit history has 1 entry, which applies to all of "
+                                "your history."),
+        "benefit_history_many": ("The grid benefit history has {count} entries, today's since "
+                                 "{date}."),
+        "export_one": ("The history of your retailer's terms for sold electricity has 1 entry, "
+                       "which applies to all of your history."),
+        "export_many": ("The history of your retailer's terms for sold electricity has {count} "
+                        "entries, today's since {date}."),
+        "tail": "These are changed on wolta.se.",
+    },
+}
+# The history lists the summary counts, in the order it names them (the purchase side's contract
+# first, then the sale side: the grid benefit and the retailer's terms), with their text keys.
+_HISTORY_LISTS = ((KEY_RETAIL_EVENTS, "contract"), (KEY_GRID_BENEFIT_EVENTS, "benefit_history"),
+                  (KEY_EXPORT_EVENTS, "export"))
+# The holiday rules by name (the server's HOLIDAY_RULES, as wolta.se names them). A rule this
+# version does not know is shown by its key. The server counts a list without a rule with its
+# default, public_eves (tariff.DEFAULT_HOLIDAYS), so that is the rule shown then.
+_HOLIDAY_NAMES: dict[str, dict[str, str]] = {
+    "sv": {"none": "inga", "public": "allmänna helgdagar",
+           "public_eves": "allmänna helgdagar, julafton och nyårsafton",
+           "public_eves_maundy": "allmänna helgdagar, julafton, nyårsafton och skärtorsdag"},
+    "en": {"none": "none", "public": "public holidays",
+           "public_eves": "public holidays, Christmas Eve and New Year's Eve",
+           "public_eves_maundy": "public holidays, Christmas Eve, New Year's Eve and Maundy Thursday"},
+}
+_DEFAULT_HOLIDAYS = "public_eves"
+
+
+def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
+    """One short paragraph on the server's time periods, contract history and sale history, or "".
+
+    Shown, never edited: the lists are changed on wolta.se, and nothing here sends them."""
+    lang = (hass_language or "en").split("-")[0]
+    lang = lang if lang in _WEB_SUMMARY else "en"
+    text = _WEB_SUMMARY[lang]
+    parts: list[str] = []
+    for key, holidays_key, prefix in (
+            (KEY_GRID_FEE_PERIODS, "grid_fee_holidays", "fee"),
+            (KEY_GRID_BENEFIT_PERIODS, "grid_benefit_holidays", "benefit")):
+        periods = server.get(key)
+        if not (isinstance(periods, list) and periods):
+            continue
+        sentence = (text[f"{prefix}_one"] if len(periods) == 1
+                    else text[f"{prefix}_many"].format(count=len(periods)))
+        # The holiday rule only decides anything for a period on weekdays.
+        if any(isinstance(p, dict) and p.get("days") == "weekdays" for p in periods):
+            rule = server.get(holidays_key) or _DEFAULT_HOLIDAYS
+            sentence += text["holidays"].format(rule=_HOLIDAY_NAMES[lang].get(rule, rule))
+        parts.append(sentence + ".")
+    # The three histories share the server's rules (Tillägg 3-5): sorted by date, no future date,
+    # only the first entry may lack one ("from the start"), and the first entry applies back to
+    # the start of the history whatever its date (tariff.retail_post_on, export_post_on,
+    # grid_benefit_post_on: before the first entry, the first entry).
+    for key, prefix in _HISTORY_LISTS:
+        events = server.get(key)
+        if not (isinstance(events, list) and events and isinstance(events[-1], dict)):
+            continue
+        if len(events) == 1:
+            # A lone entry has no "since".
+            parts.append(text[f"{prefix}_one"])
+        else:
+            # Today's entry is the last one.
+            since = events[-1].get("date")
+            if since:
+                parts.append(text[f"{prefix}_many"].format(count=len(events), date=since))
+    if not parts:
+        return ""
+    return " ".join([*parts, text["tail"]])
 
 
 def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -1064,7 +1317,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
             CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_SOC_ABSENT,
-            CONF_REDUCED_ENERGY_TAX,
+            CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -1098,6 +1351,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
                 CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
                 CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX,
+                CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS,
             ):
                 if prof.get(key) is not None:
                     entry_data[key] = prof[key]
@@ -1208,10 +1462,23 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     cost_sek=entry_data.get(CONF_COST_SEK) if created_by_ha else None,
                     purchase_date=entry_data.get(CONF_PURCHASE_DATE),
                     grid_var_ore=entry_data.get(CONF_GRID_VAR_ORE),
-                    surcharge_ore=entry_data.get(CONF_SURCHARGE_ORE),
                     export_extra_ore=entry_data.get(CONF_EXPORT_EXTRA_ORE),
                     grid_var_pct=entry_data.get(CONF_GRID_VAR_PCT),
                     export_extra_pct=entry_data.get(CONF_EXPORT_EXTRA_PCT),
+                    # The grid benefit (api 0.119.0). A row that survived keeps the server's
+                    # tariff and ignores this; a NEW row after a purge takes it from here, so
+                    # the cache is the only copy of it. Omitted outside SE1-SE4, which the
+                    # server refuses (422): a value cached from before a zone correction
+                    # would block the reauth, as the energy-tax answer below.
+                    grid_benefit_ore=(entry_data.get(CONF_GRID_BENEFIT_ORE)
+                                      if _benefit_zone(entry_data[CONF_ZONE]) else None),
+                    # The electricity contract that applied today (api 0.119.0) and the markup.
+                    # Same rule as the grid benefit above: a surviving row keeps the server's
+                    # contract and its history, a new row takes today's contract from here, and
+                    # outside SE1-SE4 the contract is omitted. The markup is never sent with a
+                    # fixed price. The time periods and the contract history are not cached and
+                    # not sent: they are wolta.se's, and a new row starts without them.
+                    **_contract_profile_kwargs(entry_data[CONF_ZONE], entry_data),
                     nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
                     nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
@@ -1381,8 +1648,10 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         CONF_EFF, CONF_RESERVE_PCT,
     ),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
-    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
-                   CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX),
+    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT,
+                   CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_SURCHARGE_ORE,
+                   CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
+                   CONF_REDUCED_ENERGY_TAX),
 }
 # The energy-tax answer is tri-state on the server (null / false / true) and a boolean selector
 # can only give true/false, so the form uses a list select whose values map to those three.
@@ -1392,6 +1661,19 @@ _TAX_CHOICES = (_TAX_NOT_SET, "no", "yes")
 # in SE4 (spec 2026-10-26-inkopspris, boio.se/el/elomrade), so SE4 and other countries never see
 # it; the wolta.se form hides it the same way.
 _REDUCED_TAX_ZONES = ("SE1", "SE2", "SE3")
+# Zones with a grid-benefit field. The server refuses the benefit fields outside SE1-SE4
+# (tariff.check_grid_benefit_zone, 422), so the form does not offer them elsewhere. The same
+# goes for the electricity contract (the contract type and the fixed price).
+_BENEFIT_ZONES = ("SE1", "SE2", "SE3", "SE4")
+# Span of the grid-benefit field, öre/kWh excl. VAT: the server's own (api 0.119.0,
+# simulate/tariff.py); a value outside it is refused with 422.
+_BENEFIT_MIN_ORE = -20.0
+_BENEFIT_MAX_ORE = 50.0
+
+
+def _benefit_zone(zone: Any) -> bool:
+    """Whether the owner's grid benefit can be given in this zone."""
+    return str(zone).upper() in _BENEFIT_ZONES
 
 
 def _tax_to_choice(value: Any) -> str:
@@ -1424,9 +1706,17 @@ def _zone_group(zone: str) -> list[tuple[str, str]]:
     return [(z, label) for z, label in SUPPORTED_ZONES if z[:2].upper() == prefix]
 
 
-# The tariff fields the purchase price is built from (the export fields are not in it).
+# The tariff fields the kept /profile/prices answer was priced with: the import side and the
+# export side (grid benefit, retailer's terms). Saving any of them drops the kept answer and
+# fetches a fresh one.
 _TARIFF_PRICE_KEYS = frozenset(
-    {CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX}
+    {
+        CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX,
+        CONF_GRID_BENEFIT_ORE,
+        CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
+        # The contract decides what the owner pays per quarter.
+        *_CONTRACT_KEYS,
+    }
 )
 
 
@@ -1450,6 +1740,12 @@ class WoltaOptionsFlow(OptionsFlow):
         if len(_zone_group(self.config_entry.data.get(CONF_ZONE, ""))) > 1:
             options.append("zone_correction")
         return self.async_show_menu(step_id="init", menu_options=options)
+
+    def _benefit_asked(self) -> bool:
+        """Whether the grid-benefit fields apply: the plant's zone (the server's, else the
+        cached one) is SE1-SE4."""
+        zone = (self._server or {}).get(CONF_ZONE) or self.config_entry.data.get(CONF_ZONE) or ""
+        return _benefit_zone(zone)
 
     def _tax_asked(self) -> bool:
         """Whether the energy-tax question applies: the plant's zone (the server's, else the
@@ -1578,8 +1874,10 @@ class WoltaOptionsFlow(OptionsFlow):
                 sec_input = user_input.get(sec) or {}
                 for key in fields:
                     if key in sec_input:
-                        flat[key] = (_choice_to_tax(sec_input[key])
-                                     if key == CONF_REDUCED_ENERGY_TAX else sec_input[key])
+                        value = sec_input[key]
+                        if key == CONF_REDUCED_ENERGY_TAX:
+                            value = _choice_to_tax(value)
+                        flat[key] = value
 
             # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
             # (se battery_pending nedan), så ett ensamt värde är submitbart – och ett halvt
@@ -1608,6 +1906,13 @@ class WoltaOptionsFlow(OptionsFlow):
             # is hidden its absence is not "not set": the stored answer must survive, so the
             # diff skips the key (same reasoning as plant_scoped_cost above).
             tax_asked = self._tax_asked()
+            # Same for the grid-benefit field and the contract fields, which only exist in
+            # SE1-SE4. The time periods, their holiday rules, the contract history and the sale
+            # side's history (export_events, grid_benefit_events) are not in the form at all and
+            # are never part of the diff: they are edited on wolta.se. The sale fields here are
+            # today's values the server mirrors from its history, so an untouched save sends
+            # nothing, and a change becomes an entry dated today on the server.
+            benefit_asked = self._benefit_asked()
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
@@ -1617,8 +1922,26 @@ class WoltaOptionsFlow(OptionsFlow):
                         continue
                     if key == CONF_REDUCED_ENERGY_TAX and not tax_asked:
                         continue
+                    if key in (CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS) and not benefit_asked:
+                        continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
+                    if key == CONF_RETAIL_PRICE_MODEL and val == _RETAIL_NOT_STATED:
+                        # Only offered while today's contract has no type: nothing to send.
+                        continue
+                    if (key == CONF_RETAIL_PRICE_MODEL and val
+                            and _contract_unanswered(self._server)):
+                        # The form offered "not stated", so any type chosen is an answer, the
+                        # default quarter-hour price included (code review C1).
+                        patch_fields[key] = val
+                        continue
+                    if key in _SELECT_DEFAULTS:
+                        # Always filled in the form, and "not set" on the server is the default.
+                        default = _SELECT_DEFAULTS[key]
+                        val = val or default
+                        if val != (server_val or default):
+                            patch_fields[key] = val
+                        continue
                     if key in _REQUIRED_FIELDS:
                         if val != server_val:
                             patch_fields[key] = val
@@ -1649,6 +1972,92 @@ class WoltaOptionsFlow(OptionsFlow):
             ):
                 errors["base"] = "grid_fixed_required"
 
+            # The grid benefit and the retailer's terms are two halves of what used to be one
+            # number (export_extra_ore), and a legacy value in the retailer's field is often the
+            # grid benefit. The owner who touches either sees and confirms both, so both go in
+            # the PATCH. An empty retailer field next to a grid benefit is answered 0 (the
+            # retailer pays plain spot), which is what the server counts a missing one as. With a
+            # sale history on the server the unchanged half equals today's entry and adds no
+            # entry (tariff.apply_sale_scalar_change); the changed half adds one dated today.
+            if CONF_GRID_BENEFIT_ORE in patch_fields or CONF_EXPORT_EXTRA_ORE in patch_fields:
+                benefit_in = flat.get(CONF_GRID_BENEFIT_ORE) if benefit_asked else None
+                terms_in = flat.get(CONF_EXPORT_EXTRA_ORE)
+                if benefit_in is not None:
+                    patch_fields[CONF_GRID_BENEFIT_ORE] = benefit_in
+                    patch_fields[CONF_EXPORT_EXTRA_ORE] = 0.0 if terms_in is None else terms_in
+                elif terms_in is not None:
+                    patch_fields[CONF_EXPORT_EXTRA_ORE] = terms_in
+
+            # The server's grid-benefit combination rule, said before sending. It is checked on
+            # the state after the save and only when the save touches one of its fields, like the
+            # server (tariff.patch_override_updates): a legacy profile with just
+            # a percentage can still save an unrelated change, and the repair
+            # grid_benefit_fixed_missing asks for the fixed part. Shown at grid_benefit_ore, the
+            # field that is missing, and ALSO on base (same code), exactly like
+            # battery_pair_incomplete above: the field sits inside a section, which the frontend
+            # may not render field errors for, and a form that refuses to save without saying
+            # why is the worst outcome. The texts name the field and the section.
+            if benefit_asked:
+                benefit_after = flat.get(CONF_GRID_BENEFIT_ORE)
+                pct_after = flat.get(CONF_EXPORT_EXTRA_PCT)
+                if (
+                    {CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_PCT} & patch_fields.keys()
+                    and pct_after not in (None, 0) and benefit_after is None
+                ):
+                    errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = "grid_benefit_fixed_required"
+
+            # A time-period list needs its base price, the price outside the periods (0 is an
+            # answer): the server refuses clearing the base under a list (check_periods, 422), so
+            # the form says it first, at the cleared field and on base. The lists themselves are
+            # never sent from here; they are the server's (edited on wolta.se), so the snapshot is
+            # what decides whether one exists.
+            for base_key, list_key in ((CONF_GRID_VAR_ORE, KEY_GRID_FEE_PERIODS),
+                                       (CONF_GRID_BENEFIT_ORE, KEY_GRID_BENEFIT_PERIODS)):
+                if (base_key in patch_fields and patch_fields[base_key] is None
+                        and self._server.get(list_key)):
+                    errors[base_key] = errors["base"] = "periods_require_base"
+
+            # The grid benefit history (Tillägg 5) needs a base price in today's entry, so the
+            # server refuses clearing it while a history exists (GRID_BENEFIT_EVENTS_INVALID_MSG,
+            # checked before the periods' rule, which is why it replaces that error here). The
+            # history is removed or corrected on wolta.se. The retailer's terms have no such rule:
+            # cleared, they are plain spot from today.
+            if (CONF_GRID_BENEFIT_ORE in patch_fields
+                    and patch_fields[CONF_GRID_BENEFIT_ORE] is None
+                    and self._server.get(KEY_GRID_BENEFIT_EVENTS)):
+                errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = (
+                    "grid_benefit_history_requires_base")
+
+            # The electricity contract, said before sending (field AND base, like the above). A
+            # change applies from today: the server adds an entry dated today to the contract
+            # history (or corrects today's), and the history is never rewritten from here. Only a
+            # save that touches one of the contract's fields is checked, like the server.
+            dropped: set[str] = set()
+            if benefit_asked:
+                model_after = flat.get(CONF_RETAIL_PRICE_MODEL)
+                if model_after in (None, "", _RETAIL_NOT_STATED):
+                    # Not stated is priced as a quarter-hour price, by the server too.
+                    model_after = DEFAULT_RETAIL_PRICE_MODEL
+                # A fixed price carries no markup and only a fixed price carries a fixed price: the
+                # server drops the one that no longer applies when the contract changes type. The
+                # form still shows the old value, so a cleared one is not sent back and the cache
+                # follows. A NEW value for a field that does not apply is refused below.
+                dropped.add(CONF_SURCHARGE_ORE if model_after == "fixed" else CONF_RETAIL_FIXED_ORE)
+                for key in dropped:
+                    if key in patch_fields and patch_fields[key] is None:
+                        del patch_fields[key]
+                if {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
+                        CONF_SURCHARGE_ORE} & patch_fields.keys():
+                    if model_after == "fixed" and flat.get(CONF_RETAIL_FIXED_ORE) is None:
+                        errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
+                    # The other direction: a value typed for a contract it does not belong to. An
+                    # unchanged stale value is not in the PATCH and passes; surcharge_ore is never
+                    # sent with a fixed price.
+                    if model_after != "fixed" and patch_fields.get(CONF_RETAIL_FIXED_ORE) is not None:
+                        errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
+                    if model_after == "fixed" and patch_fields.get(CONF_SURCHARGE_ORE) is not None:
+                        errors[CONF_SURCHARGE_ORE] = errors["base"] = "retail_fixed_surcharge"
+
             if patch_fields and not errors:
                 try:
                     await client.patch_profile(token, **patch_fields)
@@ -1656,8 +2065,20 @@ class WoltaOptionsFlow(OptionsFlow):
                     _LOGGER.error("Failed to patch Wolta profile: %s", err)
                     # The same refusal from the server (a cache that is out of step with it)
                     # reads as the same fault, not as a connection problem.
-                    errors["base"] = (
-                        "grid_fixed_required" if _is_grid_fixed_error(err) else "cannot_connect")
+                    benefit_err = _grid_benefit_error(err)
+                    tariff_err = _tariff_rule_error(err)
+                    if benefit_err is not None:
+                        # Field AND base, as for the prechecks above. A zone refusal can come
+                        # while the field is hidden (a cache out of step), where base is the
+                        # only place the owner can read it.
+                        errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
+                    elif tariff_err is not None:
+                        errors[_tariff_rule_field(tariff_err, patch_fields)] = tariff_err
+                        errors["base"] = tariff_err
+                    else:
+                        errors["base"] = (
+                            "grid_fixed_required" if _is_grid_fixed_error(err)
+                            else "cannot_connect")
 
             if not errors:
                 # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -1672,6 +2093,11 @@ class WoltaOptionsFlow(OptionsFlow):
                             new_data.pop(key, None)
                         else:
                             new_data[key] = val
+                    if CONF_RETAIL_PRICE_MODEL in patch_fields:
+                        # What the server drops with a change of contract type (see `dropped`
+                        # above): the fixed price leaving `fixed`, the markup going to it.
+                        for key in dropped:
+                            new_data.pop(key, None)
                     if invert_changed:
                         new_data = with_desired_intervals(
                             new_data, [(None, None)] if invert_new else [])
@@ -1810,11 +2236,58 @@ class WoltaOptionsFlow(OptionsFlow):
              else [_opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"))])
             + [date_row]
         ))
+        ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")
+        # The fixed price exists in SE1-SE4 only, where the unit is öre.
+        se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
+
+        def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
+                        mode: SelectSelectorMode, *, not_stated: bool = False) -> tuple[Any, Any]:
+            """A select that always carries a value: the server's, else the default. A value this
+            version does not know (a newer server) is offered as one more option, its raw key as
+            its label: the select validates against its options, so without it the injected value
+            would be refused and no save could pass. Untouched, it is sent back unchanged and the
+            diff finds nothing to PATCH. With `not_stated` the select leads with "not stated" and
+            starts on it (today's contract has no type; see _RETAIL_NOT_STATED)."""
+            if not_stated:
+                current = _RETAIL_NOT_STATED
+                options = [_RETAIL_NOT_STATED, *known]
+            else:
+                current = srv.get(key) or default
+                options = list(known) if current in known else [*known, current]
+            return (vol.Optional(key, default=current),
+                    SelectSelector(SelectSelectorConfig(
+                        options=options, mode=mode, translation_key=translation_key)))
+        contract_asked = self._benefit_asked()
+
+        # The grid fee (the base price outside any time periods) and its percentage; the
+        # electricity contract that applies today with the supplier's markup (spec
+        # 2026-10-27-marknadsanpassning). The time periods and the contract history are shown as
+        # a summary in the description and edited on wolta.se.
         tariff_rows = [
-            _opt(CONF_GRID_VAR_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
-            _opt(CONF_SURCHARGE_ORE, _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
-            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
+            _opt(CONF_GRID_VAR_ORE, ore_selector),
             _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")),
+        ]
+        if contract_asked:
+            tariff_rows += [
+                # default (not suggested_value), like the energy-tax select: it always carries a
+                # value, so the form always submits one. While today's contract has no type (no
+                # stored type, or a history whose today's entry has none) it is "not stated" (an
+                # untouched save sends nothing); otherwise the server's type, or the quarter-hour
+                # price when the server mirrors none.
+                _select_row(CONF_RETAIL_PRICE_MODEL, RETAIL_PRICE_MODELS,
+                            DEFAULT_RETAIL_PRICE_MODEL, CONF_RETAIL_PRICE_MODEL,
+                            SelectSelectorMode.LIST, not_stated=_contract_unanswered(srv)),
+                _opt(CONF_RETAIL_FIXED_ORE, se_ore_selector),
+            ]
+        tariff_rows.append(_opt(CONF_SURCHARGE_ORE, ore_selector))
+        if contract_asked:
+            # The grid benefit first, then the retailer's terms next to it (spec
+            # 2026-10-26-forsaljningspris): the owner who enters the benefit sees the retailer
+            # value and confirms it.
+            tariff_rows.append(_opt(CONF_GRID_BENEFIT_ORE, _number_selector(
+                min_val=_BENEFIT_MIN_ORE, max_val=_BENEFIT_MAX_ORE, step=0.1, unit="öre per kWh")))
+        tariff_rows += [
+            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
         ]
         if self._tax_asked():
@@ -1834,10 +2307,13 @@ class WoltaOptionsFlow(OptionsFlow):
             vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),
             vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
             # Open when the fixed-part error is shown: base errors render at the top of the
-            # form, and the field they ask for sits in this section.
+            # form, and the field they ask for sits in this section. Also open for an error on any
+            # field inside it (the grid benefit, the base prices, the contract).
             vol.Required(_SEC_TARIFFS): section(
                 tariffs_schema,
-                {"collapsed": errors.get("base") != "grid_fixed_required"}),
+                {"collapsed": not (errors.get("base") == "grid_fixed_required"
+                                   or any(key in errors
+                                          for key in _SECTION_FIELDS[_SEC_TARIFFS]))}),
             vol.Required(
                 CONF_INVERT_BATTERY,
                 default=bool(desired_invert_intervals(entry.data)),
@@ -1849,4 +2325,11 @@ class WoltaOptionsFlow(OptionsFlow):
         if errors and user_input is not None:
             schema = self.add_suggested_values_to_schema(
                 schema, _with_cleared_fields_empty(schema, user_input))
-        return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)
+        # The time periods and the contract history are shown, never edited (spec
+        # 2026-10-27-marknadsanpassning, Tillägg 2 and 4): a short summary in the description,
+        # empty when the plant has none. Always passed, so the description never shows a raw
+        # placeholder.
+        summary = _web_summary(self.hass.config.language, srv)
+        return self.async_show_form(
+            step_id="settings", data_schema=schema, errors=errors,
+            description_placeholders={"web_summary": f"\n\n{summary}" if summary else ""})

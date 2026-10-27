@@ -58,6 +58,7 @@ from .const import (
     CONF_FLEX_COMPENSATION,
     CONF_GRID_IN,
     CONF_GRID_OUT,
+    CONF_GRID_BENEFIT_ORE,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
     CONF_INVERT_BATTERY,
@@ -67,6 +68,8 @@ from .const import (
     CONF_PURCHASE_DATE,
     CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
+    CONF_RETAIL_FIXED_ORE,
+    CONF_RETAIL_PRICE_MODEL,
     CONF_SOC,
     CONF_SOC_ABSENT,
     CONF_SOLAR,
@@ -794,11 +797,30 @@ _ISSUE_SOC_MISSING_LEGACY = "soc_missing"
 # api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
 # energy tax is counted twice. Non-fixable: only the owner knows the right figure.
 _ISSUE_GRID_FEE_IMPLAUSIBLE = "grid_fee_implausible"
+# The same question for the prices of the grid fee's time periods (results.tariff_check
+# .grid_var_peak_implausible, server api 0.119.0: any period price above the server's own limit),
+# with a limit of its own: a time-of-use tariff really reaches 61.2 öre excl. VAT, so the base
+# limit would flag a correct value. Non-fixable, and not fixable here either: the time periods
+# are edited on wolta.se.
+_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE = "grid_fee_period_implausible"
 # The owner gave a grid fee as a percentage of spot without the fixed part (results.tariff_check
 # .grid_fixed_missing, server api 0.118.0). The server then has no basis for the purchase price
 # and keeps the sensor unavailable until the fixed part (0 if there is none) is entered.
 # Non-fixable: only the owner knows the figure.
 _ISSUE_GRID_FIXED_MISSING = "grid_fixed_missing"
+# The export side's two questions (results.tariff_check, server api 0.119.0). Both are for
+# SE1-SE4 only, where the owner's grid benefit has a field of its own.
+# export_split_unclear: an export premium that is not 0 and no grid benefit. The premium may be
+# the grid benefit (then Wolta's standard 5 öre on top counts it twice) or the retailer's terms;
+# the data cannot tell which, so the owner is asked and no number changes until they save.
+_ISSUE_EXPORT_SPLIT_UNCLEAR = "export_split_unclear"
+# grid_benefit_fixed_missing: an export percentage that is not 0 and no fixed part of the grid
+# benefit. Wolta then adds the standard 5 öre as the fixed part, a guess that looks like the
+# owner's figure.
+# The 5 öre in both texts is the server's DEFAULT_GRID_BENEFIT_ORE (simulate/tariff.py), the
+# standard used when the owner has given no grid benefit.
+# Both non-fixable: only the owner knows the figures.
+_ISSUE_GRID_BENEFIT_FIXED_MISSING = "grid_benefit_fixed_missing"
 # The server's archive of replaced rows is full (429 on open): a correction of the stored
 # history waits until Retry-After. Non-fixable, one per entry; the translation key says
 # which correction waits (_direction / _entities), the placeholder when it is retried.
@@ -886,6 +908,17 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
     CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
+    # The owner's grid benefit (api 0.119.0), also edited on wolta.se. 0 is an answer and is
+    # stored; None drops the key.
+    CONF_GRID_BENEFIT_ORE,
+    # The electricity contract that applies today (api 0.119.0, SE1-SE4), also edited on
+    # wolta.se, where the server mirrors today's entry of the contract history into these fields
+    # (and surcharge_ore above). A fixed price of 0 is an answer and is stored; None drops the
+    # key, which is also how the cache follows the server dropping a field that no longer
+    # applies (the fixed price when the contract leaves `fixed`, the markup when it goes to it).
+    # The time periods and the contract history themselves are not cached: nothing here sends
+    # them, and the options form reads them fresh from the server.
+    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
     # The control system is declared on wolta.se and can be switched and backdated there.
     # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
     # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
@@ -3898,6 +3931,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if not isinstance(check, dict):
             return
         self._evaluate_grid_fixed_issue(check)
+        self._evaluate_export_issues(check)
+        self._evaluate_grid_fee_period_issue(check)
         issue_id = f"{_ISSUE_GRID_FEE_IMPLAUSIBLE}_{self.config_entry.entry_id}"
         if not check.get("grid_var_implausible") or self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
@@ -3909,6 +3944,30 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             severity=ir.IssueSeverity.WARNING,
             translation_key=_ISSUE_GRID_FEE_IMPLAUSIBLE,
             translation_placeholders={"limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
+        )
+
+    def _evaluate_grid_fee_period_issue(self, check: dict) -> None:
+        """Warn when the server finds a price in the grid fee's time periods implausible.
+
+        Same shape as the base-price warning: the flag (`grid_var_peak_implausible`, the server's
+        name, kept from before the time periods) and its limit (`grid_var_peak_limit_ore`) are the
+        server's, never held here. A tariff_check without the flag is a server before api 0.119.0
+        and leaves whatever is open as it is (a missing answer is not a "no"). Never in view-only
+        mode: the tariff is set on wolta.se there."""
+        if "grid_var_peak_implausible" not in check:
+            return
+        issue_id = f"{_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE}_{self.config_entry.entry_id}"
+        if check.get("grid_var_peak_implausible") is not True or self._view_only:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        limit = check.get("grid_var_peak_limit_ore")
+        ir.async_create_issue(
+            self.hass, DOMAIN, issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE,
+            translation_placeholders={
+                "limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
         )
 
     def _evaluate_grid_fixed_issue(self, check: dict) -> None:
@@ -3931,6 +3990,46 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             severity=ir.IssueSeverity.WARNING,
             translation_key=_ISSUE_GRID_FIXED_MISSING,
         )
+
+    def _evaluate_export_issues(self, check: dict) -> None:
+        """The two export-side questions in results.tariff_check (server api 0.119.0).
+
+        Same shape as the import-side warnings above: the flags are the server's
+        (tariff.export_split_unclear / grid_benefit_fixed_missing), read here, never derived. A
+        tariff_check without a flag is a server before api 0.119.0 and leaves whatever is open as
+        it is. The text carries the owner's own figure from the mirrored profile; the flag is the
+        server's, so a cache that has not caught up still raises the question (with "-" for the
+        figure). Never in view-only mode: the tariff is set on wolta.se there."""
+        data = self.config_entry.data
+        for flag, issue, placeholder, key in (
+            ("export_split_unclear", _ISSUE_EXPORT_SPLIT_UNCLEAR, "export_extra",
+             CONF_EXPORT_EXTRA_ORE),
+            ("grid_benefit_fixed_missing", _ISSUE_GRID_BENEFIT_FIXED_MISSING, "export_pct",
+             CONF_EXPORT_EXTRA_PCT),
+        ):
+            if flag not in check:
+                continue
+            issue_id = f"{issue}_{self.config_entry.entry_id}"
+            if check.get(flag) is not True or self._view_only:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            value = data.get(key)
+            figure = "-"
+            if isinstance(value, (int, float)):
+                figure = f"{value:g}"
+                if self.hass.config.language.lower().startswith("sv"):
+                    # The text is Swedish for a Swedish owner: so is the decimal comma.
+                    # HA renders repair text in the viewing user's language, not
+                    # hass.config.language, so a mixed setup can show the other separator
+                    # (accepted limitation).
+                    figure = figure.replace(".", ",")
+            ir.async_create_issue(
+                self.hass, DOMAIN, issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=issue,
+                translation_placeholders={placeholder: figure},
+            )
 
     @staticmethod
     def _direction_reversed(betyg: dict) -> bool:
