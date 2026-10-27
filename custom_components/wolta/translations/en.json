@@ -142,9 +142,9 @@
       "title": "Wolta: your grid fee looks too high",
       "description": "The grid fee you entered is above {limit} öre (or cents) per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. If your network operator really charges this much, you can leave it as it is."
     },
-    "grid_fee_peak_implausible": {
-      "title": "Wolta: your high-load grid fee looks too high",
-      "description": "The grid fee for high-load hours you entered is above {limit} öre per kWh, higher than any we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. If your network operator really charges this much, you can leave it as it is."
+    "grid_fee_period_implausible": {
+      "title": "Wolta: a time period of your grid fee looks too high",
+      "description": "One of the time periods of your grid fee has a price above {limit} öre per kWh, higher than any we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax. Time periods are changed on wolta.se, on your plant's page under Tariffs (Configure → Link to a wolta.se account, if your plant is not linked yet). If your network operator really charges this much, you can leave it as it is."
     },
     "grid_fixed_missing": {
       "title": "Wolta: your grid fee needs its fixed part",
@@ -492,7 +492,7 @@
       },
       "settings": {
         "title": "Wolta profile",
-        "description": "These values are your shared Wolta profile – changes here show up on wolta.se too, and changes made on wolta.se show up here. Clear an optional field to remove its value.",
+        "description": "These values are your shared Wolta profile – changes here show up on wolta.se too, and changes made on wolta.se show up here. Clear an optional field to remove its value.{web_summary}",
         "sections": {
           "battery": {
             "name": "Battery",
@@ -527,44 +527,26 @@
           },
           "tariffs": {
             "name": "Tariffs",
-            "description": "Leave blank to use your country's standard tariff.",
+            "description": "Leave blank to use your country's standard tariff. In Sweden (SE1–SE4) a change to the electricity contract applies from today, and your earlier contracts stay as they were. Time periods with a price of their own, the contract history and corrections back in time are set on wolta.se (Configure → Link to a wolta.se account, if your plant is not linked yet).",
             "data": {
               "grid_var_ore": "Grid fee (transfer)",
-              "grid_var_peak_ore": "Grid fee, high-load hours (optional, time-of-use tariff)",
-              "grid_fee_peak_start_hour": "High-load hours for the grid fee: start hour (0–23)",
-              "grid_fee_peak_end_hour": "High-load hours for the grid fee: end hour (1–24)",
-              "grid_fee_peak_holidays": "High-load hours for the grid fee: holidays",
               "grid_var_pct": "Grid fee, percent of spot (% of spot)",
               "retail_price_model": "Electricity contract",
               "retail_fixed_ore": "Fixed price (öre per kWh)",
-              "retail_price_model_since": "Contract valid from",
               "surcharge_ore": "Electricity supplier markup (öre/ct per kWh)",
               "grid_benefit_ore": "Grid benefit",
-              "grid_benefit_peak_ore": "Grid benefit, high-load hours (optional)",
-              "grid_benefit_peak_start_hour": "High-load hours for the grid benefit: start hour (0–23)",
-              "grid_benefit_peak_end_hour": "High-load hours for the grid benefit: end hour (1–24)",
-              "grid_benefit_peak_holidays": "High-load hours for the grid benefit: holidays",
               "export_extra_ore": "Retailer's terms for sold electricity (öre/ct per kWh)",
               "export_extra_pct": "Sold electricity, percent of spot (SE1–SE4: part of the grid benefit)",
               "reduced_energy_tax": "Reduced energy tax"
             },
             "data_description": {
-              "grid_var_ore": "Your variable grid fee (transfer fee), excluding VAT and energy tax, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Wolta adds VAT and energy tax itself. If your grid fee also has a percentage of spot (“Grid fee, percent of spot”), this is its fixed part and is required: enter 0 if you only have a percentage. In Sweden (SE1–SE4), if your tariff has high-load hours with a higher fee (a time-of-use tariff), this is the fee for the rest of the time and the high-load fee goes in “Grid fee, high-load hours”. Clear the field to revert to your country's standard tariff.",
-              "grid_var_peak_ore": "Optional, for a time-of-use tariff. Your variable grid fee during your network operator's high-load hours, excluding VAT and energy tax, in öre/kWh. Wolta counts weekdays from November to March as high-load, in the hours and with the holiday rule set below; the rest of the time “Grid fee (transfer)” applies, so that field is required too. Sweden (SE1–SE4) only, between 0 and 500. Clear the field to use one grid fee all year.",
-              "grid_fee_peak_start_hour": "The hour the grid fee's high-load period starts, in Swedish local time, 0–23. Leave empty for the standard 6 (06:00). Only used when a high-load grid fee is entered.",
-              "grid_fee_peak_end_hour": "The hour the grid fee's high-load period ends, 1–24, in Swedish local time. The end hour itself is not high-load (22 means until 22:00) and it must be after the start hour. Leave empty for the standard 22. Only used when a high-load grid fee is entered.",
-              "grid_fee_peak_holidays": "Which days are exempt from the high-load period although they are weekdays from November to March. Public holidays are New Year's Day, Epiphany, Good Friday, Easter Monday, Christmas Day and Boxing Day. Network operators differ: choose the rule your operator's tariff describes. No holidays (every weekday counts, for example Herrljunga), Public holidays (for example VOE), Public holidays, Christmas Eve and New Year's Eve (for example Vattenfall Eldistribution; the standard) or the same and Maundy Thursday (for example Ellevio). Only used when a high-load grid fee is entered.",
+              "grid_var_ore": "Your variable grid fee (transfer fee), excluding VAT and energy tax, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Wolta adds VAT and energy tax itself. If your grid fee also has a percentage of spot (“Grid fee, percent of spot”), this is its fixed part and is required: enter 0 if you only have a percentage. In Sweden (SE1–SE4), if your tariff has time periods with a price of their own (a time-of-use tariff, set on wolta.se), this is the price outside them and is required too. Clear the field to revert to your country's standard tariff.",
               "grid_var_pct": "The percentage part of your grid fee, as a percent of the spot price. It needs the fixed part in “Grid fee (transfer)” (0 if you only have a percentage). Clear the field to remove the percent component.",
-              "retail_price_model": "How your electricity retailer prices the electricity you buy. Quarter-hour price: the spot price of each quarter-hour. Choose it also for an hourly-price contract: Wolta counts per quarter-hour, so the price can differ within the hour from what your retailer charges. Monthly price: the average of the spot price over the calendar month (the plain average of the month's spot prices, quarter-hour from October 2025 and hourly before). The price is set after the month is over, so the purchase-price sensor has no quarter-hour price. Fixed price: the price in “Fixed price”. Contracts that mix these (part fixed, part spot) are not supported. If your retailer charges for volume weighting, put that cost in the supplier markup. Setting Monthly price or Fixed price also needs “Contract valid from”.",
-              "retail_fixed_ore": "Your fixed electricity price, excluding VAT, in öre/kWh (SEK zones): the retailer's price including its markup. Only for the Fixed price contract, which requires it, and the markup field is not used then. Between 0 and 500. It is removed when you change to another contract.",
-              "retail_price_model_since": "The date your current contract started. Required with Monthly price and Fixed price. Wolta uses the chosen contract in the history from this date and quarter-hour prices before it, so earlier years are not calculated with a contract you did not have. Forward-looking figures (payback, IRR) and the purchase price always use the chosen contract. It is removed when you change to Quarter-hour price.",
-              "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). In Sweden (SE1–SE4), with the contract Monthly price, include here what your retailer charges for volume weighting, which is not part of the average; with Fixed price the markup is not added to the fixed price; it still applies to the history before the contract start date (empty = Wolta's default of 6 öre per kWh). Clear the field to revert to your country's standard tariff.",
-              "grid_benefit_ore": "The grid benefit (nätnytta) your network operator pays per kWh you feed in, excluding VAT, in öre/kWh. It is on your network operator's statement and is not what your electricity retailer pays (that is the retailer's terms, below). Enter 0 if you get none. If it also has a percentage of spot (“Sold electricity, percent of spot”), this is its fixed part and is required: enter 0 if you only have a percentage. Left empty, Wolta uses a standard 5 öre. Sweden (SE1–SE4) only, between −20 and 50. Clear the field to revert to the standard.",
-              "grid_benefit_peak_ore": "Optional. The grid benefit for high-load hours, if your network operator pays a different amount then. Wolta counts weekdays from November to March as high-load, in the hours and with the holiday rule set below. It is an exception to the rest of the year, so the Grid benefit field is required too. Sweden (SE1–SE4) only, between −20 and 50. Clear the field to use the same amount all year.",
-              "grid_benefit_peak_start_hour": "The hour the grid benefit's high-load period starts, in Swedish local time, 0–23. Leave empty for the standard 6 (06:00). The grid benefit has a calendar of its own because an operator can use other hours for what it pays than for what it charges. Only used when a high-load grid benefit is entered.",
-              "grid_benefit_peak_end_hour": "The hour the grid benefit's high-load period ends, 1–24, in Swedish local time. The end hour itself is not high-load (22 means until 22:00) and it must be after the start hour. Leave empty for the standard 22. Only used when a high-load grid benefit is entered.",
-              "grid_benefit_peak_holidays": "Which days are exempt from the grid benefit's high-load period although they are weekdays from November to March. Public holidays are New Year's Day, Epiphany, Good Friday, Easter Monday, Christmas Day and Boxing Day. Choose the rule your operator's tariff describes: No holidays, Public holidays, Public holidays, Christmas Eve and New Year's Eve (the standard) or the same and Maundy Thursday. Only used when a high-load grid benefit is entered.",
-              "export_extra_ore": "What your electricity retailer pays (+) or deducts (−) per sold kWh, on top of the spot price, in öre or euro cents per kWh. 0 if your retailer pays plain spot. In SE1–SE4 this is not your grid benefit: enter that in the grid benefit fields above, or it is counted twice. Can be negative. Clear the field to revert to your country's standard tariff.",
+              "retail_price_model": "The electricity contract you have today: how your electricity retailer prices the electricity you buy. Quarter-hour price: the spot price of each quarter-hour. Choose it also for an hourly-price contract: Wolta counts per quarter-hour, so the price can differ within the hour from what your retailer charges. Monthly price: the average of the spot price over the calendar month (the plain average of the month's spot prices, quarter-hour from October 2025 and hourly before). The price is set after the month is over, so the purchase-price sensor has no quarter-hour price. Fixed price: the price in “Fixed price”. Contracts that mix these (part fixed, part spot) are not supported. If your retailer charges for volume weighting, put that cost in the supplier markup. A change applies from today: Wolta adds it to your contract history and keeps counting earlier days with the contract you had then. Your first answer (a contract or a markup where Wolta only had its standard figure) applies to all of your history instead. Changed contract on another day, or entered the wrong one? Correct the date in the contract list on wolta.se.",
+              "retail_fixed_ore": "Your fixed electricity price, excluding VAT, in öre/kWh: the retailer's price including its markup. Only for the Fixed price contract, which requires it; the markup is not used then and is removed. Between 0 and 500. It is removed when you change to another contract.",
+              "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). In Sweden (SE1–SE4), with the contract Monthly price, include here what your retailer charges for volume weighting, which is not part of the average. With Fixed price there is no markup (the fixed price is the retailer's whole price), so Wolta removes it. A change applies from today (empty = Wolta's default of 6 öre per kWh). Clear the field to revert to your country's standard tariff.",
+              "grid_benefit_ore": "The grid benefit (nätnytta) your network operator pays per kWh you feed in, excluding VAT, in öre/kWh. It is on your network operator's statement and is not what your electricity retailer pays (that is the retailer's terms, below). Enter 0 if you get none. If it also has a percentage of spot (“Sold electricity, percent of spot”), this is its fixed part and is required: enter 0 if you only have a percentage. If your network operator pays a different amount in some time periods (set on wolta.se), this is the amount outside them and is required too. Left empty, Wolta uses a standard 5 öre. Sweden (SE1–SE4) only, between −20 and 50. Clear the field to revert to the standard.",
+              "export_extra_ore": "What your electricity retailer pays (+) or deducts (−) per sold kWh, on top of the spot price, in öre or euro cents per kWh. 0 if your retailer pays plain spot. In SE1–SE4 this is not your grid benefit: enter that in “Grid benefit”, or it is counted twice. Can be negative. Clear the field to revert to your country's standard tariff.",
               "export_extra_pct": "The percentage part of what is paid for your sold electricity, as a percent of the spot price (can be negative). In SE1–SE4 it is the percentage part of your grid benefit and needs the fixed part in the Grid benefit field above (0 if you only have a percentage). Clear the field to remove the percent component.",
               "reduced_energy_tax": "Some municipalities in northern Sweden have a reduced energy tax: your grid operator deducts 9.6 öre/kWh excluding VAT on the bill. It applies in all municipalities in Norrbotten, Västerbotten and Jämtland, and in Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen and Torsby. Source: Skatteverket. Choose Yes if you live in one of them and No if you do not. Not set means you have not answered: in SE1–SE3 the purchase-price sensor has no price (its state is unknown) until you do."
             }
@@ -593,13 +575,11 @@
       "battery_pair_incomplete": "Capacity and power go together: fill in both, or leave both empty and let Wolta measure them.",
       "grid_fixed_required": "A grid fee given as a percentage of spot needs its fixed part too. Fill in \"Grid fee (transfer)\" in the Tariffs section (0 if you only have a percentage).",
       "grid_benefit_fixed_required": "A grid benefit given as a percentage of spot needs its fixed part too. Fill in \"Grid benefit\" in the Tariffs section (0 if you only have a percentage).",
-      "grid_benefit_peak_requires_base": "The high-load grid benefit is an exception to the rest of the year, so fill in \"Grid benefit\" too.",
       "grid_benefit_zone": "The grid benefit can only be given in price zones SE1–SE4, so it cannot be saved for this plant's zone.",
-      "grid_var_peak_requires_base": "The high-load grid fee is an exception to the rest of the time, so fill in \"Grid fee (transfer)\" in the Tariffs section too.",
-      "peak_hours_invalid": "A high-load period starts at an hour from 0–23 and ends at an hour from 1–24, and it must start before it ends. Check the hours under \"High-load hours for the grid fee\" and \"High-load hours for the grid benefit\" in the Tariffs section.",
+      "periods_require_base": "Your tariff has time periods with a price of their own (set on wolta.se), and the time outside them needs a base price. Fill in \"Grid fee (transfer)\" or \"Grid benefit\" in the Tariffs section again (0 is a valid answer), or remove the time periods on wolta.se.",
       "retail_fixed_invalid": "The Fixed price contract needs a fixed price, and a fixed price can only be given with that contract. Check \"Fixed price\" and \"Electricity contract\" in the Tariffs section.",
-      "retail_since_invalid": "Monthly price and Fixed price need the date the contract started, and the date can only be given with those contracts. Check \"Contract valid from\" and \"Electricity contract\" in the Tariffs section.",
-      "tariff_zone_se_only": "The high-load grid fee, the high-load calendars and the electricity contract can only be given in price zones SE1–SE4, so they cannot be saved for this plant's zone.",
+      "retail_fixed_surcharge": "A fixed price is the retailer's whole price and carries no markup. Clear \"Electricity supplier markup\" in the Tariffs section, or choose another contract.",
+      "tariff_zone_se_only": "Time periods, holiday rules and the electricity contract can only be given in price zones SE1–SE4, so they cannot be saved for this plant's zone.",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },
@@ -614,14 +594,6 @@
         "not_set": "Not set",
         "no": "No",
         "yes": "Yes"
-      }
-    },
-    "peak_holidays": {
-      "options": {
-        "none": "No holidays",
-        "public": "Public holidays",
-        "public_eves": "Public holidays, Christmas Eve and New Year's Eve",
-        "public_eves_maundy": "Public holidays, Christmas Eve, New Year's Eve and Maundy Thursday"
       }
     },
     "retail_price_model": {

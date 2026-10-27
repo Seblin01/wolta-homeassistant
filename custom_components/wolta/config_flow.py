@@ -59,6 +59,9 @@ from .control_system_prefill import (
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
+    KEY_GRID_BENEFIT_PERIODS,
+    KEY_GRID_FEE_PERIODS,
+    KEY_RETAIL_EVENTS,
     BATTERY_STATUS_NEEDS_INPUT,
     BATTERY_STATUS_NONE,
     BATTERY_STATUS_PENDING,
@@ -80,16 +83,8 @@ from .const import (
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_BENEFIT_ORE,
-    CONF_GRID_BENEFIT_PEAK_END_HOUR,
-    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-    CONF_GRID_BENEFIT_PEAK_ORE,
-    CONF_GRID_BENEFIT_PEAK_START_HOUR,
-    CONF_GRID_FEE_PEAK_END_HOUR,
-    CONF_GRID_FEE_PEAK_HOLIDAYS,
-    CONF_GRID_FEE_PEAK_START_HOUR,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
-    CONF_GRID_VAR_PEAK_ORE,
     CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
@@ -100,7 +95,6 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_RETAIL_FIXED_ORE,
     CONF_RETAIL_PRICE_MODEL,
-    CONF_RETAIL_PRICE_MODEL_SINCE,
     CONF_SHARE,
     CONF_SOC,
     CONF_SOC_ABSENT,
@@ -113,13 +107,11 @@ from .const import (
     DEFAULT_BATTERY_KW,
     DEFAULT_BATTERY_KWH,
     DEFAULT_EFF,
-    DEFAULT_PEAK_HOLIDAYS,
     DEFAULT_RETAIL_PRICE_MODEL,
     DEFAULT_ZONE,
     DOMAIN,
     MIN_BATTERY_KW,
     MIN_BATTERY_KWH,
-    PEAK_HOLIDAY_RULES,
     RETAIL_PRICE_MODELS,
     SUPPORTED_ZONES,
 )
@@ -263,19 +255,15 @@ def _is_grid_fixed_error(err: WoltaApiError) -> bool:
             and _GRID_FIXED_RULE.search(str(err)) is not None)
 
 
-# The server's three 422s for the owner's grid benefit (api 0.119.0), each matched on the rule's own
+# The server's two 422s for the owner's grid benefit (api 0.119.0), each matched on the rule's own
 # wording (the "ä" plain or as the JSON escape, as for _GRID_FIXED_RULE) and mapped to the error
 # code the options form shows at the field:
 #   export_extra_pct kräver grid_benefit_ore (nätnyttans fasta del, 0 om du bara har procent)
-#   grid_benefit_peak_ore kräver grid_benefit_ore (nätnyttan i övrig tid)
-#   grid_benefit_ore och grid_benefit_peak_ore gäller bara SE1–SE4
+#   grid_benefit_ore gäller bara SE1–SE4
 _GRID_BENEFIT_RULES = (
     (re.compile(r"export_extra_pct\s+kr(?:ä|\\u00e4)ver\s+grid_benefit_ore", re.IGNORECASE),
      "grid_benefit_fixed_required"),
-    (re.compile(r"grid_benefit_peak_ore\s+kr(?:ä|\\u00e4)ver\s+grid_benefit_ore", re.IGNORECASE),
-     "grid_benefit_peak_requires_base"),
-    (re.compile(r"grid_benefit_ore\s+och\s+grid_benefit_peak_ore\s+g(?:ä|\\u00e4)ller\s+bara",
-                re.IGNORECASE),
+    (re.compile(r"grid_benefit_ore\s+g(?:ä|\\u00e4)ller\s+bara", re.IGNORECASE),
      "grid_benefit_zone"),
 )
 
@@ -285,7 +273,7 @@ def _grid_benefit_error(err: WoltaApiError) -> str | None:
 
     Like _is_grid_fixed_error, the match is the rule's own wording and not just the field names:
     another 422 that happens to name the same fields (a type error, say) is not these rules.
-    All three are shown at grid_benefit_ore, the field the owner has to fill in or clear."""
+    Both are shown at grid_benefit_ore, the field the owner has to fill in or clear."""
     if getattr(err, "status", None) != 422:
         return None
     text = str(err)
@@ -295,97 +283,131 @@ def _grid_benefit_error(err: WoltaApiError) -> str | None:
     return None
 
 
-# The market-adaptation fields (api 0.119.0), SE1-SE4 only. The names are the profile's own, which
-# are also the keyword names of WoltaApiClient.create_profile.
-_MARKET_KEYS = (
-    CONF_GRID_VAR_PEAK_ORE,
-    CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS,
-    CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
-)
-# The hours are integers on the server (a float is a 422 there); a number selector gives floats.
-_HOUR_KEYS = (
-    CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR,
-    CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-)
-# The two high-load calendars: (start hour, end hour, holiday rule, the field they belong to).
-_FEE_CALENDAR = (CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR,
-                 CONF_GRID_FEE_PEAK_HOLIDAYS)
-_BENEFIT_CALENDAR = (CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-                     CONF_GRID_BENEFIT_PEAK_HOLIDAYS)
-# The server's own hours when a calendar's side is unset (simulate/tariff.check_peak_hours).
-_DEFAULT_PEAK_START = 6
-_DEFAULT_PEAK_END = 22
+# The electricity contract that applies today (api 0.119.0), SE1-SE4 only: the contract type and
+# the fixed price. The markup (surcharge_ore) is part of the contract too, but exists in every
+# zone. The names are the profile's own, which are also the keyword names of
+# WoltaApiClient.create_profile. A change to any of the three adds an entry dated today to the
+# contract history on the server (or corrects today's entry); the history, corrections back in
+# time and the time periods are edited on wolta.se, never from here (spec
+# 2026-10-27-marknadsanpassning, Tillägg 2-4).
+_CONTRACT_KEYS = (CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE)
 # Select fields that always carry a value in the form (their default), so that an untouched form
 # does not turn the server's "not set" into a PATCH of the default: both sides of the comparison
 # read "not set" as the default, which is what the server does too.
 _SELECT_DEFAULTS = {
-    CONF_GRID_FEE_PEAK_HOLIDAYS: DEFAULT_PEAK_HOLIDAYS,
-    CONF_GRID_BENEFIT_PEAK_HOLIDAYS: DEFAULT_PEAK_HOLIDAYS,
     CONF_RETAIL_PRICE_MODEL: DEFAULT_RETAIL_PRICE_MODEL,
 }
 
 
-def _market_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
-    """The cached market-adaptation fields as create_profile keywords, all None outside SE1-SE4.
-
-    The server refuses them there (422): a value cached from before a zone correction would block
-    the reauth, as the energy-tax answer does outside SE1-SE3."""
+def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """The cached contract as create_profile keywords: the contract type and the fixed price
+    (None outside SE1-SE4, where the server refuses them with 422: a value cached from before a
+    zone correction would block the reauth, as the energy-tax answer does outside SE1-SE3), and
+    the markup, which is never sent with a fixed price (a fixed price is the retailer's whole
+    price and the server refuses a markup next to it)."""
     asked = _benefit_zone(zone)
-    return {key: (data.get(key) if asked else None) for key in _MARKET_KEYS}
+    contract = {key: (data.get(key) if asked else None) for key in _CONTRACT_KEYS}
+    fixed = contract[CONF_RETAIL_PRICE_MODEL] == "fixed"
+    return {**contract, CONF_SURCHARGE_ORE: None if fixed else data.get(CONF_SURCHARGE_ORE)}
 
 
-# The server's five 422s for the market-adaptation fields (api 0.119.0). Each is matched on the
-# rule's own wording and not on the field names alone, so another 422 that happens to name the
-# same fields (a type error, say) is not one of them. The server escapes non-ASCII in its JSON
-# and api.py reduces an error body to one line, so the match runs on the text with \uXXXX
-# escapes decoded:
-#   grid_var_peak_ore kräver grid_var_ore (nätavgiften övrig tid)
-#   höglasttidens starttimme måste vara 0–23, sluttimmen 1–24 och starten före slutet
+# The server's 422s for the time periods and the contract (api 0.119.0) that a save from here can
+# meet. Each is matched on the rule's own wording and not on the field names alone, so another
+# 422 that happens to name the same fields (a type error, say) is not one of them. The server
+# escapes non-ASCII in its JSON and api.py reduces an error body to one line, so the match runs
+# on the text with \uXXXX escapes decoded:
+#   tidsperioder kräver ett baspris (grid_var_ore resp. grid_benefit_ore)
 #   retail_fixed_ore krävs med retail_price_model fixed och får inte sättas annars
-#   retail_price_model_since krävs med retail_price_model month eller fixed och får inte
-#     sättas med quarter
-#   nätavgiftens höglast, höglastkalendrarna och elhandelsavtalet gäller bara SE1–SE4
-_MARKET_RULES = (
-    (re.compile(r"grid_var_peak_ore\s+kräver\s+grid_var_ore", re.IGNORECASE),
-     "grid_var_peak_requires_base"),
-    (re.compile(r"starttimme\s+måste\s+vara", re.IGNORECASE), "peak_hours_invalid"),
+#   surcharge_ore får inte sättas med retail_price_model fixed (det fasta priset är elhandelns
+#     hela pris)
+#   tidsperioderna, helgdagsreglerna och elhandelsavtalet gäller bara SE1–SE4
+# The rules for the period lists themselves and for the contract history are not here: this
+# form never sends them.
+_TARIFF_RULES = (
+    (re.compile(r"tidsperioder\s+kräver\s+ett\s+baspris", re.IGNORECASE),
+     "periods_require_base"),
     (re.compile(r"retail_fixed_ore\s+krävs\s+med", re.IGNORECASE), "retail_fixed_invalid"),
-    (re.compile(r"retail_price_model_since\s+krävs\s+med", re.IGNORECASE),
-     "retail_since_invalid"),
+    (re.compile(r"surcharge_ore\s+får\s+inte\s+sättas\s+med\s+retail_price_model\s+fixed",
+                re.IGNORECASE),
+     "retail_fixed_surcharge"),
     (re.compile(r"elhandelsavtalet\s+gäller\s+bara", re.IGNORECASE), "tariff_zone_se_only"),
 )
 _UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
-def _market_tariff_error(err: WoltaApiError) -> str | None:
-    """The options-form error code for one of the server's market-adaptation 422s, else None."""
+def _tariff_rule_error(err: WoltaApiError) -> str | None:
+    """The options-form error code for one of the server's period or contract 422s, else None."""
     if getattr(err, "status", None) != 422:
         return None
     text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(err))
-    for rule, code in _MARKET_RULES:
+    for rule, code in _TARIFF_RULES:
         if rule.search(text):
             return code
     return None
 
 
-def _market_error_field(code: str, patch_fields: dict[str, Any]) -> str:
-    """The field a server market-adaptation 422 is shown at.
+def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
+    """The field a server period or contract 422 is shown at.
 
-    The hours text does not say which calendar it is about: the calendar this save changed is
-    the one (the grid fee's when both or neither)."""
-    if code == "grid_var_peak_requires_base":
+    The periods text names both base prices: the one this save cleared is the one (the grid
+    fee's when neither was cleared, a cache out of step with the server)."""
+    if code == "periods_require_base":
+        if CONF_GRID_VAR_ORE not in patch_fields and CONF_GRID_BENEFIT_ORE in patch_fields:
+            return CONF_GRID_BENEFIT_ORE
         return CONF_GRID_VAR_ORE
     if code == "retail_fixed_invalid":
         return CONF_RETAIL_FIXED_ORE
-    if code == "retail_since_invalid":
-        return CONF_RETAIL_PRICE_MODEL_SINCE
-    if code == "tariff_zone_se_only":
-        return CONF_GRID_VAR_PEAK_ORE
-    benefit_touched = any(key in patch_fields for key in _BENEFIT_CALENDAR)
-    fee_touched = any(key in patch_fields for key in _FEE_CALENDAR)
-    return _BENEFIT_CALENDAR[0] if benefit_touched and not fee_touched else _FEE_CALENDAR[0]
+    if code == "retail_fixed_surcharge":
+        return CONF_SURCHARGE_ORE
+    return CONF_RETAIL_PRICE_MODEL
+
+
+# The read-only summary of what is edited on wolta.se (the time periods and the contract
+# history), in the user's HA language (sv/en, else English), like _zone_hint: counts and dates
+# are formatted here, so the sentence is too. Empty when there is nothing to summarise.
+_WEB_SUMMARY: dict[str, dict[str, str]] = {
+    "sv": {
+        "fee_one": "Nätavgiften har 1 tidsperiod med eget pris.",
+        "fee_many": "Nätavgiften har {count} tidsperioder med eget pris.",
+        "benefit_one": "Nätnyttan har 1 tidsperiod med eget pris.",
+        "benefit_many": "Nätnyttan har {count} tidsperioder med eget pris.",
+        "contract": "Avtalshistoriken har {count} avtal, det som gäller i dag sedan {date}.",
+        "tail": "De ändras på wolta.se.",
+    },
+    "en": {
+        "fee_one": "The grid fee has 1 time period with a price of its own.",
+        "fee_many": "The grid fee has {count} time periods with a price of their own.",
+        "benefit_one": "The grid benefit has 1 time period with a price of its own.",
+        "benefit_many": "The grid benefit has {count} time periods with a price of their own.",
+        "contract": "The contract history has {count} contracts, today's since {date}.",
+        "tail": "These are changed on wolta.se.",
+    },
+}
+
+
+def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
+    """One short paragraph on the server's time periods and contract history, or "".
+
+    Shown, never edited: the lists are changed on wolta.se, and nothing here sends them."""
+    lang = (hass_language or "en").split("-")[0]
+    text = _WEB_SUMMARY.get(lang, _WEB_SUMMARY["en"])
+    parts: list[str] = []
+    for key, prefix in ((KEY_GRID_FEE_PERIODS, "fee"), (KEY_GRID_BENEFIT_PERIODS, "benefit")):
+        periods = server.get(key)
+        if isinstance(periods, list) and periods:
+            parts.append(text[f"{prefix}_one"] if len(periods) == 1
+                         else text[f"{prefix}_many"].format(count=len(periods)))
+    events = server.get(KEY_RETAIL_EVENTS)
+    if isinstance(events, list) and events and isinstance(events[-1], dict):
+        # The server keeps the list sorted by date and never stores a future date, so today's
+        # contract is the last entry. Only the first entry can lack a date ("from the start"),
+        # and a stored list is never that entry alone.
+        since = events[-1].get("date")
+        if since:
+            parts.append(text["contract"].format(count=len(events), date=since))
+    if not parts:
+        return ""
+    return " ".join([*parts, text["tail"]])
 
 
 def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -1205,8 +1227,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
             CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
             CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_SOC_ABSENT,
-            CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
-            *_MARKET_KEYS,
+            CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS,
         ):
             if prof.get(key) is not None:
                 entry_data[key] = prof[key]
@@ -1240,8 +1261,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_RESERVE_PCT, CONF_COST_SEK, CONF_PURCHASE_DATE,
                 CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE,
                 CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX,
-                CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
-                *_MARKET_KEYS,
+                CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS,
             ):
                 if prof.get(key) is not None:
                     entry_data[key] = prof[key]
@@ -1352,7 +1372,6 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     cost_sek=entry_data.get(CONF_COST_SEK) if created_by_ha else None,
                     purchase_date=entry_data.get(CONF_PURCHASE_DATE),
                     grid_var_ore=entry_data.get(CONF_GRID_VAR_ORE),
-                    surcharge_ore=entry_data.get(CONF_SURCHARGE_ORE),
                     export_extra_ore=entry_data.get(CONF_EXPORT_EXTRA_ORE),
                     grid_var_pct=entry_data.get(CONF_GRID_VAR_PCT),
                     export_extra_pct=entry_data.get(CONF_EXPORT_EXTRA_PCT),
@@ -1363,13 +1382,13 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # would block the reauth, as the energy-tax answer below.
                     grid_benefit_ore=(entry_data.get(CONF_GRID_BENEFIT_ORE)
                                       if _benefit_zone(entry_data[CONF_ZONE]) else None),
-                    grid_benefit_peak_ore=(entry_data.get(CONF_GRID_BENEFIT_PEAK_ORE)
-                                           if _benefit_zone(entry_data[CONF_ZONE]) else None),
-                    # The market-adaptation fields (api 0.119.0): the grid fee's high-load value,
-                    # the two calendars and the electricity contract. Same rule as the grid
-                    # benefit above: a surviving row keeps the server's, a new row takes these,
-                    # and outside SE1-SE4 they are omitted.
-                    **_market_profile_kwargs(entry_data[CONF_ZONE], entry_data),
+                    # The electricity contract that applied today (api 0.119.0) and the markup.
+                    # Same rule as the grid benefit above: a surviving row keeps the server's
+                    # contract and its history, a new row takes today's contract from here, and
+                    # outside SE1-SE4 the contract is omitted. The markup is never sent with a
+                    # fixed price. The time periods and the contract history are not cached and
+                    # not sent: they are wolta.se's, and a new row starts without them.
+                    **_contract_profile_kwargs(entry_data[CONF_ZONE], entry_data),
                     nameplate_kwh=entry_data.get(CONF_NAMEPLATE_KWH),
                     nameplate_kw=entry_data.get(CONF_NAMEPLATE_KW),
                     client_plant_id=entry_data.get(CONF_PLANT_ID) or reauth_entry.entry_id,
@@ -1539,12 +1558,10 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         CONF_EFF, CONF_RESERVE_PCT,
     ),
     _SEC_ECONOMY: (CONF_COST_SEK, CONF_PURCHASE_DATE),
-    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_GRID_VAR_PEAK_ORE, *_FEE_CALENDAR,
-                   CONF_GRID_VAR_PCT,
-                   CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
-                   CONF_SURCHARGE_ORE,
-                   CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE, *_BENEFIT_CALENDAR,
-                   CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT, CONF_REDUCED_ENERGY_TAX),
+    _SEC_TARIFFS: (CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT,
+                   CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_SURCHARGE_ORE,
+                   CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
+                   CONF_REDUCED_ENERGY_TAX),
 }
 # The energy-tax answer is tri-state on the server (null / false / true) and a boolean selector
 # can only give true/false, so the form uses a list select whose values map to those three.
@@ -1556,10 +1573,9 @@ _TAX_CHOICES = (_TAX_NOT_SET, "no", "yes")
 _REDUCED_TAX_ZONES = ("SE1", "SE2", "SE3")
 # Zones with a grid-benefit field. The server refuses the benefit fields outside SE1-SE4
 # (tariff.check_grid_benefit_zone, 422), so the form does not offer them elsewhere. The same
-# goes for the market-adaptation fields (the grid fee's high-load hours, the two calendars and
-# the electricity contract).
+# goes for the electricity contract (the contract type and the fixed price).
 _BENEFIT_ZONES = ("SE1", "SE2", "SE3", "SE4")
-# Span of the two grid-benefit fields, öre/kWh excl. VAT: the server's own (api 0.119.0,
+# Span of the grid-benefit field, öre/kWh excl. VAT: the server's own (api 0.119.0,
 # simulate/tariff.py); a value outside it is refused with 422.
 _BENEFIT_MIN_ORE = -20.0
 _BENEFIT_MAX_ORE = 50.0
@@ -1606,11 +1622,10 @@ def _zone_group(zone: str) -> list[tuple[str, str]]:
 _TARIFF_PRICE_KEYS = frozenset(
     {
         CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX,
-        CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
+        CONF_GRID_BENEFIT_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
-        # The high-load fee, both calendars and the contract decide what the owner pays and is
-        # paid per quarter.
-        *_MARKET_KEYS,
+        # The contract decides what the owner pays per quarter.
+        *_CONTRACT_KEYS,
     }
 )
 
@@ -1772,10 +1787,6 @@ class WoltaOptionsFlow(OptionsFlow):
                         value = sec_input[key]
                         if key == CONF_REDUCED_ENERGY_TAX:
                             value = _choice_to_tax(value)
-                        elif key in _HOUR_KEYS and value is not None and float(value).is_integer():
-                            # Floats from the number selector; the server takes integers. A
-                            # fractional hour stays as typed and is refused below, not truncated.
-                            value = int(value)
                         flat[key] = value
 
             # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
@@ -1805,8 +1816,9 @@ class WoltaOptionsFlow(OptionsFlow):
             # is hidden its absence is not "not set": the stored answer must survive, so the
             # diff skips the key (same reasoning as plant_scoped_cost above).
             tax_asked = self._tax_asked()
-            # Same for the grid-benefit fields and the market-adaptation fields, which only exist
-            # in SE1-SE4.
+            # Same for the grid-benefit field and the contract fields, which only exist in
+            # SE1-SE4. The time periods, their holiday rules and the contract history are not in
+            # the form at all and are never part of the diff: they are edited on wolta.se.
             benefit_asked = self._benefit_asked()
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
@@ -1817,8 +1829,7 @@ class WoltaOptionsFlow(OptionsFlow):
                         continue
                     if key == CONF_REDUCED_ENERGY_TAX and not tax_asked:
                         continue
-                    if (key in (CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE, *_MARKET_KEYS)
-                            and not benefit_asked):
+                    if key in (CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS) and not benefit_asked:
                         continue
                     val = flat.get(key)
                     server_val = self._server.get(key)
@@ -1873,9 +1884,9 @@ class WoltaOptionsFlow(OptionsFlow):
                 elif terms_in is not None:
                     patch_fields[CONF_EXPORT_EXTRA_ORE] = terms_in
 
-            # The server's two grid-benefit combination rules, said before sending. Both are
-            # checked on the state after the save and only when the save touches one of their
-            # fields, like the server (tariff.patch_override_updates): a legacy profile with just
+            # The server's grid-benefit combination rule, said before sending. It is checked on
+            # the state after the save and only when the save touches one of its fields, like the
+            # server (tariff.patch_override_updates): a legacy profile with just
             # a percentage can still save an unrelated change, and the repair
             # grid_benefit_fixed_missing asks for the fixed part. Shown at grid_benefit_ore, the
             # field that is missing, and ALSO on base (same code), exactly like
@@ -1884,76 +1895,50 @@ class WoltaOptionsFlow(OptionsFlow):
             # why is the worst outcome. The texts name the field and the section.
             if benefit_asked:
                 benefit_after = flat.get(CONF_GRID_BENEFIT_ORE)
-                peak_after = flat.get(CONF_GRID_BENEFIT_PEAK_ORE)
                 pct_after = flat.get(CONF_EXPORT_EXTRA_PCT)
                 if (
-                    {CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE} & patch_fields.keys()
-                    and peak_after is not None and benefit_after is None
-                ):
-                    errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = "grid_benefit_peak_requires_base"
-                elif (
                     {CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_PCT} & patch_fields.keys()
                     and pct_after not in (None, 0) and benefit_after is None
                 ):
                     errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = "grid_benefit_fixed_required"
 
-            # The market-adaptation rules, said before sending (field AND base, like the above).
-            # Only a save that touches one of the fields of a rule is checked, like the server.
+            # A time-period list needs its base price, the price outside the periods (0 is an
+            # answer): the server refuses clearing the base under a list (check_periods, 422), so
+            # the form says it first, at the cleared field and on base. The lists themselves are
+            # never sent from here; they are the server's (edited on wolta.se), so the snapshot is
+            # what decides whether one exists.
+            for base_key, list_key in ((CONF_GRID_VAR_ORE, KEY_GRID_FEE_PERIODS),
+                                       (CONF_GRID_BENEFIT_ORE, KEY_GRID_BENEFIT_PERIODS)):
+                if (base_key in patch_fields and patch_fields[base_key] is None
+                        and self._server.get(list_key)):
+                    errors[base_key] = errors["base"] = "periods_require_base"
+
+            # The electricity contract, said before sending (field AND base, like the above). A
+            # change applies from today: the server adds an entry dated today to the contract
+            # history (or corrects today's), and the history is never rewritten from here. Only a
+            # save that touches one of the contract's fields is checked, like the server.
             dropped: set[str] = set()
             if benefit_asked:
                 model_after = flat.get(CONF_RETAIL_PRICE_MODEL) or DEFAULT_RETAIL_PRICE_MODEL
-                # The server drops the fixed price when the contract leaves `fixed` and the start
-                # date when it goes to `quarter`. The form still shows the old values, so they are
-                # not sent back (the server would answer 422 for them) and the cache follows.
-                # A NEW value for a field that does not apply is sent, and refused by the server.
-                if model_after != "fixed":
-                    dropped.add(CONF_RETAIL_FIXED_ORE)
-                if model_after == DEFAULT_RETAIL_PRICE_MODEL:
-                    dropped.add(CONF_RETAIL_PRICE_MODEL_SINCE)
+                # A fixed price carries no markup and only a fixed price carries a fixed price: the
+                # server drops the one that no longer applies when the contract changes type. The
+                # form still shows the old value, so a cleared one is not sent back and the cache
+                # follows. A NEW value for a field that does not apply is refused below.
+                dropped.add(CONF_SURCHARGE_ORE if model_after == "fixed" else CONF_RETAIL_FIXED_ORE)
                 for key in dropped:
-                    if patch_fields.get(key, 0) is None:
+                    if key in patch_fields and patch_fields[key] is None:
                         del patch_fields[key]
-
-                peak_after = flat.get(CONF_GRID_VAR_PEAK_ORE)
-                if (
-                    {CONF_GRID_VAR_ORE, CONF_GRID_VAR_PEAK_ORE} & patch_fields.keys()
-                    and peak_after is not None and flat.get(CONF_GRID_VAR_ORE) is None
-                ):
-                    errors[CONF_GRID_VAR_ORE] = errors["base"] = "grid_var_peak_requires_base"
-
-                for start_key, end_key, holidays_key in (_FEE_CALENDAR, _BENEFIT_CALENDAR):
-                    if not {start_key, end_key} & patch_fields.keys():
-                        continue
-                    fractional = [k for k in (start_key, end_key)
-                                  if flat.get(k) is not None and not isinstance(flat[k], int)]
-                    if fractional:
-                        errors[fractional[0]] = errors["base"] = "peak_hours_invalid"
-                        continue
-                    # An unset side is the server's own 6 / 22 (check_peak_hours), so a lone
-                    # 23 as start, or a lone 5 as end, is refused here as it would be there.
-                    start_after = flat.get(start_key)
-                    end_after = flat.get(end_key)
-                    start_after = _DEFAULT_PEAK_START if start_after is None else start_after
-                    end_after = _DEFAULT_PEAK_END if end_after is None else end_after
-                    if start_after >= end_after:
-                        errors[start_key] = errors["base"] = "peak_hours_invalid"
-
                 if {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
-                        CONF_RETAIL_PRICE_MODEL_SINCE} & patch_fields.keys():
-                    if (model_after != DEFAULT_RETAIL_PRICE_MODEL
-                            and flat.get(CONF_RETAIL_PRICE_MODEL_SINCE) is None):
-                        errors[CONF_RETAIL_PRICE_MODEL_SINCE] = errors["base"] = (
-                            "retail_since_invalid")
+                        CONF_SURCHARGE_ORE} & patch_fields.keys():
                     if model_after == "fixed" and flat.get(CONF_RETAIL_FIXED_ORE) is None:
                         errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
                     # The other direction: a value typed for a contract it does not belong to. An
-                    # unchanged stale value is not in the PATCH (see `dropped`) and passes.
+                    # unchanged stale value is not in the PATCH and passes; surcharge_ore is never
+                    # sent with a fixed price.
                     if model_after != "fixed" and patch_fields.get(CONF_RETAIL_FIXED_ORE) is not None:
                         errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
-                    if (model_after == DEFAULT_RETAIL_PRICE_MODEL
-                            and patch_fields.get(CONF_RETAIL_PRICE_MODEL_SINCE) is not None):
-                        errors[CONF_RETAIL_PRICE_MODEL_SINCE] = errors["base"] = (
-                            "retail_since_invalid")
+                    if model_after == "fixed" and patch_fields.get(CONF_SURCHARGE_ORE) is not None:
+                        errors[CONF_SURCHARGE_ORE] = errors["base"] = "retail_fixed_surcharge"
 
             if patch_fields and not errors:
                 try:
@@ -1963,15 +1948,15 @@ class WoltaOptionsFlow(OptionsFlow):
                     # The same refusal from the server (a cache that is out of step with it)
                     # reads as the same fault, not as a connection problem.
                     benefit_err = _grid_benefit_error(err)
-                    market_err = _market_tariff_error(err)
+                    tariff_err = _tariff_rule_error(err)
                     if benefit_err is not None:
                         # Field AND base, as for the prechecks above. A zone refusal can come
                         # while the field is hidden (a cache out of step), where base is the
                         # only place the owner can read it.
                         errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
-                    elif market_err is not None:
-                        errors[_market_error_field(market_err, patch_fields)] = market_err
-                        errors["base"] = market_err
+                    elif tariff_err is not None:
+                        errors[_tariff_rule_field(tariff_err, patch_fields)] = tariff_err
+                        errors["base"] = tariff_err
                     else:
                         errors["base"] = (
                             "grid_fixed_required" if _is_grid_fixed_error(err)
@@ -1991,7 +1976,8 @@ class WoltaOptionsFlow(OptionsFlow):
                         else:
                             new_data[key] = val
                     if CONF_RETAIL_PRICE_MODEL in patch_fields:
-                        # What the server drops with the contract change (see `dropped` above).
+                        # What the server drops with a change of contract type (see `dropped`
+                        # above): the fixed price leaving `fixed`, the markup going to it.
                         for key in dropped:
                             new_data.pop(key, None)
                     if invert_changed:
@@ -2133,7 +2119,7 @@ class WoltaOptionsFlow(OptionsFlow):
             + [date_row]
         ))
         ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")
-        # The high-load fee and the fixed price exist in SE1-SE4 only, where the unit is öre.
+        # The fixed price exists in SE1-SE4 only, where the unit is öre.
         se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
 
         def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
@@ -2148,27 +2134,17 @@ class WoltaOptionsFlow(OptionsFlow):
             return (vol.Optional(key, default=current),
                     SelectSelector(SelectSelectorConfig(
                         options=options, mode=mode, translation_key=translation_key)))
-        market_asked = self._benefit_asked()
+        contract_asked = self._benefit_asked()
 
-        def _hours_rows(start_key: str, end_key: str, holidays_key: str) -> list[tuple[Any, Any]]:
-            """One high-load calendar: start hour, end hour (local time, end exclusive) and the
-            holiday rule. The rule always carries a value: the server's, else its default."""
-            return [
-                _opt(start_key, _number_selector(min_val=0, max_val=23, step=1, unit="h")),
-                _opt(end_key, _number_selector(min_val=1, max_val=24, step=1, unit="h")),
-                _select_row(holidays_key, PEAK_HOLIDAY_RULES, DEFAULT_PEAK_HOLIDAYS,
-                            "peak_holidays", SelectSelectorMode.DROPDOWN),
-            ]
-
-        # The grid fee, its high-load value and calendar under it; the electricity contract with
-        # the supplier's markup (spec 2026-10-27-marknadsanpassning).
-        tariff_rows = [_opt(CONF_GRID_VAR_ORE, ore_selector)]
-        if market_asked:
-            tariff_rows += [_opt(CONF_GRID_VAR_PEAK_ORE, se_ore_selector),
-                            *_hours_rows(*_FEE_CALENDAR)]
-        tariff_rows.append(
-            _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")))
-        if market_asked:
+        # The grid fee (the base price outside any time periods) and its percentage; the
+        # electricity contract that applies today with the supplier's markup (spec
+        # 2026-10-27-marknadsanpassning). The time periods and the contract history are shown as
+        # a summary in the description and edited on wolta.se.
+        tariff_rows = [
+            _opt(CONF_GRID_VAR_ORE, ore_selector),
+            _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")),
+        ]
+        if contract_asked:
             tariff_rows += [
                 # default (not suggested_value), like the energy-tax select: it always carries a
                 # value, so the form always submits one; "not set" on the server is the default.
@@ -2176,20 +2152,14 @@ class WoltaOptionsFlow(OptionsFlow):
                             DEFAULT_RETAIL_PRICE_MODEL, CONF_RETAIL_PRICE_MODEL,
                             SelectSelectorMode.LIST),
                 _opt(CONF_RETAIL_FIXED_ORE, se_ore_selector),
-                _opt(CONF_RETAIL_PRICE_MODEL_SINCE, _date_selector()),
             ]
         tariff_rows.append(_opt(CONF_SURCHARGE_ORE, ore_selector))
-        if market_asked:
+        if contract_asked:
             # The grid benefit first, then the retailer's terms next to it (spec
             # 2026-10-26-forsaljningspris): the owner who enters the benefit sees the retailer
             # value and confirms it.
-            benefit_selector = _number_selector(
-                min_val=_BENEFIT_MIN_ORE, max_val=_BENEFIT_MAX_ORE, step=0.1, unit="öre per kWh")
-            tariff_rows += [
-                _opt(CONF_GRID_BENEFIT_ORE, benefit_selector),
-                _opt(CONF_GRID_BENEFIT_PEAK_ORE, benefit_selector),
-                *_hours_rows(*_BENEFIT_CALENDAR),
-            ]
+            tariff_rows.append(_opt(CONF_GRID_BENEFIT_ORE, _number_selector(
+                min_val=_BENEFIT_MIN_ORE, max_val=_BENEFIT_MAX_ORE, step=0.1, unit="öre per kWh")))
         tariff_rows += [
             _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
@@ -2212,7 +2182,7 @@ class WoltaOptionsFlow(OptionsFlow):
             vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
             # Open when the fixed-part error is shown: base errors render at the top of the
             # form, and the field they ask for sits in this section. Also open for an error on any
-            # field inside it (the grid benefit, the high-load fee, the calendars, the contract).
+            # field inside it (the grid benefit, the base prices, the contract).
             vol.Required(_SEC_TARIFFS): section(
                 tariffs_schema,
                 {"collapsed": not (errors.get("base") == "grid_fixed_required"
@@ -2229,4 +2199,11 @@ class WoltaOptionsFlow(OptionsFlow):
         if errors and user_input is not None:
             schema = self.add_suggested_values_to_schema(
                 schema, _with_cleared_fields_empty(schema, user_input))
-        return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)
+        # The time periods and the contract history are shown, never edited (spec
+        # 2026-10-27-marknadsanpassning, Tillägg 2 and 4): a short summary in the description,
+        # empty when the plant has none. Always passed, so the description never shows a raw
+        # placeholder.
+        summary = _web_summary(self.hass.config.language, srv)
+        return self.async_show_form(
+            step_id="settings", data_schema=schema, errors=errors,
+            description_placeholders={"web_summary": f"\n\n{summary}" if summary else ""})

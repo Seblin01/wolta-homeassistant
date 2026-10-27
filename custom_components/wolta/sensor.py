@@ -849,7 +849,9 @@ class _WoltaProfilePriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorE
 
     The purchase side has no quarter-hour price with a monthly-price contract (`reason`
     `monthly_price_contract`: the price is set after the month is over). `prices` of the
-    purchase sensors carries `grid_fee_peak` per quarter, the grid fee's own high-load calendar.
+    purchase sensors carries `grid_fee` per quarter (SEK/kWh excluding VAT, the quarter's whole
+    variable grid fee) and the sale sensors `grid_benefit` (SEK/kWh), each following its own
+    time periods.
     """
 
     _attr_has_entity_name = True
@@ -999,10 +1001,10 @@ class WoltaPurchasePriceSensor(_WoltaProfilePriceSensor):
 class WoltaSalePriceSensor(_WoltaProfilePriceSensor):
     """What the owner is paid for sold electricity right now: SEK/kWh EXCLUDING VAT (a
     private person sells without VAT), for the current quarter-hour: spot + the grid benefit
-    of that quarter (the high-load amount in high-load hours when one is set) + the
-    retailer's terms + the tax reduction for micro-production. `prices` carries
-    `grid_benefit_peak` per quarter so the owner can see why the grid benefit differs (the grid
-    benefit has its own high-load calendar).
+    of that quarter (the time-period price when the quarter is in one of the owner's time
+    periods, else the base price) + the retailer's terms + the tax reduction for
+    micro-production. `prices` carries `grid_benefit` per quarter (SEK/kWh) so the owner can see
+    why the grid benefit differs.
 
     `reason` is the server's `sale_reason`: `grid_benefit_not_set` (enter the grid benefit
     under Configure -> Settings -> Tariffs), `fx_missing` or `zone_not_supported`.

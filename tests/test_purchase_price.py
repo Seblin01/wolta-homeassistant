@@ -54,7 +54,7 @@ _COMPONENTS = {
 
 
 def _ppt(ts: str, spot: float | None, purchase: float | None, *, omit_purchase: bool = False):
-    point = {"ts_utc": ts, "spot_ore_kwh": spot, "grid_fee_peak": False}
+    point = {"ts_utc": ts, "spot_ore_kwh": spot, "grid_fee_ore": 25.0}
     if not omit_purchase:
         point["purchase_ore_kwh"] = purchase
     return point
@@ -90,9 +90,9 @@ def test_purchase_series_is_sek_per_kwh_and_keeps_null_purchase():
     series = purchase_series(_purchase())
 
     assert series == [
-        {"start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee_peak": False},
-        {"start": "2026-10-26T10:15:00Z", "purchase": 1.3, "spot": 0.6, "grid_fee_peak": False},
-        {"start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "grid_fee_peak": False},
+        {"start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee": 0.25},
+        {"start": "2026-10-26T10:15:00Z", "purchase": 1.3, "spot": 0.6, "grid_fee": 0.25},
+        {"start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "grid_fee": 0.25},
     ]
 
 
@@ -114,7 +114,7 @@ def test_purchase_series_tolerates_non_numeric_prices():
     resp["today"][0]["spot_ore_kwh"] = "52"
 
     assert purchase_series(resp)[0] == {
-        "start": "2026-10-26T10:00:00Z", "purchase": None, "spot": None, "grid_fee_peak": False}
+        "start": "2026-10-26T10:00:00Z", "purchase": None, "spot": None, "grid_fee": 0.25}
 
 
 def test_current_purchase_picks_the_covering_quarter():
@@ -718,9 +718,9 @@ async def test_purchase_sensor_state_attributes_and_one_request_per_poll(
     assert state.attributes["reason"] is None
     assert state.attributes["components"] == _COMPONENTS
     assert state.attributes["prices"] == [
-        {"start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee_peak": False},
-        {"start": "2026-10-26T10:15:00Z", "purchase": 1.3, "spot": 0.6, "grid_fee_peak": False},
-        {"start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "grid_fee_peak": False},
+        {"start": "2026-10-26T10:00:00Z", "purchase": 1.234, "spot": 0.523, "grid_fee": 0.25},
+        {"start": "2026-10-26T10:15:00Z", "purchase": 1.3, "spot": 0.6, "grid_fee": 0.25},
+        {"start": "2026-10-27T10:00:00Z", "purchase": None, "spot": 0.3, "grid_fee": 0.25},
     ]
     # The spot sensor is untouched: still ex VAT.
     assert hass.states.get(_entity_id(hass, SPOT_ID)).state == "0.523"
@@ -795,7 +795,7 @@ async def test_purchase_sensor_unknown_for_a_quarter_without_a_price(
         "start": "2026-10-27T10:00:00Z",
         "purchase": None,
         "spot": 0.3,
-        "grid_fee_peak": False,
+        "grid_fee": 0.25,
     }
 
 

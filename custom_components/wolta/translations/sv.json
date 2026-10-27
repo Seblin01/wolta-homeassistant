@@ -142,9 +142,9 @@
       "title": "Wolta: nätavgiften ser för hög ut",
       "description": "Nätavgiften du angett är över {limit} öre per kWh, mer än någon rörlig nätavgift vi har sett. Den innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
     },
-    "grid_fee_peak_implausible": {
-      "title": "Wolta: nätavgiften i höglasttid ser för hög ut",
-      "description": "Nätavgiften för höglasttid du angett är över {limit} öre per kWh, mer än något vi har sett. Den innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
+    "grid_fee_period_implausible": {
+      "title": "Wolta: en tidsperiod i nätavgiften ser för hög ut",
+      "description": "En av nätavgiftens tidsperioder har ett pris över {limit} öre per kWh, mer än något vi har sett. Det innehåller troligen moms och energiskatt. Wolta lägger på dem själv, så energiskatten räknas nu två gånger, både i betyget och i ekonomin.\n\nAnge bara överföringsavgiften, exklusive moms och energiskatt. Tidsperioderna ändrar du på wolta.se, på anläggningens sida under Tariffer (Konfigurera → Koppla till ett wolta.se-konto, om anläggningen inte är kopplad än). Tar ditt nätbolag verkligen så mycket kan du låta värdet stå."
     },
     "grid_fixed_missing": {
       "title": "Wolta: nätavgiften saknar sin fasta del",
@@ -492,7 +492,7 @@
       },
       "settings": {
         "title": "Wolta-profil",
-        "description": "Det här är din delade Wolta-profil – ändringar här syns på wolta.se, och ändringar gjorda på wolta.se syns här. Töm ett valfritt fält för att rensa värdet.",
+        "description": "Det här är din delade Wolta-profil – ändringar här syns på wolta.se, och ändringar gjorda på wolta.se syns här. Töm ett valfritt fält för att rensa värdet.{web_summary}",
         "sections": {
           "battery": {
             "name": "Batteri",
@@ -527,44 +527,26 @@
           },
           "tariffs": {
             "name": "Tariffer",
-            "description": "Lämna tomt för landets standardtariff.",
+            "description": "Lämna tomt för landets standardtariff. I Sverige (SE1–SE4) gäller en ändring av elhandelsavtalet från i dag, och dina tidigare avtal står kvar som de var. Tidsperioder med eget pris, avtalshistoriken och rättelser bakåt i tiden anger du på wolta.se (Konfigurera → Koppla till ett wolta.se-konto, om anläggningen inte är kopplad än).",
             "data": {
               "grid_var_ore": "Nätavgift (överföring)",
-              "grid_var_peak_ore": "Nätavgift i höglasttid (valfritt, tidstariff)",
-              "grid_fee_peak_start_hour": "Höglasttid för nätavgiften: starttimme (0–23)",
-              "grid_fee_peak_end_hour": "Höglasttid för nätavgiften: sluttimme (1–24)",
-              "grid_fee_peak_holidays": "Höglasttid för nätavgiften: helgdagar",
               "grid_var_pct": "Nätavgiftens procentdel (% av spot)",
               "retail_price_model": "Elhandelsavtal",
               "retail_fixed_ore": "Fastpris (öre per kWh)",
-              "retail_price_model_since": "Avtalet gäller från",
               "surcharge_ore": "Elhandlarens påslag (öre/ct per kWh)",
               "grid_benefit_ore": "Nätnytta",
-              "grid_benefit_peak_ore": "Nätnytta i höglasttid (valfritt)",
-              "grid_benefit_peak_start_hour": "Höglasttid för nätnyttan: starttimme (0–23)",
-              "grid_benefit_peak_end_hour": "Höglasttid för nätnyttan: sluttimme (1–24)",
-              "grid_benefit_peak_holidays": "Höglasttid för nätnyttan: helgdagar",
               "export_extra_ore": "Elhandelns villkor för såld el (öre/ct per kWh)",
               "export_extra_pct": "Såld el, andel av spot (SE1–SE4: del av nätnyttan)",
               "reduced_energy_tax": "Reducerad energiskatt"
             },
             "data_description": {
-              "grid_var_ore": "Din rörliga nätavgift (överföringsavgift), exklusive moms och energiskatt, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Wolta lägger på moms och energiskatt själv. Har nätavgiften också en procentdel av spot (”Nätavgiftens procentdel”) är det här dess fasta del, och den är obligatorisk: ange 0 om du bara har procent. I Sverige (SE1–SE4): har din tariff höglasttid med högre avgift (tidstariff) är det här avgiften för övrig tid, och avgiften för höglasttid anger du i ”Nätavgift i höglasttid”. Rensa fältet för att återgå till landets schablon.",
-              "grid_var_peak_ore": "Valfritt, för en tidstariff. Din rörliga nätavgift under nätföretagets höglasttid, exklusive moms och energiskatt, i öre/kWh. Wolta räknar vardagar från november till mars som höglast, med de timmar och den helgdagsregel du anger nedan; övrig tid gäller ”Nätavgift (överföring)”, så det fältet krävs också. Gäller bara Sverige (SE1–SE4), mellan 0 och 500. Rensa fältet för att ha en nätavgift hela året.",
-              "grid_fee_peak_start_hour": "Timmen då nätavgiftens höglasttid börjar, svensk lokal tid, 0–23. Lämna tomt för schablonen 6 (06:00). Används bara när en nätavgift för höglasttid är angiven.",
-              "grid_fee_peak_end_hour": "Timmen då nätavgiftens höglasttid slutar, 1–24, svensk lokal tid. Sluttimmen själv är inte höglast (22 betyder till kl 22:00) och den måste ligga efter starttimmen. Lämna tomt för schablonen 22. Används bara när en nätavgift för höglasttid är angiven.",
-              "grid_fee_peak_holidays": "Vilka dagar som undantas från höglasttiden fast de är vardagar från november till mars. Allmänna helgdagar är nyårsdagen, trettondedag jul, långfredag, annandag påsk, juldagen och annandag jul. Nätföretagen skiljer sig åt: välj den regel som ditt nätföretags tariff beskriver. Inga helgdagar (alla vardagar räknas, till exempel Herrljunga), Allmänna helgdagar (till exempel VOE), Allmänna helgdagar, julafton och nyårsafton (till exempel Vattenfall Eldistribution; schablonen) eller samma och skärtorsdag (till exempel Ellevio). Används bara när en nätavgift för höglasttid är angiven.",
+              "grid_var_ore": "Din rörliga nätavgift (överföringsavgift), exklusive moms och energiskatt, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). Wolta lägger på moms och energiskatt själv. Har nätavgiften också en procentdel av spot (”Nätavgiftens procentdel”) är det här dess fasta del, och den är obligatorisk: ange 0 om du bara har procent. I Sverige (SE1–SE4): har din tariff tidsperioder med eget pris (tidstariff, anges på wolta.se) är det här priset utanför dem, och då är det också obligatoriskt. Rensa fältet för att återgå till landets schablon.",
               "grid_var_pct": "Nätavgiftens procentdel av spotpriset. Den kräver den fasta delen i ”Nätavgift (överföring)” (0 om du bara har procent). Rensa fältet för att ta bort procentdelen.",
-              "retail_price_model": "Hur din elhandlare prissätter elen du köper. Kvartspris: spotpriset för varje kvart. Välj det också för ett timprisavtal: Wolta räknar per kvart, så priset kan skilja sig inom timmen från vad din elhandlare tar. Månadspris: medelvärdet av spotpriset över kalendermånaden (det enkla medelvärdet av månadens spotpriser, kvartspris från oktober 2025 och timpris före). Priset fastställs i efterhand, så sensorn för inköpspris har inget kvartspris. Fastpris: priset i ”Fastpris”. Mixavtal (en del fast, en del spot) stöds inte. Tar din elhandlare betalt för volymvägning, lägg den kostnaden i elhandlarens påslag. Månadspris och Fastpris kräver också ”Avtalet gäller från”.",
-              "retail_fixed_ore": "Ditt fasta elpris, exklusive moms, i öre/kWh (SEK-zoner): elhandlarens pris inklusive påslag. Bara för avtalet Fastpris, som kräver det, och påslagsfältet används inte då. Mellan 0 och 500. Det tas bort när du byter till ett annat avtal.",
-              "retail_price_model_since": "Datumet då ditt nuvarande avtal började gälla. Krävs med Månadspris och Fastpris. Wolta använder det valda avtalet i historiken från och med datumet och kvartspris före det, så att tidigare år inte räknas med ett avtal du inte hade. Framåtblickande tal (återbetalningstid, IRR) och inköpspriset använder alltid det valda avtalet. Det tas bort när du byter till Kvartspris.",
-              "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). I Sverige (SE1–SE4): med avtalet Månadspris lägger du här det din elhandlare tar för volymvägning, som inte ingår i medelvärdet, och med Fastpris läggs påslaget inte på fastpriset, men det gäller fortfarande historiken före avtalets startdatum (tomt = Woltas standard på 6 öre/kWh). Rensa fältet för att återgå till landets schablon.",
-              "grid_benefit_ore": "Den nätnytta ditt nätföretag betalar per kWh du matar in, exklusive moms, i öre/kWh. Den står på nätföretagets underlag och är inte vad din elhandlare betalar (det är elhandelns villkor, nedan). Ange 0 om du inte får någon. Har nätnyttan också en andel av spot (”Såld el, andel av spot”) är det här dess fasta del, och den är obligatorisk: ange 0 om du bara har procent. Lämnas fältet tomt använder Wolta schablonen 5 öre. Gäller bara Sverige (SE1–SE4), mellan −20 och 50. Rensa fältet för att återgå till schablonen.",
-              "grid_benefit_peak_ore": "Valfritt. Nätnyttan under höglasttid, om ditt nätföretag betalar ett annat belopp då. Wolta räknar vardagar från november till mars som höglast, med de timmar och den helgdagsregel du anger nedan. Det är ett undantag från övrig tid, så fältet Nätnytta krävs också. Gäller bara Sverige (SE1–SE4), mellan −20 och 50. Rensa fältet för att ha samma belopp hela året.",
-              "grid_benefit_peak_start_hour": "Timmen då nätnyttans höglasttid börjar, svensk lokal tid, 0–23. Lämna tomt för schablonen 6 (06:00). Nätnyttan har en egen kalender eftersom ett nätföretag kan använda andra tider för vad det betalar än för vad det tar betalt. Används bara när en nätnytta för höglasttid är angiven.",
-              "grid_benefit_peak_end_hour": "Timmen då nätnyttans höglasttid slutar, 1–24, svensk lokal tid. Sluttimmen själv är inte höglast (22 betyder till kl 22:00) och den måste ligga efter starttimmen. Lämna tomt för schablonen 22. Används bara när en nätnytta för höglasttid är angiven.",
-              "grid_benefit_peak_holidays": "Vilka dagar som undantas från nätnyttans höglasttid fast de är vardagar från november till mars. Allmänna helgdagar är nyårsdagen, trettondedag jul, långfredag, annandag påsk, juldagen och annandag jul. Välj den regel som ditt nätföretags tariff beskriver: Inga helgdagar, Allmänna helgdagar, Allmänna helgdagar, julafton och nyårsafton (schablonen) eller samma och skärtorsdag. Används bara när en nätnytta för höglasttid är angiven.",
-              "export_extra_ore": "Vad din elhandlare betalar (+) eller drar av (−) per såld kWh, utöver spotpriset, i öre eller eurocent per kWh. 0 om din elhandlare betalar ren spot. I SE1–SE4 är det här inte din nätnytta: ange den i nätnyttofälten ovan, annars räknas den två gånger. Kan vara negativt. Rensa fältet för att återgå till landets schablon.",
+              "retail_price_model": "Elhandelsavtalet du har i dag: hur din elhandlare prissätter elen du köper. Kvartspris: spotpriset för varje kvart. Välj det också för ett timprisavtal: Wolta räknar per kvart, så priset kan skilja sig inom timmen från vad din elhandlare tar. Månadspris: medelvärdet av spotpriset över kalendermånaden (det enkla medelvärdet av månadens spotpriser, kvartspris från oktober 2025 och timpris före). Priset fastställs i efterhand, så sensorn för inköpspris har inget kvartspris. Fastpris: priset i ”Fastpris”. Mixavtal (en del fast, en del spot) stöds inte. Tar din elhandlare betalt för volymvägning, lägg den kostnaden i elhandlarens påslag. En ändring gäller från i dag: Wolta lägger till den i din avtalshistorik och räknar tidigare dagar med det avtal du hade då. Ditt första svar (ett avtal eller ett påslag där Wolta bara hade sin schablon) gäller i stället hela historiken. Bytte du avtal en annan dag, eller blev det fel? Rätta datumet i avtalslistan på wolta.se.",
+              "retail_fixed_ore": "Ditt fasta elpris, exklusive moms, i öre/kWh: elhandlarens pris inklusive påslag. Bara för avtalet Fastpris, som kräver det; påslaget används inte då och tas bort. Mellan 0 och 500. Det tas bort när du byter till ett annat avtal.",
+              "surcharge_ore": "Din elhandlares påslag, exklusive moms, i öre/kWh (SEK-zoner) eller eurocent/kWh (övriga zoner). I Sverige (SE1–SE4): med avtalet Månadspris lägger du här det din elhandlare tar för volymvägning, som inte ingår i medelvärdet. Med Fastpris finns inget påslag (fastpriset är elhandlarens hela pris), så Wolta tar bort det. En ändring gäller från i dag (tomt = Woltas standard på 6 öre/kWh). Rensa fältet för att återgå till landets schablon.",
+              "grid_benefit_ore": "Den nätnytta ditt nätföretag betalar per kWh du matar in, exklusive moms, i öre/kWh. Den står på nätföretagets underlag och är inte vad din elhandlare betalar (det är elhandelns villkor, nedan). Ange 0 om du inte får någon. Har nätnyttan också en andel av spot (”Såld el, andel av spot”) är det här dess fasta del, och den är obligatorisk: ange 0 om du bara har procent. Betalar ditt nätföretag ett annat belopp under vissa tidsperioder (anges på wolta.se) är det här beloppet utanför dem, och då är det också obligatoriskt. Lämnas fältet tomt använder Wolta schablonen 5 öre. Gäller bara Sverige (SE1–SE4), mellan −20 och 50. Rensa fältet för att återgå till schablonen.",
+              "export_extra_ore": "Vad din elhandlare betalar (+) eller drar av (−) per såld kWh, utöver spotpriset, i öre eller eurocent per kWh. 0 om din elhandlare betalar ren spot. I SE1–SE4 är det här inte din nätnytta: ange den i ”Nätnytta”, annars räknas den två gånger. Kan vara negativt. Rensa fältet för att återgå till landets schablon.",
               "export_extra_pct": "Procentdelen av vad som betalas för din sålda el, som andel av spotpriset (kan vara negativ). I SE1–SE4 är det nätnyttans procentdel, och den kräver den fasta delen i fältet Nätnytta ovan (0 om du bara har procent). Rensa fältet för att ta bort procentdelen.",
               "reduced_energy_tax": "Vissa kommuner i norra Sverige har reducerad energiskatt: ditt nätbolag drar av 9,6 öre/kWh exklusive moms på fakturan. Det gäller alla kommuner i Norrbotten, Västerbotten och Jämtland samt Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen och Torsby. Källa: Skatteverket. Välj Ja om du bor i någon av dem och Nej om du inte gör det. Inte angivet betyder att du inte har svarat: i SE1–SE3 saknar sensorn för inköpspris pris (tillståndet är okänt) tills du gör det."
             }
@@ -593,13 +575,11 @@
       "battery_pair_incomplete": "Kapacitet och effekt hör ihop: fyll i båda, eller lämna båda tomma och låt Wolta mäta dem.",
       "grid_fixed_required": "En nätavgift som anges som procent av spot behöver också sin fasta del. Fyll i ”Nätavgift (överföring)” i sektionen Tariffer (0 om du bara har procent).",
       "grid_benefit_fixed_required": "En nätnytta som anges som andel av spot behöver också sin fasta del. Fyll i ”Nätnytta” i sektionen Tariffer (0 om du bara har procent).",
-      "grid_benefit_peak_requires_base": "Nätnyttan för höglasttid är ett undantag från övrig tid, så fyll i ”Nätnytta” också.",
       "grid_benefit_zone": "Nätnytta kan bara anges i elområde SE1–SE4, så den kan inte sparas för anläggningens elområde.",
-      "grid_var_peak_requires_base": "Nätavgiften i höglasttid är ett undantag från övrig tid, så fyll i ”Nätavgift (överföring)” i sektionen Tariffer också.",
-      "peak_hours_invalid": "En höglasttid börjar vid en timme från 0–23 och slutar vid en timme från 1–24, och den måste börja före den slutar. Kontrollera timmarna under ”Höglasttid för nätavgiften” och ”Höglasttid för nätnyttan” i sektionen Tariffer.",
+      "periods_require_base": "Din tariff har tidsperioder med eget pris (anges på wolta.se), och tiden utanför dem behöver ett baspris. Fyll i ”Nätavgift (överföring)” eller ”Nätnytta” i sektionen Tariffer igen (0 är ett giltigt svar), eller ta bort tidsperioderna på wolta.se.",
       "retail_fixed_invalid": "Avtalet Fastpris kräver ett fast pris, och ett fast pris kan bara anges med det avtalet. Kontrollera ”Fastpris” och ”Elhandelsavtal” i sektionen Tariffer.",
-      "retail_since_invalid": "Månadspris och Fastpris kräver datumet då avtalet började gälla, och datumet kan bara anges med de avtalen. Kontrollera ”Avtalet gäller från” och ”Elhandelsavtal” i sektionen Tariffer.",
-      "tariff_zone_se_only": "Nätavgift i höglasttid, höglastkalendrarna och elhandelsavtalet kan bara anges i elområde SE1–SE4, så de kan inte sparas för anläggningens elområde.",
+      "retail_fixed_surcharge": "Ett fastpris är elhandlarens hela pris och har inget påslag. Töm ”Elhandlarens påslag” i sektionen Tariffer, eller välj ett annat avtal.",
+      "tariff_zone_se_only": "Tidsperioderna, helgdagsreglerna och elhandelsavtalet kan bara anges i elområde SE1–SE4, så de kan inte sparas för anläggningens elområde.",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },
@@ -614,14 +594,6 @@
         "not_set": "Inte angivet",
         "no": "Nej",
         "yes": "Ja"
-      }
-    },
-    "peak_holidays": {
-      "options": {
-        "none": "Inga helgdagar",
-        "public": "Allmänna helgdagar",
-        "public_eves": "Allmänna helgdagar, julafton och nyårsafton",
-        "public_eves_maundy": "Allmänna helgdagar, julafton, nyårsafton och skärtorsdag"
       }
     },
     "retail_price_model": {

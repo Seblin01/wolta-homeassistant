@@ -2834,23 +2834,15 @@ async def test_profile_sync_keys_unchanged_by_flex_compensation():
         CONF_GRID_VAR_PCT, CONF_PURCHASE_DATE, CONF_RESERVE_PCT,
         CONF_SURCHARGE_ORE, CONF_ZONE, CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME,
         CONF_SOC_ABSENT, CONF_REDUCED_ENERGY_TAX, CONF_GRID_BENEFIT_ORE,
-        CONF_GRID_BENEFIT_PEAK_ORE, CONF_GRID_VAR_PEAK_ORE,
-        CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS,
-        CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-        CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-        CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
+        CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
     )
 
     assert _PROFILE_SYNC_KEYS == (
         CONF_ZONE, CONF_BATTERY_KWH, CONF_BATTERY_KW, CONF_EFF, CONF_RESERVE_PCT,
         CONF_COST_SEK, CONF_PURCHASE_DATE, CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE,
         CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
-        CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
-        CONF_GRID_VAR_PEAK_ORE,
-        CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS,
-        CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-        CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-        CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
+        CONF_GRID_BENEFIT_ORE,
+        CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
         CONF_CONTROL_SYSTEM, CONF_CONTROL_SYSTEM_NAME, CONF_SOC_ABSENT,
         CONF_REDUCED_ENERGY_TAX,
     )
@@ -6878,61 +6870,62 @@ async def test_profile_sync_mirrors_the_grid_benefit_including_zero(
 ):
     """The owner's grid benefit is also edited on wolta.se. 0 is an answer ("none") and is
     stored; None (PATCH null) drops the key, like every other tariff field."""
-    from custom_components.wolta.const import CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE
+    from custom_components.wolta.const import CONF_GRID_BENEFIT_ORE
 
     client = _mock_client()
-    client.get_profile = AsyncMock(return_value={
-        **BASE_PROFILE, "grid_benefit_ore": 0.0, "grid_benefit_peak_ore": 25.5})
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "grid_benefit_ore": 0.0})
     with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
         await _sync_refresh(hass, mock_entry, client)
     _, kwargs = mock_upd.call_args
     assert kwargs["data"][CONF_GRID_BENEFIT_ORE] == 0.0
-    assert kwargs["data"][CONF_GRID_BENEFIT_PEAK_ORE] == 25.5
 
-    mock_entry.data = {**mock_entry.data, CONF_GRID_BENEFIT_ORE: 10.4,
-                       CONF_GRID_BENEFIT_PEAK_ORE: 25.5}
-    client.get_profile = AsyncMock(return_value={
-        **BASE_PROFILE, "grid_benefit_ore": None, "grid_benefit_peak_ore": None})
+    mock_entry.data = {**mock_entry.data, CONF_GRID_BENEFIT_ORE: 10.4}
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "grid_benefit_ore": None})
     with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
         await _sync_refresh(hass, mock_entry, client)
     _, kwargs = mock_upd.call_args
     assert CONF_GRID_BENEFIT_ORE not in kwargs["data"]
-    assert CONF_GRID_BENEFIT_PEAK_ORE not in kwargs["data"]
 
 
-_MARKET_PROFILE = {
-    "grid_var_peak_ore": 61.2,
-    "grid_fee_peak_start_hour": 7, "grid_fee_peak_end_hour": 22,
-    "grid_fee_peak_holidays": "public_eves_maundy",
-    "grid_benefit_peak_start_hour": 0, "grid_benefit_peak_end_hour": 24,
-    "grid_benefit_peak_holidays": "none",
-    "retail_price_model": "fixed", "retail_fixed_ore": 0.0,
-    "retail_price_model_since": "2026-01-01",
+_CONTRACT_PROFILE = {"retail_price_model": "fixed", "retail_fixed_ore": 0.0}
+# The server's lists (spec 2026-10-27-marknadsanpassning): edited on wolta.se, never cached.
+_WEB_ONLY_PROFILE = {
+    "grid_fee_periods": [{"months": [1, 2, 3, 11, 12], "days": "weekdays", "start_hour": 6,
+                          "end_hour": 22, "price_ore": 61.2}],
+    "grid_fee_holidays": "public_eves",
+    "grid_benefit_periods": None, "grid_benefit_holidays": None,
+    "retail_events": [
+        {"date": "2023-01-01", "retail_price_model": "quarter", "surcharge_ore": 6.0},
+        {"date": "2026-01-09", "retail_price_model": "fixed", "retail_fixed_ore": 0.0}],
 }
 
 
 @pytest.mark.asyncio
-async def test_profile_sync_mirrors_the_market_fields_including_zero(
+async def test_profile_sync_mirrors_todays_contract_including_zero_but_not_the_lists(
     hass: HomeAssistant, mock_entry
 ):
-    """The tariff is also edited on wolta.se. Hour 0 and a fixed price of 0 are answers and are
-    stored; None (PATCH null, or the server dropping a field that no longer applies) drops the
-    key, like every other tariff field."""
+    """Today's contract is also edited on wolta.se (the server mirrors today's entry of the
+    history into the scalars). A fixed price of 0 is an answer and is stored; None (PATCH null,
+    or the server dropping a field that no longer applies) drops the key, like every other tariff
+    field. The time periods and the contract history are never cached."""
     client = _mock_client()
-    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, **_MARKET_PROFILE})
-    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
-        await _sync_refresh(hass, mock_entry, client)
-    _, kwargs = mock_upd.call_args
-    for key, value in _MARKET_PROFILE.items():
-        assert kwargs["data"][key] == value, key
-
-    mock_entry.data = {**mock_entry.data, **_MARKET_PROFILE}
     client.get_profile = AsyncMock(return_value={
-        **BASE_PROFILE, **{key: None for key in _MARKET_PROFILE}})
+        **BASE_PROFILE, **_CONTRACT_PROFILE, **_WEB_ONLY_PROFILE})
     with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
         await _sync_refresh(hass, mock_entry, client)
     _, kwargs = mock_upd.call_args
-    for key in _MARKET_PROFILE:
+    for key, value in _CONTRACT_PROFILE.items():
+        assert kwargs["data"][key] == value, key
+    for key in _WEB_ONLY_PROFILE:
+        assert key not in kwargs["data"], key
+
+    mock_entry.data = {**mock_entry.data, **_CONTRACT_PROFILE}
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, **{key: None for key in _CONTRACT_PROFILE}})
+    with patch.object(hass.config_entries, "async_update_entry") as mock_upd:
+        await _sync_refresh(hass, mock_entry, client)
+    _, kwargs = mock_upd.call_args
+    for key in _CONTRACT_PROFILE:
         assert key not in kwargs["data"], key
 
 
@@ -7084,12 +7077,13 @@ async def test_export_issue_figures_use_the_owners_decimal_separator(
 
 
 # ---------------------------------------------------------------------------
-# grid_fee_peak_implausible (server api 0.119.0): the high-load grid fee above the server's own
-# limit, which is higher than the all-year one (a real time-of-use tariff reaches 61.2 öre).
-# Same shape as grid_fee_implausible: the flag and the limit are the server's, read here.
+# grid_fee_period_implausible (server api 0.119.0): a price in the grid fee's time periods above
+# the server's own limit, which is higher than the base price's (a real time-of-use tariff
+# reaches 61.2 öre). Same shape as grid_fee_implausible: the flag (still named
+# grid_var_peak_implausible on the server) and the limit are the server's, read here.
 # ---------------------------------------------------------------------------
 
-_PEAK_ISSUE_ID = "grid_fee_peak_implausible_test_entry_id"
+_PEAK_ISSUE_ID = "grid_fee_period_implausible_test_entry_id"
 
 
 def _peak_check(flag, limit=80) -> dict:
@@ -7098,12 +7092,12 @@ def _peak_check(flag, limit=80) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_grid_fee_peak_implausible_fires_from_the_server_flag(hass, mock_entry):
+async def test_grid_fee_period_implausible_fires_from_the_server_flag(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry)
     c._evaluate_grid_fee_issue(_peak_check(True))
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _PEAK_ISSUE_ID)
     assert issue is not None
-    assert issue.translation_key == "grid_fee_peak_implausible"
+    assert issue.translation_key == "grid_fee_period_implausible"
     assert issue.is_fixable is False
     assert issue.severity == ir.IssueSeverity.WARNING
     # The limit travels from the server; the client never holds its own.
@@ -7113,7 +7107,7 @@ async def test_grid_fee_peak_implausible_fires_from_the_server_flag(hass, mock_e
 
 
 @pytest.mark.asyncio
-async def test_grid_fee_peak_implausible_clears_when_the_server_says_plausible(hass, mock_entry):
+async def test_grid_fee_period_implausible_clears_when_the_server_says_plausible(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry)
     c._evaluate_grid_fee_issue(_peak_check(True))
     c._evaluate_grid_fee_issue(_peak_check(False))
@@ -7121,7 +7115,7 @@ async def test_grid_fee_peak_implausible_clears_when_the_server_says_plausible(h
 
 
 @pytest.mark.asyncio
-async def test_grid_fee_peak_implausible_left_alone_when_the_server_lacks_the_flag(
+async def test_grid_fee_period_implausible_left_alone_when_the_server_lacks_the_flag(
     hass, mock_entry
 ):
     """A tariff_check from before the flag existed: say nothing new, change nothing open."""
@@ -7134,7 +7128,7 @@ async def test_grid_fee_peak_implausible_left_alone_when_the_server_lacks_the_fl
 
 
 @pytest.mark.asyncio
-async def test_grid_fee_peak_implausible_not_in_view_only(hass, mock_entry):
+async def test_grid_fee_period_implausible_not_in_view_only(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry)
     c._view_only = True
     c._evaluate_grid_fee_issue(_peak_check(True))
@@ -7142,7 +7136,7 @@ async def test_grid_fee_peak_implausible_not_in_view_only(hass, mock_entry):
 
 
 @pytest.mark.asyncio
-async def test_grid_fee_peak_implausible_without_a_limit_shows_a_dash(hass, mock_entry):
+async def test_grid_fee_period_implausible_without_a_limit_shows_a_dash(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry)
     c._evaluate_grid_fee_issue(_peak_check(True, limit=None))
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _PEAK_ISSUE_ID)

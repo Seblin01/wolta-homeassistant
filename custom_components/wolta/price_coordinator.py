@@ -207,10 +207,12 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
 
     Every point has "start": ts_utc, the kind's price in SEK/kWh ("purchase" INCLUDING
     VAT, "sale" EXCLUDING VAT, i.e. the server's öre/kWh / 100) and "spot" (SEK/kWh
-    EXCLUDING VAT) and the kind's own high-load flag: "grid_fee_peak" on the purchase kind (the
-    grid fee's calendar) and "grid_benefit_peak" on the sale kind (the grid benefit's calendar),
-    bool, None when the server sent none. The two calendars are independent, so a quarter can be
-    high-load on one side only.
+    EXCLUDING VAT) and the grid's part of that kind's price in SEK/kWh EXCLUDING VAT:
+    "grid_fee" on the purchase kind (the server's grid_fee_ore: the whole variable grid fee of
+    the quarter, its time-period or base price plus the percentage of spot, so nothing is added
+    here) and "grid_benefit" on the sale kind (grid_benefit_ore). None when the server sent none
+    (the owner has not given the base price, or the percentage could not be counted): never a
+    guess. The two follow their own time periods, so they can change at different quarters.
     with_forecast adds "forecast": bool to every point and, on forecast points, "horizon"."""
     if not isinstance(purchase, dict):
         return []
@@ -229,9 +231,8 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
                 key: _ore_to_sek(point.get(field)),
                 "spot": _ore_to_sek(point.get("spot_ore_kwh")),
             }
-            peak_key = "grid_benefit_peak" if key == "sale" else "grid_fee_peak"
-            peak = point.get(peak_key)
-            item[peak_key] = peak if isinstance(peak, bool) else None
+            grid_key = "grid_benefit" if key == "sale" else "grid_fee"
+            item[grid_key] = _ore_to_sek(point.get(f"{grid_key}_ore"))
             if with_forecast:
                 item["forecast"] = is_forecast
                 if horizon is not None:
@@ -252,8 +253,9 @@ def purchase_series(purchase: Any) -> list[dict[str, Any]]:
     then tomorrow, sorted by start with no timestamp repeated (the first source wins).
 
     Each point is {"start": ts_utc, "purchase": SEK/kWh INCLUDING VAT | None, "spot":
-    SEK/kWh EXCLUDING VAT | None, "grid_fee_peak": bool | None} (whether the quarter is a
-    high-load quarter of the grid fee's calendar). The two prices are on different VAT bases on purpose:
+    SEK/kWh EXCLUDING VAT | None, "grid_fee": SEK/kWh EXCLUDING VAT | None} (the quarter's whole
+    variable grid fee, so the owner can see why the price differs between quarters). The two
+    prices are on different VAT bases on purpose:
     the server's `purchase_ore_kwh` is what the owner pays (VAT on everything), its
     `spot_ore_kwh` is the market price the existing spot sensor also shows. Never raises:
     the attributes are rebuilt on every state write."""
@@ -263,11 +265,11 @@ def purchase_series(purchase: Any) -> list[dict[str, Any]]:
 def sale_series(purchase: Any) -> list[dict[str, Any]]:
     """Price points for the sale-price sensor from the same response: {"start": ts_utc,
     "sale": SEK/kWh EXCLUDING VAT | None, "spot": SEK/kWh EXCLUDING VAT | None,
-    "grid_benefit_peak": bool | None}. The sale price is what a private person is paid per sold kWh: spot + grid
-    benefit + retailer's terms + tax reduction, all without VAT (the server's
-    `sale_ore_kwh`, which is null when the sale side is unavailable). `grid_benefit_peak`
-    says whether the quarter is a high-load quarter of the grid benefit's calendar, i.e. which
-    grid benefit was used."""
+    "grid_benefit": SEK/kWh EXCLUDING VAT | None}. The sale price is what a private person is
+    paid per sold kWh: spot + grid benefit + retailer's terms + tax reduction, all without VAT
+    (the server's `sale_ore_kwh`, which is null when the sale side is unavailable).
+    `grid_benefit` is the grid benefit the quarter was priced with (its time-period price or the
+    base price)."""
     return _profile_series(purchase, "sale", with_forecast=False)
 
 

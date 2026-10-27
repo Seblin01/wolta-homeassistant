@@ -59,16 +59,8 @@ from .const import (
     CONF_GRID_IN,
     CONF_GRID_OUT,
     CONF_GRID_BENEFIT_ORE,
-    CONF_GRID_BENEFIT_PEAK_ORE,
-    CONF_GRID_BENEFIT_PEAK_END_HOUR,
-    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-    CONF_GRID_BENEFIT_PEAK_START_HOUR,
-    CONF_GRID_FEE_PEAK_END_HOUR,
-    CONF_GRID_FEE_PEAK_HOLIDAYS,
-    CONF_GRID_FEE_PEAK_START_HOUR,
     CONF_GRID_VAR_ORE,
     CONF_GRID_VAR_PCT,
-    CONF_GRID_VAR_PEAK_ORE,
     CONF_INVERT_BATTERY,
     CONF_INVERT_INTERVALS,
     CONF_NAMEPLATE_KW,
@@ -78,7 +70,6 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_RETAIL_FIXED_ORE,
     CONF_RETAIL_PRICE_MODEL,
-    CONF_RETAIL_PRICE_MODEL_SINCE,
     CONF_SOC,
     CONF_SOC_ABSENT,
     CONF_SOLAR,
@@ -806,10 +797,12 @@ _ISSUE_SOC_MISSING_LEGACY = "soc_missing"
 # api 0.110.0): most likely entered with VAT and energy tax, which Wolta adds itself, so the
 # energy tax is counted twice. Non-fixable: only the owner knows the right figure.
 _ISSUE_GRID_FEE_IMPLAUSIBLE = "grid_fee_implausible"
-# The same question for the grid fee in high-load hours (results.tariff_check
-# .grid_var_peak_implausible, server api 0.119.0), with a limit of its own: a time-of-use tariff
-# really reaches 61.2 öre excl. VAT, so the all-year limit would flag a correct value. Non-fixable.
-_ISSUE_GRID_FEE_PEAK_IMPLAUSIBLE = "grid_fee_peak_implausible"
+# The same question for the prices of the grid fee's time periods (results.tariff_check
+# .grid_var_peak_implausible, server api 0.119.0: any period price above the server's own limit),
+# with a limit of its own: a time-of-use tariff really reaches 61.2 öre excl. VAT, so the base
+# limit would flag a correct value. Non-fixable, and not fixable here either: the time periods
+# are edited on wolta.se.
+_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE = "grid_fee_period_implausible"
 # The owner gave a grid fee as a percentage of spot without the fixed part (results.tariff_check
 # .grid_fixed_missing, server api 0.118.0). The server then has no basis for the purchase price
 # and keeps the sensor unavailable until the fixed part (0 if there is none) is entered.
@@ -917,17 +910,15 @@ _PROFILE_SYNC_KEYS: tuple[str, ...] = (
     CONF_EXPORT_EXTRA_ORE, CONF_GRID_VAR_PCT, CONF_EXPORT_EXTRA_PCT,
     # The owner's grid benefit (api 0.119.0), also edited on wolta.se. 0 is an answer and is
     # stored; None drops the key.
-    CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
-    # Market adaptation (api 0.119.0, SE1-SE4), also edited on wolta.se: the grid fee's high-load
-    # value, the two high-load calendars and the electricity contract. Hour 0 and a fixed price
-    # of 0 are answers and are stored; None drops the key, which is also how the cache follows
-    # the server dropping a field that no longer applies (the fixed price when the contract
-    # leaves `fixed`, the start date when it goes to `quarter`).
-    CONF_GRID_VAR_PEAK_ORE,
-    CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR, CONF_GRID_FEE_PEAK_HOLIDAYS,
-    CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
-    CONF_GRID_BENEFIT_PEAK_HOLIDAYS,
-    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE, CONF_RETAIL_PRICE_MODEL_SINCE,
+    CONF_GRID_BENEFIT_ORE,
+    # The electricity contract that applies today (api 0.119.0, SE1-SE4), also edited on
+    # wolta.se, where the server mirrors today's entry of the contract history into these fields
+    # (and surcharge_ore above). A fixed price of 0 is an answer and is stored; None drops the
+    # key, which is also how the cache follows the server dropping a field that no longer
+    # applies (the fixed price when the contract leaves `fixed`, the markup when it goes to it).
+    # The time periods and the contract history themselves are not cached: nothing here sends
+    # them, and the options form reads them fresh from the server.
+    CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
     # The control system is declared on wolta.se and can be switched and backdated there.
     # Reauth echoes entry.data, so an install-time value here used to rewrite the owner's
     # latest timeline entry (Wolta B4, 2026-10-20; the server now only fills an empty one).
@@ -3941,7 +3932,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         self._evaluate_grid_fixed_issue(check)
         self._evaluate_export_issues(check)
-        self._evaluate_grid_fee_peak_issue(check)
+        self._evaluate_grid_fee_period_issue(check)
         issue_id = f"{_ISSUE_GRID_FEE_IMPLAUSIBLE}_{self.config_entry.entry_id}"
         if not check.get("grid_var_implausible") or self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
@@ -3955,16 +3946,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             translation_placeholders={"limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
         )
 
-    def _evaluate_grid_fee_peak_issue(self, check: dict) -> None:
-        """Warn when the server finds the grid fee in high-load hours implausible.
+    def _evaluate_grid_fee_period_issue(self, check: dict) -> None:
+        """Warn when the server finds a price in the grid fee's time periods implausible.
 
-        Same shape as the all-year warning: the flag (`grid_var_peak_implausible`) and its limit
-        (`grid_var_peak_limit_ore`) are the server's, never held here. A tariff_check without the
-        flag is a server before api 0.119.0 and leaves whatever is open as it is (a missing
-        answer is not a "no"). Never in view-only mode: the tariff is set on wolta.se there."""
+        Same shape as the base-price warning: the flag (`grid_var_peak_implausible`, the server's
+        name, kept from before the time periods) and its limit (`grid_var_peak_limit_ore`) are the
+        server's, never held here. A tariff_check without the flag is a server before api 0.119.0
+        and leaves whatever is open as it is (a missing answer is not a "no"). Never in view-only
+        mode: the tariff is set on wolta.se there."""
         if "grid_var_peak_implausible" not in check:
             return
-        issue_id = f"{_ISSUE_GRID_FEE_PEAK_IMPLAUSIBLE}_{self.config_entry.entry_id}"
+        issue_id = f"{_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE}_{self.config_entry.entry_id}"
         if check.get("grid_var_peak_implausible") is not True or self._view_only:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
@@ -3973,7 +3965,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             self.hass, DOMAIN, issue_id,
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
-            translation_key=_ISSUE_GRID_FEE_PEAK_IMPLAUSIBLE,
+            translation_key=_ISSUE_GRID_FEE_PERIOD_IMPLAUSIBLE,
             translation_placeholders={
                 "limit": f"{limit:g}" if isinstance(limit, (int, float)) else "-"},
         )
