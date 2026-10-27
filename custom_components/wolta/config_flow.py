@@ -314,6 +314,9 @@ _FEE_CALENDAR = (CONF_GRID_FEE_PEAK_START_HOUR, CONF_GRID_FEE_PEAK_END_HOUR,
                  CONF_GRID_FEE_PEAK_HOLIDAYS)
 _BENEFIT_CALENDAR = (CONF_GRID_BENEFIT_PEAK_START_HOUR, CONF_GRID_BENEFIT_PEAK_END_HOUR,
                      CONF_GRID_BENEFIT_PEAK_HOLIDAYS)
+# The server's own hours when a calendar's side is unset (simulate/tariff.check_peak_hours).
+_DEFAULT_PEAK_START = 6
+_DEFAULT_PEAK_END = 22
 # Select fields that always carry a value in the form (their default), so that an untouched form
 # does not turn the server's "not set" into a PATCH of the default: both sides of the comparison
 # read "not set" as the default, which is what the server does too.
@@ -1769,7 +1772,9 @@ class WoltaOptionsFlow(OptionsFlow):
                         value = sec_input[key]
                         if key == CONF_REDUCED_ENERGY_TAX:
                             value = _choice_to_tax(value)
-                        elif key in _HOUR_KEYS and value is not None:
+                        elif key in _HOUR_KEYS and value is not None and float(value).is_integer():
+                            # Floats from the number selector; the server takes integers. A
+                            # fractional hour stays as typed and is refused below, not truncated.
                             value = int(value)
                         flat[key] = value
 
@@ -1917,13 +1922,20 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors[CONF_GRID_VAR_ORE] = errors["base"] = "grid_var_peak_requires_base"
 
                 for start_key, end_key, holidays_key in (_FEE_CALENDAR, _BENEFIT_CALENDAR):
+                    if not {start_key, end_key} & patch_fields.keys():
+                        continue
+                    fractional = [k for k in (start_key, end_key)
+                                  if flat.get(k) is not None and not isinstance(flat[k], int)]
+                    if fractional:
+                        errors[fractional[0]] = errors["base"] = "peak_hours_invalid"
+                        continue
+                    # An unset side is the server's own 6 / 22 (check_peak_hours), so a lone
+                    # 23 as start, or a lone 5 as end, is refused here as it would be there.
                     start_after = flat.get(start_key)
                     end_after = flat.get(end_key)
-                    if (
-                        {start_key, end_key} & patch_fields.keys()
-                        and start_after is not None and end_after is not None
-                        and start_after >= end_after
-                    ):
+                    start_after = _DEFAULT_PEAK_START if start_after is None else start_after
+                    end_after = _DEFAULT_PEAK_END if end_after is None else end_after
+                    if start_after >= end_after:
                         errors[start_key] = errors["base"] = "peak_hours_invalid"
 
                 if {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
@@ -1934,6 +1946,14 @@ class WoltaOptionsFlow(OptionsFlow):
                             "retail_since_invalid")
                     if model_after == "fixed" and flat.get(CONF_RETAIL_FIXED_ORE) is None:
                         errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
+                    # The other direction: a value typed for a contract it does not belong to. An
+                    # unchanged stale value is not in the PATCH (see `dropped`) and passes.
+                    if model_after != "fixed" and patch_fields.get(CONF_RETAIL_FIXED_ORE) is not None:
+                        errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
+                    if (model_after == DEFAULT_RETAIL_PRICE_MODEL
+                            and patch_fields.get(CONF_RETAIL_PRICE_MODEL_SINCE) is not None):
+                        errors[CONF_RETAIL_PRICE_MODEL_SINCE] = errors["base"] = (
+                            "retail_since_invalid")
 
             if patch_fields and not errors:
                 try:
@@ -2113,6 +2133,21 @@ class WoltaOptionsFlow(OptionsFlow):
             + [date_row]
         ))
         ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")
+        # The high-load fee and the fixed price exist in SE1-SE4 only, where the unit is öre.
+        se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
+
+        def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
+                        mode: SelectSelectorMode) -> tuple[Any, Any]:
+            """A select that always carries a value: the server's, else the default. A value this
+            version does not know (a newer server) is offered as one more option, its raw key as
+            its label: the select validates against its options, so without it the injected value
+            would be refused and no save could pass. Untouched, it is sent back unchanged and the
+            diff finds nothing to PATCH."""
+            current = srv.get(key) or default
+            options = list(known) if current in known else [*known, current]
+            return (vol.Optional(key, default=current),
+                    SelectSelector(SelectSelectorConfig(
+                        options=options, mode=mode, translation_key=translation_key)))
         market_asked = self._benefit_asked()
 
         def _hours_rows(start_key: str, end_key: str, holidays_key: str) -> list[tuple[Any, Any]]:
@@ -2121,18 +2156,15 @@ class WoltaOptionsFlow(OptionsFlow):
             return [
                 _opt(start_key, _number_selector(min_val=0, max_val=23, step=1, unit="h")),
                 _opt(end_key, _number_selector(min_val=1, max_val=24, step=1, unit="h")),
-                (vol.Optional(holidays_key,
-                              default=srv.get(holidays_key) or DEFAULT_PEAK_HOLIDAYS),
-                 SelectSelector(SelectSelectorConfig(
-                     options=list(PEAK_HOLIDAY_RULES), mode=SelectSelectorMode.DROPDOWN,
-                     translation_key="peak_holidays"))),
+                _select_row(holidays_key, PEAK_HOLIDAY_RULES, DEFAULT_PEAK_HOLIDAYS,
+                            "peak_holidays", SelectSelectorMode.DROPDOWN),
             ]
 
         # The grid fee, its high-load value and calendar under it; the electricity contract with
         # the supplier's markup (spec 2026-10-27-marknadsanpassning).
         tariff_rows = [_opt(CONF_GRID_VAR_ORE, ore_selector)]
         if market_asked:
-            tariff_rows += [_opt(CONF_GRID_VAR_PEAK_ORE, ore_selector),
+            tariff_rows += [_opt(CONF_GRID_VAR_PEAK_ORE, se_ore_selector),
                             *_hours_rows(*_FEE_CALENDAR)]
         tariff_rows.append(
             _opt(CONF_GRID_VAR_PCT, _number_selector(min_val=0.0, max_val=100.0, step=0.01, unit="% of spot")))
@@ -2140,12 +2172,10 @@ class WoltaOptionsFlow(OptionsFlow):
             tariff_rows += [
                 # default (not suggested_value), like the energy-tax select: it always carries a
                 # value, so the form always submits one; "not set" on the server is the default.
-                (vol.Optional(CONF_RETAIL_PRICE_MODEL,
-                              default=srv.get(CONF_RETAIL_PRICE_MODEL) or DEFAULT_RETAIL_PRICE_MODEL),
-                 SelectSelector(SelectSelectorConfig(
-                     options=list(RETAIL_PRICE_MODELS), mode=SelectSelectorMode.LIST,
-                     translation_key=CONF_RETAIL_PRICE_MODEL))),
-                _opt(CONF_RETAIL_FIXED_ORE, ore_selector),
+                _select_row(CONF_RETAIL_PRICE_MODEL, RETAIL_PRICE_MODELS,
+                            DEFAULT_RETAIL_PRICE_MODEL, CONF_RETAIL_PRICE_MODEL,
+                            SelectSelectorMode.LIST),
+                _opt(CONF_RETAIL_FIXED_ORE, se_ore_selector),
                 _opt(CONF_RETAIL_PRICE_MODEL_SINCE, _date_selector()),
             ]
         tariff_rows.append(_opt(CONF_SURCHARGE_ORE, ore_selector))

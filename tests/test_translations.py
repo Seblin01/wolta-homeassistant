@@ -691,3 +691,66 @@ def test_peak_fee_issue_names_the_limit_and_the_menu_path(path: Path) -> None:
     assert _SETTINGS_PATH[path.name] in issue["description"], path.name
     assert ("excluding VAT and energy tax" if path.name != "sv.json"
             else "exklusive moms och energiskatt") in issue["description"]
+
+
+# --- fix round 1: help text must not point at positions or at fields hidden outside SE1-SE4 ---
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("field", ["grid_var_ore", "grid_var_pct"])
+def test_grid_fee_help_names_fields_not_positions(path: Path, field: str) -> None:
+    """These two fields are shown in every zone while the high-load fields next to them are not,
+    and the high-load block sits between them in SE1-SE4: "the field below/above" points at the
+    wrong thing or at nothing."""
+    text = _tariffs(path)["data_description"][field].lower()
+    for position in ("field below", "field above", "next field", "fältet nedan", "fältet ovan",
+                     "nästa fält"):
+        assert position not in text, (path.name, field, position)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_grid_fee_help_names_the_labels_it_refers_to(path: Path) -> None:
+    desc = _tariffs(path)["data_description"]
+    labels = _LABELS[path.name]
+    assert labels["grid_var_ore"] in desc["grid_var_pct"], path.name
+    assert labels["grid_var_peak_ore"].split(" (")[0] in desc["grid_var_ore"], path.name
+    assert labels["grid_var_ore"] in desc["grid_var_peak_ore"], path.name
+    assert _tariffs(path)["data"]["grid_var_pct"].split(" (")[0] in desc["grid_var_ore"], path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_markup_help_says_where_the_contract_exists(path: Path) -> None:
+    """The markup is shown in every zone, the contract only in SE1-SE4: the sentence about
+    Monthly/Fixed price must say so."""
+    text = _tariffs(path)["data_description"]["surcharge_ore"]
+    assert "SE1–SE4" in text, path.name
+
+
+def test_swedish_mix_contracts_sentence_is_plain() -> None:
+    text = _tariffs(_TRANSLATIONS / "sv.json")["data_description"]["retail_price_model"]
+    assert "Mixavtal (en del fast, en del spot) stöds inte." in text
+    assert "mixavtal alltså" not in text
+
+
+def test_swedish_copy_has_no_höglastnytta_or_höglastavgift() -> None:
+    raw = (_TRANSLATIONS / "sv.json").read_text(encoding="utf-8").lower()
+    assert "höglastnytta" not in raw
+    assert "höglastavgift" not in raw
+    desc = _tariffs(_TRANSLATIONS / "sv.json")["data_description"]
+    assert "nätnytta för höglasttid" in desc["grid_benefit_peak_start_hour"]
+    assert "nätavgift för höglasttid" in desc["grid_fee_peak_start_hour"]
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_se_only_amount_labels_and_repair_use_ore_not_cents(path: Path) -> None:
+    data = _tariffs(path)["data"]
+    assert "öre/ct" not in data["retail_fixed_ore"], path.name
+    assert "öre per kWh" in data["retail_fixed_ore"], path.name
+    issue = _load(path)["issues"]["grid_fee_peak_implausible"]["description"]
+    assert "cents" not in issue, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_fixed_part_repair_names_the_renamed_field(path: Path) -> None:
+    text = _at(_load(path), ("issues", "grid_fixed_missing", "description"))
+    assert _LABELS[path.name]["grid_var_ore"] in text, path.name
