@@ -5882,9 +5882,11 @@ async def test_options_zone_422_is_readable_on_base_when_the_field_is_hidden(
 # ---------------------------------------------------------------------------
 
 _CONTRACT_FIELDS = (CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE)
-# What the server keeps and only wolta.se edits. Never in a PATCH, a create or the cache.
+# What the server keeps and only wolta.se edits. Never in a PATCH, a create or the cache. The
+# sale side's history lists (Tillägg 5) are the server's too: the form edits today's values only.
 _WEB_ONLY_FIELDS = ("grid_fee_periods", "grid_fee_holidays", "grid_benefit_periods",
-                    "grid_benefit_holidays", "retail_events")
+                    "grid_benefit_holidays", "retail_events", "export_events",
+                    "grid_benefit_events")
 # Tekniska verken's alternative price list (spec Underlag): day 06-23 every day all year.
 _ONE_PERIOD = [{"months": list(range(1, 13)), "days": "all", "start_hour": 6, "end_hour": 23,
                 "price_ore": 18.0}]
@@ -6691,6 +6693,256 @@ async def test_options_an_unknown_server_contract_does_not_block_an_untouched_sa
             result["flow_id"], user_input=_opts(**_core()))
     assert result["type"] == FlowResultType.CREATE_ENTRY
     mock_client.patch_profile.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The sale side's history (HACS 0.54.0, server api 0.119.0, spec 2026-10-27-marknadsanpassning
+# Tillägg 5): the server keeps a history of the retailer's terms (export_events) and of the grid
+# benefit (grid_benefit_events). The form edits today's values with the same fields as before; a
+# change becomes an entry dated today on the server (or applies from the start, its rulings 18
+# and 19). The lists are summarised and edited on wolta.se; nothing here ever sends them.
+# ---------------------------------------------------------------------------
+
+# Review Focus 1: the network operator's yearly price list, 6.0 until 2025 and 10.4 from 2026;
+# the retailer's terms lowered from 3.0 to -1.5 on 2025-07-01. The scalars mirror today's entry.
+_GRID_BENEFIT_EVENTS = [{"date": None, "grid_benefit_ore": 6.0},
+                        {"date": "2026-01-01", "grid_benefit_ore": 10.4}]
+_EXPORT_EVENTS = [{"date": None, "export_extra_ore": 3.0},
+                  {"date": "2025-07-01", "export_extra_ore": -1.5}]
+_SALE = {CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: -1.5}
+_SALE_SERVER = {"export_events": _EXPORT_EVENTS, "grid_benefit_events": _GRID_BENEFIT_EVENTS}
+_SALE_LISTS = ("export_events", "grid_benefit_events")
+# The server's 422 for clearing the grid benefit's base price under its history (today's entry
+# would have no base price), verbatim as WoltaApiError carries it.
+_GRID_BENEFIT_EVENTS_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"en n\\u00e4tnyttepost beh\\u00f6ver '
+    'datum (inte i framtiden, inte tv\\u00e5 p\\u00e5 samma dag) och ett baspris '
+    '(grid_benefit_ore)"}')
+_EXPORT_EVENTS_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"ett s\\u00e4ljavtal beh\\u00f6ver '
+    'datum (inte i framtiden, inte tv\\u00e5 p\\u00e5 samma dag) och elhandelns villkor '
+    '(export_extra_ore)"}')
+
+
+def _sale_entry(hass, server: dict | None = None, **extra):
+    """An SE3 entry whose server snapshot has both sale history lists (the cache never holds
+    them)."""
+    entry = _make_mock_entry(hass, extra_data={**_SALE, **extra})
+    mock_client, coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value={
+        **_server_profile(entry), **(_SALE_SERVER if server is None else server)})
+    return entry, mock_client, coordinator
+
+
+@pytest.mark.asyncio
+async def test_options_untouched_save_with_sale_history_patches_nothing(
+    hass: HomeAssistant,
+) -> None:
+    """The scalars mirror today's entry, so the form shows them and an untouched save sends
+    nothing: no scalar, and never a list. The lists are not form fields."""
+    entry, mock_client, _ = _sale_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        fields = _tariff_fields(result)
+        for field in _SALE_LISTS:
+            assert field not in fields, field
+        benefit, _ = _tariff_field(result, CONF_GRID_BENEFIT_ORE)
+        assert benefit.description["suggested_value"] == 10.4
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**_SALE)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes, sent",
+    [
+        # The retailer's terms raised today: the server adds an entry dated today and keeps
+        # -1.5 from 2025-07-01. The unchanged grid benefit goes with it (both halves are
+        # confirmed together); equal to today's entry, it adds nothing on the server.
+        ({CONF_EXPORT_EXTRA_ORE: 2.0}, {CONF_EXPORT_EXTRA_ORE: 2.0, CONF_GRID_BENEFIT_ORE: 10.4}),
+        # The operator's new price list: 11.0 from today.
+        ({CONF_GRID_BENEFIT_ORE: 11.0}, {CONF_GRID_BENEFIT_ORE: 11.0, CONF_EXPORT_EXTRA_ORE: -1.5}),
+        # The percentage is part of the grid benefit's block (ruling 19): an entry dated today.
+        ({CONF_EXPORT_EXTRA_PCT: 5.0}, {CONF_EXPORT_EXTRA_PCT: 5.0}),
+        # Cleared terms are plain spot from today (ruling 10); the history keeps the answer.
+        ({CONF_EXPORT_EXTRA_ORE: None}, {CONF_EXPORT_EXTRA_ORE: 0.0, CONF_GRID_BENEFIT_ORE: 10.4}),
+    ],
+    ids=["terms", "benefit", "pct", "terms-cleared"],
+)
+async def test_options_sale_change_with_sale_history_sends_only_the_scalars(
+    hass: HomeAssistant, changes, sent
+) -> None:
+    entry, mock_client, _ = _sale_entry(hass)
+    submitted = {**_SALE, **changes}
+    if changes.get(CONF_EXPORT_EXTRA_ORE, 0) is None:
+        del submitted[CONF_EXPORT_EXTRA_ORE]
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**submitted)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == sent
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert not set(updated.data) & set(_WEB_ONLY_FIELDS)
+    for key, val in sent.items():
+        assert updated.data[key] == val, key
+
+
+@pytest.mark.asyncio
+async def test_options_summary_names_the_sale_history(hass: HomeAssistant) -> None:
+    entry, mock_client, _ = _sale_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+    assert result["description_placeholders"]["web_summary"] == (
+        "\n\nThe grid benefit history has 2 entries, today's since 2026-01-01. The history of "
+        "your retailer's terms for sold electricity has 2 entries, today's since 2025-07-01. "
+        "These are changed on wolta.se.")
+
+
+@pytest.mark.asyncio
+async def test_options_summary_names_the_sale_history_in_swedish(hass: HomeAssistant) -> None:
+    hass.config.language = "sv"
+    entry, mock_client, _ = _sale_entry(hass)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+    assert result["description_placeholders"]["web_summary"] == (
+        "\n\nNätnyttans historik har 2 poster, den som gäller i dag sedan 2026-01-01. Historiken "
+        "för elhandelns villkor för såld el har 2 poster, den som gäller i dag sedan 2025-07-01. "
+        "De ändras på wolta.se.")
+
+
+@pytest.mark.parametrize(
+    "lang, key, expected",
+    [("en", "grid_benefit_events",
+      "The grid benefit history has 1 entry, which applies to all of your history."),
+     ("en", "export_events", "The history of your retailer's terms for sold electricity has 1 "
+      "entry, which applies to all of your history."),
+     ("sv", "grid_benefit_events", "Nätnyttans historik har 1 post, som gäller hela historiken."),
+     ("sv", "export_events", "Historiken för elhandelns villkor för såld el har 1 post, som "
+      "gäller hela historiken.")],
+)
+def test_web_summary_a_lone_sale_entry_is_singular_and_has_no_since(lang, key, expected) -> None:
+    """The first entry applies back to the start of the history whatever its date (the server
+    keeps a lone dated entry as a list), so it reads "1 entry" without a "since"."""
+    from custom_components.wolta.config_flow import _web_summary
+
+    events = _GRID_BENEFIT_EVENTS if key == "grid_benefit_events" else _EXPORT_EVENTS
+    text = _web_summary(lang, {key: [events[1]]})
+    assert text.startswith(expected), text
+    assert events[1]["date"] not in text
+
+
+def test_web_summary_sale_history_comes_after_the_contract_and_reads_only_lists() -> None:
+    from custom_components.wolta.config_flow import _web_summary
+
+    text = _web_summary("en", {**_BRONAS_SERVER, **_SALE_SERVER})
+    order = [text.index(s) for s in ("The grid fee has", "The grid benefit has 1 time period",
+                                     "The contract history", "The grid benefit history",
+                                     "The history of your retailer's terms")]
+    assert order == sorted(order), text
+    for bad in (None, [], "x", ["x"]):
+        assert _web_summary("en", {"export_events": bad, "grid_benefit_events": bad}) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server", [_SALE_SERVER, {**_SALE_SERVER, "grid_benefit_periods": _ONE_PERIOD}],
+    ids=["history", "history-and-periods"])
+async def test_options_clearing_the_grid_benefit_under_its_history_is_refused_before_sending(
+    hass: HomeAssistant, server
+) -> None:
+    """Today's entry would have no base price: the server refuses it (422, the history's own
+    text, ahead of the periods' rule), so the form says it first, at the field and on base, and
+    points to the history on wolta.se."""
+    entry, mock_client, _ = _sale_entry(hass, server=server)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        submitted = _opts(**_core(**_SALE))
+        del submitted["tariffs"][CONF_GRID_BENEFIT_ORE]
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=submitted)
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_history_requires_base",
+                                "base": "grid_benefit_history_requires_base"}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_clearing_the_retailer_terms_under_their_history_is_sent(
+    hass: HomeAssistant,
+) -> None:
+    """Only the grid benefit's history needs a base: cleared terms are plain spot from today."""
+    entry, mock_client, _ = _sale_entry(hass, server={"export_events": _EXPORT_EVENTS})
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        submitted = _opts(**_core(**_SALE))
+        del submitted["tariffs"][CONF_EXPORT_EXTRA_ORE]
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=submitted)
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 0.0}
+
+
+@pytest.mark.asyncio
+async def test_options_server_422_for_the_grid_benefit_history_shows_at_the_field_and_on_base(
+    hass: HomeAssistant,
+) -> None:
+    """A snapshot without the list (a history added on wolta.se while the form was open): the
+    server's refusal reads as the same fault, never cannot_connect."""
+    from custom_components.wolta.api import WoltaApiError
+
+    entry, mock_client, _ = _sale_entry(hass, server={})
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_GRID_BENEFIT_EVENTS_DETAIL, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        submitted = _opts(**_core(**_SALE))
+        del submitted["tariffs"][CONF_GRID_BENEFIT_ORE]
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=submitted)
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_GRID_BENEFIT_ORE: "grid_benefit_history_requires_base",
+                                "base": "grid_benefit_history_requires_base"}
+    assert _section_options(result, "tariffs")["collapsed"] is False
+
+
+@pytest.mark.parametrize(
+    "detail, code",
+    [
+        (_GRID_BENEFIT_EVENTS_DETAIL, "grid_benefit_history_requires_base"),
+        # Plain letters, as a server that does not escape would send them.
+        ('HTTP 422 from x: {"detail":"en nätnyttepost behöver datum (inte i framtiden, inte två '
+         'på samma dag) och ett baspris (grid_benefit_ore)"}', "grid_benefit_history_requires_base"),
+        # The retailer's terms cannot meet their list's rule from here: a cleared value is plain
+        # spot (ruling 10), so a scalar save never leaves today's entry without terms. The rule is
+        # about the list, which this form never sends.
+        (_EXPORT_EVENTS_DETAIL, None),
+        # Another 422 that names the field (a type error) is not the rule.
+        ('HTTP 422 from x: {"detail":"grid_benefit_ore must be a number"}', None),
+    ],
+    ids=["benefit-history", "benefit-history-plain", "export-history", "type-error"],
+)
+def test_tariff_rule_error_matches_the_sale_history_rule(detail: str, code) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    from custom_components.wolta.config_flow import _tariff_rule_error, _tariff_rule_field
+
+    assert _tariff_rule_error(WoltaApiError(detail, status=422)) == code
+    assert _tariff_rule_error(WoltaApiError(detail, status=500)) is None
+    if code is not None:
+        assert _tariff_rule_field(code, {CONF_GRID_BENEFIT_ORE: None}) == CONF_GRID_BENEFIT_ORE
+
+
+@pytest.mark.asyncio
+async def test_reauth_never_sends_the_sale_history(hass: HomeAssistant) -> None:
+    """Re-authentication carries today's grid benefit and terms from the cache, never a list."""
+    mock_client = _mock_client("new-token")
+    await _start_reauth(hass, {**_REAUTH_BASE, **_SALE}, mock_client)
+    kwargs = mock_client.create_profile.call_args.kwargs
+    assert not set(kwargs) & set(_SALE_LISTS)
 
 
 # --- The never-released fields are gone (Global Constraints, "Tas bort helt"). ---

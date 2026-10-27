@@ -59,6 +59,8 @@ from .control_system_prefill import (
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
     KEY_BATTERY_STATUS,
+    KEY_EXPORT_EVENTS,
+    KEY_GRID_BENEFIT_EVENTS,
     KEY_GRID_BENEFIT_PERIODS,
     KEY_GRID_FEE_PERIODS,
     KEY_RETAIL_EVENTS,
@@ -323,19 +325,27 @@ def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
     return {**contract, CONF_SURCHARGE_ORE: None if fixed else data.get(CONF_SURCHARGE_ORE)}
 
 
-# The server's 422s for the time periods and the contract (api 0.119.0) that a save from here can
-# meet. Each is matched on the rule's own wording and not on the field names alone, so another
-# 422 that happens to name the same fields (a type error, say) is not one of them. The server
-# escapes non-ASCII in its JSON and api.py reduces an error body to one line, so the match runs
-# on the text with \uXXXX escapes decoded:
+# The server's 422s for the time periods, the contract and the grid benefit history (api 0.119.0)
+# that a save from here can meet. Each is matched on the rule's own wording and not on the field
+# names alone, so another 422 that happens to name the same fields (a type error, say) is not one
+# of them. The server escapes non-ASCII in its JSON and api.py reduces an error body to one line,
+# so the match runs on the text with \uXXXX escapes decoded:
 #   tidsperioder kräver ett baspris (grid_var_ore resp. grid_benefit_ore)
 #   retail_fixed_ore krävs med retail_price_model fixed och får inte sättas annars
 #   surcharge_ore får inte sättas med retail_price_model fixed (det fasta priset är elhandelns
 #     hela pris)
 #   tidsperioderna, helgdagsreglerna och elhandelsavtalet gäller bara SE1–SE4
-# The rules for the period lists themselves and for the contract history are not here: this
-# form never sends them.
+#   en nätnyttepost behöver datum (inte i framtiden, inte två på samma dag) och ett baspris
+#     (grid_benefit_ore)
+# The last is the grid benefit history's rule (Tillägg 5), which a save from here meets by
+# clearing the base price while the server keeps a grid benefit history: today's entry would have
+# no base price. The server checks it before the periods' rule, so it is matched first. The
+# retailer's terms have no such case (a cleared value is plain spot from today, the server's
+# ruling 10), so their list's rule is not here. The rules for the period lists themselves and
+# for the contract history are not here either: this form never sends them.
 _TARIFF_RULES = (
+    (re.compile(r"en\s+nätnyttepost\s+behöver\s+datum", re.IGNORECASE),
+     "grid_benefit_history_requires_base"),
     (re.compile(r"tidsperioder\s+kräver\s+ett\s+baspris", re.IGNORECASE),
      "periods_require_base"),
     (re.compile(r"retail_fixed_ore\s+krävs\s+med", re.IGNORECASE), "retail_fixed_invalid"),
@@ -348,7 +358,8 @@ _UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
 def _tariff_rule_error(err: WoltaApiError) -> str | None:
-    """The options-form error code for one of the server's period or contract 422s, else None."""
+    """The options-form error code for one of the server's period, contract or grid benefit
+    history 422s, else None."""
     if getattr(err, "status", None) != 422:
         return None
     text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(err))
@@ -359,10 +370,12 @@ def _tariff_rule_error(err: WoltaApiError) -> str | None:
 
 
 def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
-    """The field a server period or contract 422 is shown at.
+    """The field a server period, contract or grid benefit history 422 is shown at.
 
     The periods text names both base prices: the one this save cleared is the one (the grid
     fee's when neither was cleared, a cache out of step with the server)."""
+    if code == "grid_benefit_history_requires_base":
+        return CONF_GRID_BENEFIT_ORE
     if code == "periods_require_base":
         if CONF_GRID_VAR_ORE not in patch_fields and CONF_GRID_BENEFIT_ORE in patch_fields:
             return CONF_GRID_BENEFIT_ORE
@@ -374,10 +387,10 @@ def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
     return CONF_RETAIL_PRICE_MODEL
 
 
-# The read-only summary of what is edited on wolta.se (the time periods and the contract
-# history), in the user's HA language (sv/en, else English), like _zone_hint: counts, dates and
-# the holiday rule are formatted here, so the sentence is too. Empty when there is nothing to
-# summarise.
+# The read-only summary of what is edited on wolta.se (the time periods, the contract history and
+# the sale side's history), in the user's HA language (sv/en, else English), like _zone_hint:
+# counts, dates and the holiday rule are formatted here, so the sentence is too. Empty when there
+# is nothing to summarise.
 _WEB_SUMMARY: dict[str, dict[str, str]] = {
     "sv": {
         "fee_one": "Nätavgiften har 1 tidsperiod med eget pris",
@@ -387,6 +400,13 @@ _WEB_SUMMARY: dict[str, dict[str, str]] = {
         "holidays": " (helgdagar som inte räknas som vardagar: {rule})",
         "contract_one": "Avtalshistoriken har 1 avtal, som gäller hela historiken.",
         "contract_many": "Avtalshistoriken har {count} avtal, det som gäller i dag sedan {date}.",
+        "benefit_history_one": "Nätnyttans historik har 1 post, som gäller hela historiken.",
+        "benefit_history_many": ("Nätnyttans historik har {count} poster, den som gäller i dag "
+                                 "sedan {date}."),
+        "export_one": ("Historiken för elhandelns villkor för såld el har 1 post, som gäller hela "
+                       "historiken."),
+        "export_many": ("Historiken för elhandelns villkor för såld el har {count} poster, den som "
+                        "gäller i dag sedan {date}."),
         "tail": "De ändras på wolta.se.",
     },
     "en": {
@@ -397,9 +417,21 @@ _WEB_SUMMARY: dict[str, dict[str, str]] = {
         "holidays": " (holidays not counted as weekdays: {rule})",
         "contract_one": "The contract history has 1 contract, which applies to all of your history.",
         "contract_many": "The contract history has {count} contracts, today's since {date}.",
+        "benefit_history_one": ("The grid benefit history has 1 entry, which applies to all of "
+                                "your history."),
+        "benefit_history_many": ("The grid benefit history has {count} entries, today's since "
+                                 "{date}."),
+        "export_one": ("The history of your retailer's terms for sold electricity has 1 entry, "
+                       "which applies to all of your history."),
+        "export_many": ("The history of your retailer's terms for sold electricity has {count} "
+                        "entries, today's since {date}."),
         "tail": "These are changed on wolta.se.",
     },
 }
+# The history lists the summary counts, in the order it names them (the purchase side's contract
+# first, then the sale side: the grid benefit and the retailer's terms), with their text keys.
+_HISTORY_LISTS = ((KEY_RETAIL_EVENTS, "contract"), (KEY_GRID_BENEFIT_EVENTS, "benefit_history"),
+                  (KEY_EXPORT_EVENTS, "export"))
 # The holiday rules by name (the server's HOLIDAY_RULES, as wolta.se names them). A rule this
 # version does not know is shown by its key. The server counts a list without a rule with its
 # default, public_eves (tariff.DEFAULT_HOLIDAYS), so that is the rule shown then.
@@ -415,7 +447,7 @@ _DEFAULT_HOLIDAYS = "public_eves"
 
 
 def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
-    """One short paragraph on the server's time periods and contract history, or "".
+    """One short paragraph on the server's time periods, contract history and sale history, or "".
 
     Shown, never edited: the lists are changed on wolta.se, and nothing here sends them."""
     lang = (hass_language or "en").split("-")[0]
@@ -435,19 +467,22 @@ def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
             rule = server.get(holidays_key) or _DEFAULT_HOLIDAYS
             sentence += text["holidays"].format(rule=_HOLIDAY_NAMES[lang].get(rule, rule))
         parts.append(sentence + ".")
-    events = server.get(KEY_RETAIL_EVENTS)
-    if isinstance(events, list) and events and isinstance(events[-1], dict):
+    # The three histories share the server's rules (Tillägg 3-5): sorted by date, no future date,
+    # only the first entry may lack one ("from the start"), and the first entry applies back to
+    # the start of the history whatever its date (tariff.retail_post_on, export_post_on,
+    # grid_benefit_post_on: before the first entry, the first entry).
+    for key, prefix in _HISTORY_LISTS:
+        events = server.get(key)
+        if not (isinstance(events, list) and events and isinstance(events[-1], dict)):
+            continue
         if len(events) == 1:
-            # The first contract applies back to the start of the history whatever its date
-            # (tariff.retail_post_on: before the first entry, the first entry), so a lone
-            # contract has no "since".
-            parts.append(text["contract_one"])
+            # A lone entry has no "since".
+            parts.append(text[f"{prefix}_one"])
         else:
-            # The server keeps the list sorted by date and never stores a future date, so
-            # today's contract is the last entry, and only the first one can lack a date.
+            # Today's entry is the last one.
             since = events[-1].get("date")
             if since:
-                parts.append(text["contract_many"].format(count=len(events), date=since))
+                parts.append(text[f"{prefix}_many"].format(count=len(events), date=since))
     if not parts:
         return ""
     return " ".join([*parts, text["tail"]])
@@ -1860,8 +1895,11 @@ class WoltaOptionsFlow(OptionsFlow):
             # diff skips the key (same reasoning as plant_scoped_cost above).
             tax_asked = self._tax_asked()
             # Same for the grid-benefit field and the contract fields, which only exist in
-            # SE1-SE4. The time periods, their holiday rules and the contract history are not in
-            # the form at all and are never part of the diff: they are edited on wolta.se.
+            # SE1-SE4. The time periods, their holiday rules, the contract history and the sale
+            # side's history (export_events, grid_benefit_events) are not in the form at all and
+            # are never part of the diff: they are edited on wolta.se. The sale fields here are
+            # today's values the server mirrors from its history, so an untouched save sends
+            # nothing, and a change becomes an entry dated today on the server.
             benefit_asked = self._benefit_asked()
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
@@ -1926,7 +1964,9 @@ class WoltaOptionsFlow(OptionsFlow):
             # number (export_extra_ore), and a legacy value in the retailer's field is often the
             # grid benefit. The owner who touches either sees and confirms both, so both go in
             # the PATCH. An empty retailer field next to a grid benefit is answered 0 (the
-            # retailer pays plain spot), which is what the server counts a missing one as.
+            # retailer pays plain spot), which is what the server counts a missing one as. With a
+            # sale history on the server the unchanged half equals today's entry and adds no
+            # entry (tariff.apply_sale_scalar_change); the changed half adds one dated today.
             if CONF_GRID_BENEFIT_ORE in patch_fields or CONF_EXPORT_EXTRA_ORE in patch_fields:
                 benefit_in = flat.get(CONF_GRID_BENEFIT_ORE) if benefit_asked else None
                 terms_in = flat.get(CONF_EXPORT_EXTRA_ORE)
@@ -1964,6 +2004,17 @@ class WoltaOptionsFlow(OptionsFlow):
                 if (base_key in patch_fields and patch_fields[base_key] is None
                         and self._server.get(list_key)):
                     errors[base_key] = errors["base"] = "periods_require_base"
+
+            # The grid benefit history (Tillägg 5) needs a base price in today's entry, so the
+            # server refuses clearing it while a history exists (GRID_BENEFIT_EVENTS_INVALID_MSG,
+            # checked before the periods' rule, which is why it replaces that error here). The
+            # history is removed or corrected on wolta.se. The retailer's terms have no such rule:
+            # cleared, they are plain spot from today.
+            if (CONF_GRID_BENEFIT_ORE in patch_fields
+                    and patch_fields[CONF_GRID_BENEFIT_ORE] is None
+                    and self._server.get(KEY_GRID_BENEFIT_EVENTS)):
+                errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = (
+                    "grid_benefit_history_requires_base")
 
             # The electricity contract, said before sending (field AND base, like the above). A
             # change applies from today: the server adds an entry dated today to the contract

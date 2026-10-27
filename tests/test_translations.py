@@ -495,7 +495,7 @@ def test_export_split_issue_says_the_grid_benefit_is_counted_twice(path: Path) -
 
 _CONTRACT_FIELDS = ("retail_price_model", "retail_fixed_ore")
 _TARIFF_ERRORS = ("periods_require_base", "retail_fixed_invalid", "retail_fixed_surcharge",
-                  "tariff_zone_se_only")
+                  "tariff_zone_se_only", "grid_benefit_history_requires_base")
 # Never released (Global Constraints, "Tas bort helt"): no label, help text, error, selector or
 # repair may name them.
 _REMOVED_KEYS = (
@@ -720,6 +720,10 @@ def test_tariff_errors_name_the_field_they_ask_for(path: Path) -> None:
     assert data["surcharge_ore"].split(" (")[0] in errors["retail_fixed_surcharge"], path.name
     assert tariffs["name"] in errors["retail_fixed_surcharge"], path.name
     assert "SE1–SE4" in errors["tariff_zone_se_only"], path.name
+    history = errors["grid_benefit_history_requires_base"]
+    assert labels["grid_benefit_ore"] in history, path.name
+    assert tariffs["name"] in history, path.name
+    assert "wolta.se" in history, path.name
 
 
 def test_swedish_tariff_errors_use_typographic_quotes() -> None:
@@ -800,3 +804,82 @@ def test_all_year_grid_fee_repair_keeps_cents(path: Path) -> None:
     issues = _load(path)["issues"]
     assert "öre (or cents) per kWh" in issues["grid_fee_implausible"]["description"]
     assert "cents" not in issues["grid_fee_period_implausible"]["description"]
+
+
+# --- The sale side's history (HACS 0.54.0, spec 2026-10-27-marknadsanpassning Tillägg 5): the
+# form edits today's grid benefit and retailer's terms; the history is kept and corrected on
+# wolta.se. The server's rulings 18 and 19 decide when a save applies from the start instead. ---
+
+_SALE_FIELDS = ("grid_benefit_ore", "export_extra_ore", "export_extra_pct")
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("field", _SALE_FIELDS)
+def test_sale_help_says_a_change_applies_from_today_after_the_first_answer(
+    path: Path, field: str
+) -> None:
+    text = _tariffs(path)["data_description"][field]
+    needle = "efter ditt första svar" if path.name == "sv.json" else "after your first answer"
+    assert needle in text.lower(), (path.name, field)
+    assert _WORDS[path.name]["today"] in text, (path.name, field)
+    assert "SE1–SE4" in text, (path.name, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("field", ["grid_benefit_ore", "export_extra_ore"])
+def test_sale_help_says_the_history_and_corrections_are_on_wolta_se(path: Path, field: str) -> None:
+    text = _tariffs(path)["data_description"][field]
+    words = _WORDS[path.name]
+    assert "wolta.se" in text, (path.name, field)
+    assert words["back"] in text, (path.name, field)
+    assert ("historik" if path.name == "sv.json" else "history") in text, (path.name, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_terms_help_says_the_first_answer_other_than_zero_applies_to_all_history(
+    path: Path,
+) -> None:
+    """Ruling 18: an empty field is stored as 0, so 0 is not an answer and the first value other
+    than 0 applies to all of the history. Someone who really had 0 corrects the date on the web."""
+    text = _tariffs(path)["data_description"]["export_extra_ore"]
+    if path.name == "sv.json":
+        needles = ("Ditt första svar som inte är 0 gäller hela din historik",
+                   "ett tomt fält sparas som 0", "hade du verkligen 0")
+    else:
+        needles = ("Your first answer other than 0 applies to all of your history",
+                   "an empty field is stored as 0", "if you really had 0")
+    for needle in needles:
+        assert needle in text, (path.name, needle)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_benefit_help_says_the_block_and_only_the_first_amount_applies_to_all_history(
+    path: Path,
+) -> None:
+    """Ruling 19: the grid benefit is judged as a block. Only the very first amount applies to
+    all of the history; after it every change of the amount, the percentage or the time periods
+    applies from today. With a history the base cannot be cleared."""
+    text = _tariffs(path)["data_description"]["grid_benefit_ore"]
+    if path.name == "sv.json":
+        needles = ("beloppet, procentdelen eller tidsperioderna",
+                   "bara det allra första beloppet gäller hela din historik",
+                   "inte möjligt när nätnyttan har en historik")
+    else:
+        needles = ("this amount, the percentage or the time periods",
+                   "only the very first amount applies to all of your history",
+                   "not possible while the grid benefit has a history")
+    for needle in needles:
+        assert needle in text, (path.name, needle)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_tariffs_description_names_the_sale_side_and_its_history(path: Path) -> None:
+    text = _tariffs(path)["description"]
+    if path.name == "sv.json":
+        needles = ("elhandelsavtalet, nätnyttan eller elhandelns villkor för såld el",
+                   "historiken för nätnyttan och elhandelns villkor")
+    else:
+        needles = ("the electricity contract, the grid benefit or the retailer's terms for sold "
+                   "electricity", "the history of the grid benefit and the retailer's terms")
+    for needle in needles:
+        assert needle in text, (path.name, needle)

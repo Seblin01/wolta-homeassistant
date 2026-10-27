@@ -48,11 +48,17 @@ CONF_RETAIL_FIXED_ORE = "retail_fixed_ore"
 RETAIL_PRICE_MODELS = ("quarter", "month", "fixed")
 DEFAULT_RETAIL_PRICE_MODEL = "quarter"
 # Read-only here (shown as a summary in the options form, never sent from Home Assistant): the
-# time periods with a price of their own for the grid fee and the grid benefit, and the contract
-# history. The base price (grid_var_ore / grid_benefit_ore) applies outside the periods.
+# time periods with a price of their own for the grid fee and the grid benefit, the contract
+# history and the sale side's history (spec 2026-10-27-marknadsanpassning Tillägg 5: the
+# retailer's terms per entry, export_events, and the grid benefit per entry, grid_benefit_events).
+# The base price (grid_var_ore / grid_benefit_ore) applies outside the periods. The server mirrors
+# today's sale entries into export_extra_ore and grid_benefit_ore / export_extra_pct, and a change
+# to those adds an entry dated today (or applies from the start: the server's rulings 18 and 19).
 KEY_GRID_FEE_PERIODS = "grid_fee_periods"
 KEY_GRID_BENEFIT_PERIODS = "grid_benefit_periods"
 KEY_RETAIL_EVENTS = "retail_events"
+KEY_EXPORT_EVENTS = "export_events"
+KEY_GRID_BENEFIT_EVENTS = "grid_benefit_events"
 # Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"
