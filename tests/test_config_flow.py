@@ -6791,6 +6791,40 @@ async def test_options_sale_change_with_sale_history_sends_only_the_scalars(
 
 
 @pytest.mark.asyncio
+async def test_options_benefit_change_echoes_the_filled_in_zero_terms(hass: HomeAssistant) -> None:
+    """The confirm-both echo next to ruling 18: the stored terms are the 0.0 every new row gets
+    and there is no history. Changing the grid benefit sends that 0.0 back with it, exactly
+    these two keys: equal to the stored value, it is no change on the server, so the terms stay
+    unanswered and a later first value other than 0 still applies from the start."""
+    entry = _make_mock_entry(hass, extra_data={CONF_EXPORT_EXTRA_ORE: 0.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_BENEFIT_ORE: 6.0, CONF_EXPORT_EXTRA_ORE: 0.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {
+        CONF_GRID_BENEFIT_ORE: 6.0, CONF_EXPORT_EXTRA_ORE: 0.0}
+
+
+@pytest.mark.asyncio
+async def test_options_terms_change_never_invents_a_first_grid_benefit(hass: HomeAssistant) -> None:
+    """The echo goes one way only: with no grid benefit stored (and none typed), changing the
+    terms sends the terms alone. A grid_benefit_ore key here would be a first answer, which the
+    server applies to all of the history (ruling 19)."""
+    entry = _make_mock_entry(hass, extra_data={CONF_EXPORT_EXTRA_ORE: 0.0})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{CONF_EXPORT_EXTRA_ORE: 2.0})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.call_args.kwargs == {CONF_EXPORT_EXTRA_ORE: 2.0}
+    assert CONF_GRID_BENEFIT_ORE not in hass.config_entries.async_get_entry(entry.entry_id).data
+
+
+@pytest.mark.asyncio
 async def test_options_summary_names_the_sale_history(hass: HomeAssistant) -> None:
     entry, mock_client, _ = _sale_entry(hass)
     with _options_patched(mock_client):

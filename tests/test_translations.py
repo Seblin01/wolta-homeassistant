@@ -840,16 +840,49 @@ def test_terms_help_says_the_first_answer_other_than_zero_applies_to_all_history
     path: Path,
 ) -> None:
     """Ruling 18: an empty field is stored as 0, so 0 is not an answer and the first value other
-    than 0 applies to all of the history. Someone who really had 0 corrects the date on the web."""
+    than 0 applies to all of the history. Someone who really had 0 corrects the date on the web.
+    The ruling only holds while the terms have no history list (the server's _sale_unanswered is
+    reached only without entries): with one, every change is an entry dated today, also from a
+    today's entry of 0. The condition is part of the sentence, as in the server's copy."""
     text = _tariffs(path)["data_description"]["export_extra_ore"]
     if path.name == "sv.json":
-        needles = ("Ditt första svar som inte är 0 gäller hela din historik",
-                   "ett tomt fält sparas som 0", "hade du verkligen 0")
+        needles = ("Så länge villkoren inte har någon historik på wolta.se gäller ditt första "
+                   "svar som inte är 0 hela din historik",
+                   "ett tomt fält sparas som 0", "hade du verkligen 0",
+                   "Med en historik gäller varje ändring från i dag, också från 0")
+        unconditional = "Ditt första svar som inte är 0 gäller hela din historik"
     else:
-        needles = ("Your first answer other than 0 applies to all of your history",
-                   "an empty field is stored as 0", "if you really had 0")
+        needles = ("While your terms have no history on wolta.se, your first answer other than 0 "
+                   "applies to all of your history",
+                   "an empty field is stored as 0", "if you really had 0",
+                   "With a history, every change applies from today, also from 0")
+        unconditional = "Your first answer other than 0 applies to all of your history"
     for needle in needles:
         assert needle in text, (path.name, needle)
+    assert unconditional not in text, path.name
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_terms_help_says_a_cleared_field_is_plain_spot(path: Path) -> None:
+    """Ruling 10: clearing answered terms is a change to 0 (plain spot), from today in SE1-SE4.
+    The server counts missing terms as 0 in every zone, so "your country's standard" named
+    nothing the owner could look up."""
+    text = _tariffs(path)["data_description"]["export_extra_ore"]
+    if path.name == "sv.json":
+        assert "Rensa fältet för ren spot (0); i SE1–SE4 gäller det från i dag" in text
+        assert "landets schablon" not in text
+    else:
+        assert "Clear the field for plain spot (0); in SE1–SE4 it applies from today" in text
+        assert "standard tariff" not in text
+
+
+@pytest.mark.parametrize("doc", ["README.md", "docs/release-notes-v0.54.0.md"])
+def test_docs_state_ruling_18_with_its_no_history_condition(doc: str) -> None:
+    """The README and the release notes say the same as the help text and the server's copy:
+    the first terms other than 0 apply to all of the history only while there is no history."""
+    text = (_COMPONENT.parents[1] / doc).read_text(encoding="utf-8")
+    assert "the first value other than 0, as long as the terms have no history on wolta.se" in text
+    assert "with a history, every change of the terms applies from today, also from a 0" in text
 
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
