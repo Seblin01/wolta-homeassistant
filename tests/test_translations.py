@@ -613,6 +613,27 @@ def test_a_contract_change_applies_from_today_and_the_rest_is_on_wolta_se(path: 
 
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_contract_help_names_both_first_answers_that_apply_to_all_history(path: Path) -> None:
+    """Ruling 14: only two answers apply from the start of the history: the first contract type,
+    when none is stored yet, and a markup entered for the first time without changing the
+    contract type. Everything after that applies from today. Dropping either condition overstates
+    or understates what a save does."""
+    text = _tariffs(path)["data_description"]["retail_price_model"]
+    if path.name == "sv.json":
+        needles = ("hela din historik", "den första avtalstypen du väljer",
+                   "om Wolta inte har någon sparad för dig än",
+                   "ett påslag du anger för första gången utan att byta avtalstyp",
+                   "Därefter gäller en ändring från i dag")
+    else:
+        needles = ("apply to all of your history", "the first contract type you choose",
+                   "if Wolta has none stored for you yet",
+                   "a markup you enter for the first time without changing the contract type",
+                   "After that, a change applies from today")
+    for needle in needles:
+        assert needle in text, (path.name, needle)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
 def test_markup_help_no_longer_speaks_of_a_start_date(path: Path) -> None:
     """Tillägg 3 point 3: "the markup before the start date" is gone; the history is in earlier
     contracts. A fixed price carries no markup."""

@@ -363,26 +363,43 @@ def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
 
 
 # The read-only summary of what is edited on wolta.se (the time periods and the contract
-# history), in the user's HA language (sv/en, else English), like _zone_hint: counts and dates
-# are formatted here, so the sentence is too. Empty when there is nothing to summarise.
+# history), in the user's HA language (sv/en, else English), like _zone_hint: counts, dates and
+# the holiday rule are formatted here, so the sentence is too. Empty when there is nothing to
+# summarise.
 _WEB_SUMMARY: dict[str, dict[str, str]] = {
     "sv": {
-        "fee_one": "Nätavgiften har 1 tidsperiod med eget pris.",
-        "fee_many": "Nätavgiften har {count} tidsperioder med eget pris.",
-        "benefit_one": "Nätnyttan har 1 tidsperiod med eget pris.",
-        "benefit_many": "Nätnyttan har {count} tidsperioder med eget pris.",
-        "contract": "Avtalshistoriken har {count} avtal, det som gäller i dag sedan {date}.",
+        "fee_one": "Nätavgiften har 1 tidsperiod med eget pris",
+        "fee_many": "Nätavgiften har {count} tidsperioder med eget pris",
+        "benefit_one": "Nätnyttan har 1 tidsperiod med eget pris",
+        "benefit_many": "Nätnyttan har {count} tidsperioder med eget pris",
+        "holidays": " (helgdagar som inte räknas som vardagar: {rule})",
+        "contract_one": "Avtalshistoriken har 1 avtal, som gäller hela historiken.",
+        "contract_many": "Avtalshistoriken har {count} avtal, det som gäller i dag sedan {date}.",
         "tail": "De ändras på wolta.se.",
     },
     "en": {
-        "fee_one": "The grid fee has 1 time period with a price of its own.",
-        "fee_many": "The grid fee has {count} time periods with a price of their own.",
-        "benefit_one": "The grid benefit has 1 time period with a price of its own.",
-        "benefit_many": "The grid benefit has {count} time periods with a price of their own.",
-        "contract": "The contract history has {count} contracts, today's since {date}.",
+        "fee_one": "The grid fee has 1 time period with a price of its own",
+        "fee_many": "The grid fee has {count} time periods with a price of their own",
+        "benefit_one": "The grid benefit has 1 time period with a price of its own",
+        "benefit_many": "The grid benefit has {count} time periods with a price of their own",
+        "holidays": " (holidays not counted as weekdays: {rule})",
+        "contract_one": "The contract history has 1 contract, which applies to all of your history.",
+        "contract_many": "The contract history has {count} contracts, today's since {date}.",
         "tail": "These are changed on wolta.se.",
     },
 }
+# The holiday rules by name (the server's HOLIDAY_RULES, as wolta.se names them). A rule this
+# version does not know is shown by its key. The server counts a list without a rule with its
+# default, public_eves (tariff.DEFAULT_HOLIDAYS), so that is the rule shown then.
+_HOLIDAY_NAMES: dict[str, dict[str, str]] = {
+    "sv": {"none": "inga", "public": "allmänna helgdagar",
+           "public_eves": "allmänna helgdagar, julafton och nyårsafton",
+           "public_eves_maundy": "allmänna helgdagar, julafton, nyårsafton och skärtorsdag"},
+    "en": {"none": "none", "public": "public holidays",
+           "public_eves": "public holidays, Christmas Eve and New Year's Eve",
+           "public_eves_maundy": "public holidays, Christmas Eve, New Year's Eve and Maundy Thursday"},
+}
+_DEFAULT_HOLIDAYS = "public_eves"
 
 
 def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
@@ -390,21 +407,35 @@ def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
 
     Shown, never edited: the lists are changed on wolta.se, and nothing here sends them."""
     lang = (hass_language or "en").split("-")[0]
-    text = _WEB_SUMMARY.get(lang, _WEB_SUMMARY["en"])
+    lang = lang if lang in _WEB_SUMMARY else "en"
+    text = _WEB_SUMMARY[lang]
     parts: list[str] = []
-    for key, prefix in ((KEY_GRID_FEE_PERIODS, "fee"), (KEY_GRID_BENEFIT_PERIODS, "benefit")):
+    for key, holidays_key, prefix in (
+            (KEY_GRID_FEE_PERIODS, "grid_fee_holidays", "fee"),
+            (KEY_GRID_BENEFIT_PERIODS, "grid_benefit_holidays", "benefit")):
         periods = server.get(key)
-        if isinstance(periods, list) and periods:
-            parts.append(text[f"{prefix}_one"] if len(periods) == 1
-                         else text[f"{prefix}_many"].format(count=len(periods)))
+        if not (isinstance(periods, list) and periods):
+            continue
+        sentence = (text[f"{prefix}_one"] if len(periods) == 1
+                    else text[f"{prefix}_many"].format(count=len(periods)))
+        # The holiday rule only decides anything for a period on weekdays.
+        if any(isinstance(p, dict) and p.get("days") == "weekdays" for p in periods):
+            rule = server.get(holidays_key) or _DEFAULT_HOLIDAYS
+            sentence += text["holidays"].format(rule=_HOLIDAY_NAMES[lang].get(rule, rule))
+        parts.append(sentence + ".")
     events = server.get(KEY_RETAIL_EVENTS)
     if isinstance(events, list) and events and isinstance(events[-1], dict):
-        # The server keeps the list sorted by date and never stores a future date, so today's
-        # contract is the last entry. Only the first entry can lack a date ("from the start"),
-        # and a stored list is never that entry alone.
-        since = events[-1].get("date")
-        if since:
-            parts.append(text["contract"].format(count=len(events), date=since))
+        if len(events) == 1:
+            # The first contract applies back to the start of the history whatever its date
+            # (tariff.retail_post_on: before the first entry, the first entry), so a lone
+            # contract has no "since".
+            parts.append(text["contract_one"])
+        else:
+            # The server keeps the list sorted by date and never stores a future date, so
+            # today's contract is the last entry, and only the first one can lack a date.
+            since = events[-1].get("date")
+            if since:
+                parts.append(text["contract_many"].format(count=len(events), date=since))
     if not parts:
         return ""
     return " ".join([*parts, text["tail"]])

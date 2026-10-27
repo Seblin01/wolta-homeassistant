@@ -210,7 +210,8 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
     EXCLUDING VAT) and the grid's part of that kind's price in SEK/kWh EXCLUDING VAT:
     "grid_fee" on the purchase kind (the server's grid_fee_ore: the whole variable grid fee of
     the quarter, its time-period or base price plus the percentage of spot, so nothing is added
-    here) and "grid_benefit" on the sale kind (grid_benefit_ore). None when the server sent none
+    here) and "grid_benefit" on the sale kind (grid_benefit_ore: the amount only, the
+    percentage of spot is not in it). None when the server sent none
     (the owner has not given the base price, or the percentage could not be counted): never a
     guess. The two follow their own time periods, so they can change at different quarters.
     with_forecast adds "forecast": bool to every point and, on forecast points, "horizon"."""
@@ -268,8 +269,8 @@ def sale_series(purchase: Any) -> list[dict[str, Any]]:
     "grid_benefit": SEK/kWh EXCLUDING VAT | None}. The sale price is what a private person is
     paid per sold kWh: spot + grid benefit + retailer's terms + tax reduction, all without VAT
     (the server's `sale_ore_kwh`, which is null when the sale side is unavailable).
-    `grid_benefit` is the grid benefit the quarter was priced with (its time-period price or the
-    base price)."""
+    `grid_benefit` is the grid benefit amount the quarter was priced with (its time-period price
+    or the base price), without the percentage of spot that the sale price adds on top."""
     return _profile_series(purchase, "sale", with_forecast=False)
 
 

@@ -6025,28 +6025,41 @@ async def test_options_untouched_contract_default_patches_nothing(hass: HomeAssi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "periods, needle",
-    [(_ONE_PERIOD, "The grid fee has 1 time period with a price of its own."),
-     (_TWO_PERIODS, "The grid fee has 2 time periods with a price of their own.")],
-    ids=["one-period", "two-periods"],
+    "stored, server, needles",
+    [
+        ({CONF_GRID_VAR_ORE: 9.0},
+         {"grid_fee_periods": _ONE_PERIOD, "grid_fee_holidays": "none"},
+         ["The grid fee has 1 time period with a price of its own."]),
+        ({CONF_GRID_VAR_ORE: 9.0},
+         {"grid_fee_periods": _TWO_PERIODS, "grid_fee_holidays": "none"},
+         ["The grid fee has 2 time periods with a price of their own "
+          "(holidays not counted as weekdays: none)."]),
+        # The full Bronäs snapshot: both sides' periods, the contract history and today's markup
+        # 3.5 echoed from its last entry.
+        (_BRONAS, _BRONAS_SERVER,
+         ["The grid fee has 2 time periods",
+          "The grid benefit has 1 time period with a price of its own.",
+          "The contract history has 2 contracts, today's since 2026-01-09."]),
+    ],
+    ids=["one-period", "two-periods", "bronas"],
 )
 async def test_options_with_time_periods_shows_the_summary_and_an_untouched_save_patches_nothing(
-    hass: HomeAssistant, periods, needle: str
+    hass: HomeAssistant, stored, server, needles
 ) -> None:
-    entry = _make_mock_entry(hass, extra_data={CONF_GRID_VAR_ORE: 9.0})
+    entry = _make_mock_entry(hass, extra_data=stored)
     mock_client, _ = _mock_options_env(entry)
-    mock_client.get_profile = AsyncMock(return_value={
-        **_server_profile(entry), "grid_fee_periods": periods, "grid_fee_holidays": "none"})
+    mock_client.get_profile = AsyncMock(return_value={**_server_profile(entry), **server})
     with _options_patched(mock_client):
         result = await _settings_session(hass, entry)
         summary = result["description_placeholders"]["web_summary"]
-        assert needle in summary
+        for needle in needles:
+            assert needle in summary, (needle, summary)
         assert "wolta.se" in summary
         # Not one field per period: the lists are not editable here.
         for field in _WEB_ONLY_FIELDS:
             assert field not in _tariff_fields(result), field
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input=_opts(**_core(**{CONF_GRID_VAR_ORE: 9.0})))
+            result["flow_id"], user_input=_opts(**_core(**stored)))
     assert result["type"] == FlowResultType.CREATE_ENTRY
     mock_client.patch_profile.assert_not_awaited()
 
@@ -6093,8 +6106,9 @@ async def test_options_summary_names_the_contract_history_in_swedish(hass: HomeA
         result = await _settings_session(hass, entry)
     summary = result["description_placeholders"]["web_summary"]
     assert summary == (
-        "\n\nNätavgiften har 2 tidsperioder med eget pris. Nätnyttan har 1 tidsperiod med eget "
-        "pris. Avtalshistoriken har 2 avtal, det som gäller i dag sedan 2026-01-09. De ändras på "
+        "\n\nNätavgiften har 2 tidsperioder med eget pris (helgdagar som inte räknas som vardagar: "
+        "allmänna helgdagar, julafton och nyårsafton). Nätnyttan har 1 tidsperiod med eget pris. "
+        "Avtalshistoriken har 2 avtal, det som gäller i dag sedan 2026-01-09. De ändras på "
         "wolta.se.")
 
 
@@ -6122,6 +6136,38 @@ def test_web_summary_reads_only_well_formed_lists() -> None:
     assert _web_summary(None, {"retail_events": _BRONAS_EVENTS}) == (
         "The contract history has 2 contracts, today's since 2026-01-09. These are changed on "
         "wolta.se.")
+
+
+@pytest.mark.parametrize(
+    "lang, expected",
+    [("en", "The contract history has 1 contract, which applies to all of your history."),
+     ("sv", "Avtalshistoriken har 1 avtal, som gäller hela historiken.")],
+)
+def test_web_summary_a_lone_contract_is_singular_and_has_no_since(lang, expected) -> None:
+    """The first contract applies back to the start of the history whatever its date, so a lone
+    dated contract must not read "1 contracts, today's since <date>"."""
+    from custom_components.wolta.config_flow import _web_summary
+
+    text = _web_summary(lang, {"retail_events": [_BRONAS_EVENTS[1]]})
+    assert text.startswith(expected), text
+    assert "2026-01-09" not in text
+
+
+@pytest.mark.parametrize(
+    "rule, expected",
+    [(None, "public holidays, Christmas Eve and New Year's Eve"),
+     ("public_eves_maundy", "public holidays, Christmas Eve, New Year's Eve and Maundy Thursday"),
+     ("future_rule", "future_rule")],
+    ids=["default", "named", "unknown"],
+)
+def test_web_summary_names_the_holiday_rule_of_weekday_periods(rule, expected) -> None:
+    from custom_components.wolta.config_flow import _web_summary
+
+    text = _web_summary("en", {"grid_benefit_periods": _TWO_PERIODS, "grid_benefit_holidays": rule})
+    assert f"(holidays not counted as weekdays: {expected})." in text, text
+    # A list with only all-day periods: the rule decides nothing and is not shown.
+    assert "holidays" not in _web_summary(
+        "en", {"grid_fee_periods": _ONE_PERIOD, "grid_fee_holidays": "public"})
 
 
 # --- The contract: a change applies from today and sends only the scalars that changed. ---
