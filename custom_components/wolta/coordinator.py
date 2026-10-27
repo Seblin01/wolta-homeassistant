@@ -3974,13 +3974,18 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
             value = data.get(key)
+            figure = "-"
+            if isinstance(value, (int, float)):
+                figure = f"{value:g}"
+                if self.hass.config.language.lower().startswith("sv"):
+                    # The text is Swedish for a Swedish owner: so is the decimal comma.
+                    figure = figure.replace(".", ",")
             ir.async_create_issue(
                 self.hass, DOMAIN, issue_id,
                 is_fixable=False,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key=issue,
-                translation_placeholders={
-                    placeholder: f"{value:g}" if isinstance(value, (int, float)) else "-"},
+                translation_placeholders={placeholder: figure},
             )
 
     @staticmethod

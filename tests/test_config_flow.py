@@ -5100,6 +5100,40 @@ async def test_options_tariff_change_refreshes_the_purchase_price(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {CONF_GRID_BENEFIT_ORE: 11.0},
+        {CONF_GRID_BENEFIT_PEAK_ORE: 20.0},
+        {CONF_EXPORT_EXTRA_ORE: 6.0},
+        {CONF_EXPORT_EXTRA_PCT: 3.0},
+    ],
+    ids=["benefit", "benefit_peak", "retailer_terms", "benefit_pct"],
+)
+async def test_options_export_side_change_refreshes_the_purchase_price(
+    hass: HomeAssistant, fields
+) -> None:
+    """The export-side tariff fields (grid benefit, retailer's terms) are part of the tariff
+    the kept /profile/prices answer was priced with: saving one drops that answer and fetches
+    a fresh one, exactly as for the import-side fields (README promises both)."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_coordinator.prices = MagicMock()
+    mock_coordinator.prices.async_request_refresh = AsyncMock()
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{
+                CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0, **fields})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done(wait_background_tasks=True)
+    names = [c[0] for c in mock_coordinator.prices.mock_calls]
+    assert names == ["async_forget_purchase", "async_request_refresh"]
+
+
+@pytest.mark.asyncio
 async def test_options_save_does_not_wait_for_the_price_refresh(hass: HomeAssistant) -> None:
     """The refresh fetches /profile/prices (up to the lookup timeout): a slow or hanging
     price endpoint must not hold the Configure dialog open."""

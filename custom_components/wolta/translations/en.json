@@ -148,7 +148,7 @@
     },
     "export_split_unclear": {
       "title": "Wolta: separate your grid benefit from your retailer's terms",
-      "description": "You entered {export_extra} öre as export premium, and Wolta currently adds 5 öre of grid benefit on top. If {export_extra} is your grid benefit it is counted twice. Enter the grid benefit from your network operator and your retailer's terms separately, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs.\n\nNothing changes until you save. Enter 0 as the retailer's terms if your retailer pays plain spot."
+      "description": "You entered {export_extra} öre as retailer's terms (formerly export premium), and Wolta currently adds 5 öre of grid benefit on top. If {export_extra} is your grid benefit it is counted twice. Enter the grid benefit from your network operator and your retailer's terms separately, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs.\n\nNothing changes until you save. Enter 0 as the retailer's terms if your retailer pays plain spot."
     },
     "grid_benefit_fixed_missing": {
       "title": "Wolta: your grid benefit percentage needs its fixed part",
@@ -531,7 +531,7 @@
               "grid_benefit_peak_ore": "Grid benefit, high-load hours (optional, öre per kWh)",
               "export_extra_ore": "Retailer's terms for sold electricity (öre/ct per kWh)",
               "grid_var_pct": "Grid fee, percent of spot (% of spot)",
-              "export_extra_pct": "Grid benefit, percent of spot (% of spot)",
+              "export_extra_pct": "Sold electricity, percent of spot (SE1–SE4: part of the grid benefit)",
               "reduced_energy_tax": "Reduced energy tax"
             },
             "data_description": {
@@ -539,9 +539,9 @@
               "surcharge_ore": "Your electricity supplier's markup, excluding VAT, in öre/kWh (SEK zones) or euro cents/kWh (other zones). Clear the field to revert to your country's standard tariff.",
               "grid_benefit_ore": "The grid benefit (nätnytta) your network operator pays per kWh you feed in, excluding VAT, in öre/kWh. It is on your network operator's statement and is not what your electricity retailer pays (that is the retailer's terms, below). Enter 0 if you get none. If it also has a percentage of spot (the percent field below), this is its fixed part and is required: enter 0 if you only have a percentage. Left empty, Wolta uses a standard 5 öre. Sweden (SE1–SE4) only, between −20 and 50. Clear the field to revert to the standard.",
               "grid_benefit_peak_ore": "Optional. The grid benefit for high-load hours, if your network operator pays a different amount then. Wolta counts weekdays 06–22 from November to March as high-load, except public holidays such as Christmas, New Year and Easter. It is an exception to the rest of the year, so that field is required too. Sweden (SE1–SE4) only, between −20 and 50. Clear the field to use the same amount all year.",
-              "export_extra_ore": "What your electricity retailer pays (+) or deducts (−) per sold kWh, on top of the spot price, in öre/kWh. 0 if your retailer pays plain spot. This is not your grid benefit: enter that in the fields above, or it is counted twice. Can be negative. Clear the field to revert to your country's standard tariff.",
+              "export_extra_ore": "What your electricity retailer pays (+) or deducts (−) per sold kWh, on top of the spot price, in öre or euro cents per kWh. 0 if your retailer pays plain spot. In SE1–SE4 this is not your grid benefit: enter that in the grid benefit fields above, or it is counted twice. Can be negative. Clear the field to revert to your country's standard tariff.",
               "grid_var_pct": "The percentage part of your grid fee, as a percent of the spot price. It needs the fixed part in the field above (0 if you only have a percentage). Clear the field to remove the percent component.",
-              "export_extra_pct": "The percentage part of your grid benefit, as a percent of the spot price (can be negative). It needs the fixed part in the rest-of-the-year field above (0 if you only have a percentage). Clear the field to remove the percent component.",
+              "export_extra_pct": "The percentage part of what is paid for your sold electricity, as a percent of the spot price (can be negative). In SE1–SE4 it is the percentage part of your grid benefit and needs the fixed part in the grid benefit field for the rest of the year above (0 if you only have a percentage). Clear the field to remove the percent component.",
               "reduced_energy_tax": "Some municipalities in northern Sweden have a reduced energy tax: your grid operator deducts 9.6 öre/kWh excluding VAT on the bill. It applies in all municipalities in Norrbotten, Västerbotten and Jämtland, and in Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen and Torsby. Source: Skatteverket. Choose Yes if you live in one of them and No if you do not. Not set means you have not answered: in SE1–SE3 the purchase-price sensor has no price (its state is unknown) until you do."
             }
           }

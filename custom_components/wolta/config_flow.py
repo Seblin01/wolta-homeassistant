@@ -1481,9 +1481,15 @@ def _zone_group(zone: str) -> list[tuple[str, str]]:
     return [(z, label) for z, label in SUPPORTED_ZONES if z[:2].upper() == prefix]
 
 
-# The tariff fields the purchase price is built from (the export fields are not in it).
+# The tariff fields the kept /profile/prices answer was priced with: the import side and the
+# export side (grid benefit, retailer's terms). Saving any of them drops the kept answer and
+# fetches a fresh one.
 _TARIFF_PRICE_KEYS = frozenset(
-    {CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX}
+    {
+        CONF_GRID_VAR_ORE, CONF_GRID_VAR_PCT, CONF_SURCHARGE_ORE, CONF_REDUCED_ENERGY_TAX,
+        CONF_GRID_BENEFIT_ORE, CONF_GRID_BENEFIT_PEAK_ORE,
+        CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
+    }
 )
 
 

@@ -7014,3 +7014,25 @@ async def test_export_issues_do_not_hide_the_import_side_issues(hass, mock_entry
     reg = ir.async_get(hass)
     for issue_id in (_GRID_ISSUE_ID, _FIXED_ISSUE_ID, _SPLIT_ISSUE_ID, _BENEFIT_FIXED_ISSUE_ID):
         assert reg.async_get_issue(DOMAIN, issue_id) is not None, issue_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "language, expected",
+    [("sv", "7,5"), ("sv-SE", "7,5"), ("en", "7.5"), ("de", "7.5")],
+)
+async def test_export_issue_figures_use_the_owners_decimal_separator(
+    hass, mock_entry, language, expected
+):
+    """The owner's own figure is quoted back in the repair text: a Swedish owner reads
+    7,5, not 7.5 (the translation is sv, the number must follow)."""
+    hass.config.language = language
+    c = await _cap_coordinator(
+        hass, mock_entry, **{"export_extra_ore": 7.5, "export_extra_pct": 7.5})
+    c._evaluate_grid_fee_issue(
+        _export_check(export_split_unclear=True, grid_benefit_fixed_missing=True))
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(
+        DOMAIN, _SPLIT_ISSUE_ID).translation_placeholders == {"export_extra": expected}
+    assert registry.async_get_issue(
+        DOMAIN, _BENEFIT_FIXED_ISSUE_ID).translation_placeholders == {"export_pct": expected}
