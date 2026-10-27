@@ -151,8 +151,8 @@
       "description": "You entered {export_extra} öre as retailer's terms (formerly export premium), and Wolta currently adds 5 öre of grid benefit on top. If {export_extra} is your grid benefit it is counted twice. Enter the grid benefit from your network operator and your retailer's terms separately, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs.\n\nNothing changes until you save. Enter 0 as the retailer's terms if your retailer pays plain spot."
     },
     "grid_benefit_fixed_missing": {
-      "title": "Wolta: your grid benefit percentage needs its fixed part",
-      "description": "You entered {export_pct} % of spot as your grid benefit percentage, but not the fixed part of the grid benefit. Wolta then adds a standard 5 öre as the fixed part, which looks like your figure but is a guess. Enter the fixed part of your grid benefit (excluding VAT) under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. Enter 0 if you only have a percentage."
+      "title": "Wolta: “Sold electricity, percent of spot” needs a fixed grid benefit",
+      "description": "You entered {export_pct} % in “Sold electricity, percent of spot”, but not the fixed part of the grid benefit. Wolta then adds a standard 5 öre as the fixed part, which looks like your figure but is a guess. Fill in “Grid benefit, rest of the year” (excluding VAT) under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. Enter 0 if you only have a percentage."
     },
     "soc_required": {
       "title": "Wolta needs your battery's state-of-charge sensor",

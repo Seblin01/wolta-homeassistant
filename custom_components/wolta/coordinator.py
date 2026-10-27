@@ -3979,6 +3979,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 figure = f"{value:g}"
                 if self.hass.config.language.lower().startswith("sv"):
                     # The text is Swedish for a Swedish owner: so is the decimal comma.
+                    # HA renders repair text in the viewing user's language, not
+                    # hass.config.language, so a mixed setup can show the other separator
+                    # (accepted limitation).
                     figure = figure.replace(".", ",")
             ir.async_create_issue(
                 self.hass, DOMAIN, issue_id,

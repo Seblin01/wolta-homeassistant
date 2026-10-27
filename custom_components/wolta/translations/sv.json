@@ -151,8 +151,8 @@
       "description": "Du har angett {export_extra} öre som elhandelns villkor (tidigare exporttillägg), och Wolta lägger i dag 5 öre i nätnytta ovanpå. Om {export_extra} är din nätnytta räknas den två gånger. Ange nätnyttan från ditt nätföretag och elhandelns villkor var för sig, under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer.\n\nInget ändras förrän du sparar. Ange 0 som elhandelns villkor om din elhandlare betalar ren spot."
     },
     "grid_benefit_fixed_missing": {
-      "title": "Wolta: nätnyttans procentdel saknar sin fasta del",
-      "description": "Du har angett {export_pct} % av spot som nätnyttans procentdel, men inte nätnyttans fasta del. Wolta lägger då schablonen 5 öre som fast del, vilket ser ut som ditt tal men är en gissning. Ange nätnyttans fasta del (exklusive moms) under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Ange 0 om du bara har procent."
+      "title": "Wolta: ”Såld el, andel av spot” behöver en fast nätnytta",
+      "description": "Du har angett {export_pct} % i ”Såld el, andel av spot”, men inte nätnyttans fasta del. Wolta lägger då schablonen 5 öre som fast del, vilket ser ut som ditt tal men är en gissning. Fyll i ”Nätnytta, övrig tid” (exklusive moms) under Inställningar → Enheter och tjänster → Wolta → Konfigurera → Inställningar → Tariffer. Ange 0 om du bara har procent."
     },
     "soc_required": {
       "title": "Wolta behöver sensorn för batteriets laddningsnivå",
