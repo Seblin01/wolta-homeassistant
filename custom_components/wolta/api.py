@@ -455,8 +455,10 @@ class WoltaApiClient:
         """GET /profile/prices (Bearer token; server >= 0.118.0): the owner's electricity
         purchase price per quarter-hour for today and tomorrow, in öre/kWh INCLUDING VAT
         (`purchase_ore_kwh`) next to the spot price EXCLUDING VAT (`spot_ore_kwh`), plus
-        `available`, `reason` (why it is not available) and `components`. Null when the
-        body is not a JSON object.
+        `available`, `reason` (why it is not available) and `components`. Server >= 0.119.0
+        adds the sale price (`sale_ore_kwh`, öre/kWh EXCLUDING VAT, with `grid_peak` per
+        point, `sale_available` / `sale_reason`) and `forecast` days. Null when the body is not
+        a JSON object.
 
         Read-only on the server. A 404 (unknown token, a profile that is not an integration
         profile, or a server before 0.118.0) arrives as WoltaAuthError and a 429 as

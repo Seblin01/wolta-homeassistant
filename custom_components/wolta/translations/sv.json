@@ -633,6 +633,15 @@
       },
       "purchase_price": {
         "name": "Inköpspris"
+      },
+      "sale_price": {
+        "name": "Försäljningspris"
+      },
+      "purchase_price_with_forecast": {
+        "name": "Inköpspris med prognos"
+      },
+      "sale_price_with_forecast": {
+        "name": "Försäljningspris med prognos"
       }
     },
     "button": {

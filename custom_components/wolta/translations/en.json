@@ -633,6 +633,15 @@
       },
       "purchase_price": {
         "name": "Purchase price"
+      },
+      "sale_price": {
+        "name": "Sale price"
+      },
+      "purchase_price_with_forecast": {
+        "name": "Purchase price with forecast"
+      },
+      "sale_price_with_forecast": {
+        "name": "Sale price with forecast"
       }
     },
     "button": {
