@@ -140,7 +140,7 @@
     },
     "grid_fee_implausible": {
       "title": "Wolta: your grid fee looks too high",
-      "description": "The grid fee you entered is above {limit} öre per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. If your network operator really charges this much, you can leave it as it is."
+      "description": "The grid fee you entered is above {limit} öre (or cents) per kWh, higher than any variable grid fee we have seen. It most likely includes VAT and energy tax. Wolta adds both itself, so the energy tax is now counted twice, in the grade and in the economics.\n\nEnter only the transfer fee, excluding VAT and energy tax, under Settings → Devices & services → Wolta → Configure → Settings → Tariffs. If your network operator really charges this much, you can leave it as it is."
     },
     "grid_fee_peak_implausible": {
       "title": "Wolta: your high-load grid fee looks too high",

@@ -754,3 +754,12 @@ def test_se_only_amount_labels_and_repair_use_ore_not_cents(path: Path) -> None:
 def test_fixed_part_repair_names_the_renamed_field(path: Path) -> None:
     text = _at(_load(path), ("issues", "grid_fixed_missing", "description"))
     assert _LABELS[path.name]["grid_var_ore"] in text, path.name
+
+
+@pytest.mark.parametrize("path", [_STRINGS, _TRANSLATIONS / "en.json"], ids=lambda p: p.name)
+def test_all_year_grid_fee_repair_keeps_cents(path: Path) -> None:
+    """That repair is not zone-limited and the grid fee is in euro cents outside SE; only the
+    high-load repair (SE1-SE4 only) says plain öre."""
+    issues = _load(path)["issues"]
+    assert "öre (or cents) per kWh" in issues["grid_fee_implausible"]["description"]
+    assert "cents" not in issues["grid_fee_peak_implausible"]["description"]
