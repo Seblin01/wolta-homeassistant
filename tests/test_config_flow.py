@@ -6019,6 +6019,34 @@ async def test_options_untouched_contract_default_patches_nothing(hass: HomeAssi
     mock_client.patch_profile.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [None, "quarter"], ids=["cache-unset", "cache-quarter"])
+@pytest.mark.parametrize("in_form", ["quarter", None], ids=["form-quarter", "form-absent"])
+async def test_options_server_quarter_and_untouched_form_patch_nothing(
+    hass: HomeAssistant, cached, in_form
+) -> None:
+    """The server stores an answered quarter-hour price literally as "quarter" (its ruling 15:
+    "not set" means never answered). The form reads "not set" and "quarter" alike, so an
+    untouched save sends no contract type, whatever the cache holds and whether the select comes
+    back filled or empty."""
+    extra = {CONF_SURCHARGE_ORE: 5.0}
+    if cached is not None:
+        extra[CONF_RETAIL_PRICE_MODEL] = cached
+    entry = _make_mock_entry(hass, extra_data=extra)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, **{CONF_RETAIL_PRICE_MODEL: "quarter"}))
+    submitted = {CONF_SURCHARGE_ORE: 5.0}
+    if in_form is not None:
+        submitted[CONF_RETAIL_PRICE_MODEL] = in_form
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**submitted)))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
 # --- Review Focus 5: with time periods the form shows a summary, an untouched save PATCHes
 # nothing, and no save ever writes the period lists. ---
 

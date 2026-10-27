@@ -208,6 +208,17 @@ def test_grid_fee_is_the_servers_whole_variable_fee_with_nothing_added():
     assert purchase_series(resp)[0]["grid_fee"] == 0.3023
 
 
+def test_grid_benefit_is_the_servers_whole_benefit_term_with_nothing_added():
+    """grid_benefit_ore already holds the grid benefit's percentage of spot (the server's
+    grid_benefit_term_ore, its ruling 17): the series divides by 100 and adds nothing, whatever
+    the components say, so the sale price is spot + grid_benefit + the retailer's terms + the
+    tax reduction."""
+    resp = _response()
+    resp["components"] = {**resp["components"], "export_extra_pct": 2.0, "grid_benefit_ore": 6.0}
+    resp["today"][0]["grid_benefit_ore"] = 7.05
+    assert sale_series(resp)[0]["grid_benefit"] == 0.0705
+
+
 def test_the_never_released_flags_are_not_read_any_more():
     """grid_peak, grid_fee_peak and grid_benefit_peak were never released: an answer that only
     has them gives no grid fee and no grid benefit, and no flag reaches the attributes."""

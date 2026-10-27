@@ -613,6 +613,17 @@ def test_a_contract_change_applies_from_today_and_the_rest_is_on_wolta_se(path: 
 
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_from_today_is_qualified_by_the_first_answer_everywhere(path: Path) -> None:
+    """The section description and the markup help say "from today" too, and without the
+    qualifier they contradict the contract-type help (Ruling 14: the first answers apply to all
+    of the history). Each says it is after the first answer."""
+    tariffs = _tariffs(path)
+    needle = "efter ditt första svar" if path.name == "sv.json" else "after your first answer"
+    for text in (tariffs["description"], tariffs["data_description"]["surcharge_ore"]):
+        assert needle in text.lower(), (path.name, text[:60])
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
 def test_contract_help_names_both_first_answers_that_apply_to_all_history(path: Path) -> None:
     """Ruling 14: only two answers apply from the start of the history: the first contract type,
     when none is stored yet, and a markup entered for the first time without changing the

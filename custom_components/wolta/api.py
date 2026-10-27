@@ -466,8 +466,8 @@ class WoltaApiClient:
         adds the sale price (`sale_ore_kwh`, öre/kWh EXCLUDING VAT, `sale_available` /
         `sale_reason`) and `forecast` days, and per point the grid fee and the grid benefit of
         that quarter, öre/kWh EXCLUDING VAT (`grid_fee_ore`, the whole variable grid fee
-        including its percentage of spot, and `grid_benefit_ore`; null when the owner has not
-        given the base price). With a monthly-price contract the purchase side has no quarter-hour price
+        including its percentage of spot, and `grid_benefit_ore`, the whole grid benefit
+        including its percentage of spot; null when the owner has not given the base price). With a monthly-price contract the purchase side has no quarter-hour price
         (`available` false, `reason` `monthly_price_contract`). Null when the body is not a
         JSON object.
 
