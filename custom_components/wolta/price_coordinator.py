@@ -58,7 +58,7 @@ def _price(point: dict[str, Any]) -> float | None:
     return round(ore / 100, 5)
 
 
-def _purchase_ore(value: Any) -> float | None:
+def _ore_to_sek(value: Any) -> float | None:
     """SEK/kWh from an öre/kWh value of /profile/prices; None for a missing/null value (a
     quarter whose year has no energy-tax rule, no exchange rate, an unavailable purchase
     price) or anything that is not a number."""
@@ -223,8 +223,8 @@ def _profile_series(purchase: Any, key: str, *, with_forecast: bool) -> list[dic
             seen.add(start)
             item: dict[str, Any] = {
                 "start": start,
-                key: _purchase_ore(point.get(field)),
-                "spot": _purchase_ore(point.get("spot_ore_kwh")),
+                key: _ore_to_sek(point.get(field)),
+                "spot": _ore_to_sek(point.get("spot_ore_kwh")),
             }
             if key == "sale":
                 peak = point.get("grid_peak")
@@ -276,6 +276,15 @@ def with_forecast_series(purchase: Any, key: str) -> list[dict[str, Any]]:
     return _profile_series(purchase, key, with_forecast=True)
 
 
+def purchase_has_points(purchase: Any) -> bool:
+    """True when the /profile/prices response holds any well-formed point for today or
+    tomorrow. An answer without any (a zone the server does not price, say) has nothing a
+    coverage check could be about."""
+    return isinstance(purchase, dict) and any(
+        _points(purchase, key) for key in ("today", "tomorrow")
+    )
+
+
 def purchase_covers(purchase: Any, now: datetime) -> bool:
     """True when a point of the /profile/prices response covers `now` (its quarter has
     started and not ended). False for stale data after a missed poll or midnight."""
@@ -306,7 +315,7 @@ def current_purchase(purchase: Any, now: datetime) -> float | None:
     if not isinstance(purchase, dict) or purchase.get("available") is not True:
         return None
     point = _covering_point(purchase, now)
-    return None if point is None else _purchase_ore(point.get("purchase_ore_kwh"))
+    return None if point is None else _ore_to_sek(point.get("purchase_ore_kwh"))
 
 
 def current_sale(purchase: Any, now: datetime) -> float | None:
@@ -318,7 +327,7 @@ def current_sale(purchase: Any, now: datetime) -> float | None:
     if not isinstance(purchase, dict) or purchase.get("sale_available") is not True:
         return None
     point = _covering_point(purchase, now)
-    return None if point is None else _purchase_ore(point.get("sale_ore_kwh"))
+    return None if point is None else _ore_to_sek(point.get("sale_ore_kwh"))
 
 
 def sale_covers(purchase: Any, now: datetime) -> bool:

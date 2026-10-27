@@ -35,6 +35,7 @@ from .price_coordinator import (
     forecast_days,
     price_series,
     purchase_covers,
+    purchase_has_points,
     purchase_series,
     sale_series,
     with_forecast_series,
@@ -913,10 +914,15 @@ class _WoltaProfilePriceSensor(CoordinatorEntity[WoltaPriceCoordinator], SensorE
         # Home Assistant drops every attribute of an unavailable entity, and `reason` (what
         # the owner has to do) is the whole point of that answer. A server before 0.119.0
         # has no `sale_available`, so the sale sensors sit at `unknown` there.
+        #
+        # The coverage bound applies to the not-priced side too. The coordinator keeps an
+        # answer in which only the OTHER side was priced (e.g. a sale-only answer); after a
+        # failed fetch that answer would otherwise show this sensor's old `reason` for good.
+        # An answer with no points at all has nothing to bound and keeps showing its reason.
         purchase = self._purchase()
         if not self.coordinator.last_update_success or purchase is None:
             return False
-        if not self._own_side_priced(purchase):
+        if not self._own_side_priced(purchase) and not purchase_has_points(purchase):
             return True
         return purchase_covers(purchase, dt_util.utcnow())
 

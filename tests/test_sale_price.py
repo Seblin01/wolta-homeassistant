@@ -695,3 +695,113 @@ def test_the_new_sensors_have_names(name: str):
     sensors = data["entity"]["sensor"]
     for key in ("sale_price", "purchase_price_with_forecast", "sale_price_with_forecast"):
         assert sensors[key]["name"], f"{name}: {key}"
+
+
+# --- the side without a price in a kept half-priced answer ---------------------------
+
+
+async def _fail_polls_past_coverage(hass, aioclient_mock, freezer, entry, entity_ids):
+    """Fail the fetch from now on; the kept answer covers 10:20 and not 10:35."""
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(PRICES_URL, json=_resp(forecast=None))
+    aioclient_mock.get(PURCHASE_URL, status=500)
+    prices = entry.runtime_data.prices
+
+    freezer.move_to("2026-10-26T10:20:05+00:00")
+    await prices.async_refresh()
+    await hass.async_block_till_done()
+    covered = [hass.states.get(e) for e in entity_ids]
+
+    freezer.move_to("2026-10-26T10:35:05+00:00")
+    await prices.async_refresh()
+    await hass.async_block_till_done()
+    return covered, [hass.states.get(e).state for e in entity_ids]
+
+
+@pytest.mark.asyncio
+async def test_purchase_sensor_without_a_price_goes_unavailable_when_a_kept_sale_only_answer_stops_covering(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    """A sale-only answer is kept across a failed fetch. The purchase sensor sits at
+    `unknown` with its reason while the answer covers now, and is `unavailable` once it does
+    not, not stuck on an old reason."""
+    entry = await _setup_sensors(
+        hass, aioclient_mock, (PURCHASE_ID, SALE_ID),
+        purchase_json=_response(available=False, reason="tariff_not_set"))
+    ids = [_entity_id(hass, PURCHASE_ID), _entity_id(hass, SALE_ID)]
+    assert hass.states.get(ids[0]).state == "unknown"
+
+    covered, after = await _fail_polls_past_coverage(hass, aioclient_mock, freezer, entry, ids)
+
+    assert covered[0].state == "unknown" and covered[0].attributes["reason"] == "tariff_not_set"
+    assert covered[1].state == "0.68"
+    assert after == ["unavailable", "unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_sale_sensor_without_a_price_goes_unavailable_when_a_kept_purchase_only_answer_stops_covering(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    entry = await _setup_sensors(
+        hass, aioclient_mock, (PURCHASE_ID, SALE_ID),
+        purchase_json=_response(sale_available=False, sale_reason="grid_benefit_not_set"))
+    ids = [_entity_id(hass, PURCHASE_ID), _entity_id(hass, SALE_ID)]
+    assert hass.states.get(ids[1]).state == "unknown"
+
+    covered, after = await _fail_polls_past_coverage(hass, aioclient_mock, freezer, entry, ids)
+
+    assert covered[1].state == "unknown"
+    assert covered[1].attributes["reason"] == "grid_benefit_not_set"
+    assert covered[0].state == "1.3"
+    assert after == ["unavailable", "unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_without_any_points_keeps_showing_its_reason(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
+):
+    """Nothing to bound: a zone the server does not price answers with a reason and no
+    points, and that reason must stay readable."""
+    resp = _response(
+        available=False, reason="zone_not_supported",
+        sale_available=False, sale_reason="zone_not_supported", forecast=False)
+    resp["today"], resp["tomorrow"] = [], []
+    await _setup_sensors(hass, aioclient_mock, (PURCHASE_ID, SALE_ID), purchase_json=resp)
+
+    freezer.move_to("2026-10-26T14:00:00+00:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    for unique_id in (PURCHASE_ID, SALE_ID):
+        state = hass.states.get(_entity_id(hass, unique_id))
+        assert state.state == "unknown", unique_id
+        assert state.attributes["reason"] == "zone_not_supported", unique_id
+
+
+# --- attribution --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_forecast_sensor_attribution_is_the_forecast_source_alone_without_a_price_source(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """/prices/now sends no `source`: the forecast sensors still credit the forecast, and
+    the plain sensors have no attribution at all."""
+    prices_now = _resp(forecast=None)
+    del prices_now["source"]
+    aioclient_mock.get(PURCHASE_URL, json=_response())
+    original = MockConfigEntry.add_to_hass
+
+    def _add(self, hass_):
+        original(self, hass_)
+        for unique_id in (SALE_ID, PURCHASE_FC_ID, SALE_FC_ID):
+            er.async_get(hass_).async_get_or_create(
+                "sensor", DOMAIN, unique_id, config_entry=self, disabled_by=None)
+
+    with patch.object(MockConfigEntry, "add_to_hass", _add):
+        await _setup(hass, aioclient_mock, prices_json=prices_now)
+
+    for unique_id in (PURCHASE_FC_ID, SALE_FC_ID):
+        state = hass.states.get(_entity_id(hass, unique_id))
+        assert state.attributes["attribution"] == FORECAST_SOURCE, unique_id
+    assert "attribution" not in hass.states.get(_entity_id(hass, SALE_ID)).attributes
