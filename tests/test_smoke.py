@@ -62,15 +62,21 @@ def test_hacs_json():
     assert data["homeassistant"] == "2025.12.0"
 
 
+def _user_docs() -> str:
+    """README.md and the pages under docs/ (release notes excluded)."""
+    paths = [REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").glob("*.md"))]
+    return "\n".join(p.read_text(encoding="utf-8") for p in paths)
+
+
 def test_readme_attribute_version_is_actually_shipped():
-    """The README advertises the `flex_compensation` attribute as "vX.Y.Z+". If the
+    """The docs advertise the `flex_compensation` attribute as "vX.Y.Z+". If the
     manifest still carries an older version, nobody's HACS offers the update and the
     promise is empty - the exact way a released tag gets re-used by accident."""
     import re
 
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme = _user_docs()
     m = re.search(r"`flex_compensation` attribute \(v(\d+)\.(\d+)\.(\d+)\+\)", readme)
-    assert m, "README no longer states which version ships the flex_compensation attribute"
+    assert m, "The docs no longer state which version ships the flex_compensation attribute"
     promised = tuple(int(g) for g in m.groups())
 
     manifest_path = REPO_ROOT / "custom_components" / "wolta" / "manifest.json"
@@ -78,7 +84,7 @@ def test_readme_attribute_version_is_actually_shipped():
         shipped = tuple(int(x) for x in json.load(f)["version"].split("."))
 
     assert shipped >= promised, (
-        f"README promises the attribute from v{'.'.join(map(str, promised))} but the "
+        f"The docs promise the attribute from v{'.'.join(map(str, promised))} but the "
         f"manifest ships v{'.'.join(map(str, shipped))} - bump the manifest"
     )
 
@@ -87,14 +93,14 @@ def test_readme_does_not_promise_removing_sensor_months_on_the_web():
     """The compensation card locks BOTH fields on a `source: "sensor"` row, replaces
     its Remove button with a label, and buildFlexPatch filters sensor rows out of both
     sides of its comparison. There is therefore no route on wolta.se that removes a
-    month the integration wrote, and the README must not send anyone looking for one."""
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    month the integration wrote, and the docs must not send anyone looking for one."""
+    readme = _user_docs()
     assert "remove those on wolta.se" not in readme.lower(), (
-        "README still points at a removal path for sensor-written months that the "
+        "The docs still point at a removal path for sensor-written months that the "
         "compensation card does not offer"
     )
     assert "no Remove button" in readme, (
-        "README no longer says the sensor rows cannot be removed from the card"
+        "The docs no longer say the sensor rows cannot be removed from the card"
     )
 
 

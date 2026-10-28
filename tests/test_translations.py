@@ -931,9 +931,9 @@ def test_terms_help_says_a_cleared_field_is_plain_spot(path: Path) -> None:
         assert "standard tariff" not in text
 
 
-@pytest.mark.parametrize("doc", ["README.md", "docs/release-notes-v0.54.0.md"])
+@pytest.mark.parametrize("doc", ["docs/configuration.md", "docs/release-notes/release-notes-v0.54.0.md"])
 def test_docs_state_ruling_18_with_its_no_history_condition(doc: str) -> None:
-    """The README and the release notes say the same as the help text and the server's copy:
+    """The configuration page and the release notes say the same as the help text and the server's copy:
     the first terms other than 0 apply to all of the history only while there is no history."""
     text = (_COMPONENT.parents[1] / doc).read_text(encoding="utf-8")
     assert "the first value other than 0, as long as the terms have no history on wolta.se" in text

@@ -18,7 +18,7 @@ There is nothing left to configure: the plant step asks for price zone, control
 system and the charge/discharge direction toggle only. In its place, the step's
 description now states plainly what setup means: your 15-minute energy data is
 stored at Wolta, your anonymised grade is included in the public comparison, and
-removing the integration deletes all of it (see [Privacy](../README.md#privacy) in
+removing the integration deletes all of it (see [Privacy](../privacy.md) in
 the README for the full picture, including the linked-profile exception).
 
 **What's stored doesn't change.** The `share` field is still present in
