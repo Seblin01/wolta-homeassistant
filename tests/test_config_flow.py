@@ -5117,7 +5117,7 @@ async def test_options_export_side_change_refreshes_the_purchase_price(
 ) -> None:
     """The export-side tariff fields (grid benefit, retailer's terms) are part of the tariff
     the kept /profile/prices answer was priced with: saving one drops that answer and fetches
-    a fresh one, exactly as for the import-side fields (README promises both)."""
+    a fresh one, exactly as for the import-side fields (docs/configuration.md promises both)."""
     entry = _make_mock_entry(
         hass, extra_data={CONF_GRID_BENEFIT_ORE: 10.4, CONF_EXPORT_EXTRA_ORE: 5.0})
     mock_client, mock_coordinator = _mock_options_env(entry)

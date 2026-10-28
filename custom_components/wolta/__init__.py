@@ -121,7 +121,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove a config entry – delete the Wolta profile (right-to-erasure).
 
     Deleting the config entry IS the "delete all my data" action; documented in
-    README and strings.  Errors are swallowed (best-effort; the profile may
+    docs/privacy.md and strings.  Errors are swallowed (best-effort; the profile may
     already be purged server-side).
     """
     _delete_entry_issues(hass, entry.entry_id)

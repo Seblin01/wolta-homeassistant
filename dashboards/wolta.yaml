@@ -9,7 +9,7 @@
 #
 # Entity IDs below are HA's default slugs of the ENGLISH sensor names (names are
 # translated and IDs are generated from your HA instance language at install
-# time). On a Swedish-language instance, swap in the Swedish slugs (see README →
+# time). On a Swedish-language instance, swap in the Swedish slugs (see docs/dashboard.md →
 # Verify entity IDs for the mapping table), and always check your Wolta device
 # page (Settings → Devices & Services → Wolta) if anything differs.
 #
