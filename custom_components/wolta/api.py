@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,10 @@ PREFILL_TIMEOUT = aiohttp.ClientTimeout(total=8)
 # Same bound for any optional public lookup (prices) that must not hang on aiohttp's
 # default 300 s total timeout.
 PUBLIC_LOOKUP_TIMEOUT = PREFILL_TIMEOUT
+# GET /control-systems is public and served with `Cache-Control: public, max-age=86400`
+# (api/control_systems.py). The client keeps a successful answer that long, so a repair
+# form opened after the coordinator warmed the cache shows without a network wait.
+CONTROL_SYSTEMS_TTL_S = 86400
 
 # Chunk size for PUT /data. Kept small so each request body stays well under the
 # reverse-proxy body-size limit in front of wolta.se (nginx client_max_body_size;
@@ -191,6 +196,8 @@ class WoltaApiClient:
     ) -> None:
         self._session = session
         self._base = base_url.rstrip("/") + "/api/v1"
+        # (monotonic time, rows) of the last non-empty GET /control-systems answer.
+        self._control_systems: tuple[float, list[dict]] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -432,8 +439,19 @@ class WoltaApiClient:
         Bunden timeout (PREFILL_TIMEOUT): anropet awaitas inline i onboardingens
         entities → plant-övergång, så aiohttps default (total=300 s) hade kunnat frysa
         steget i fem minuter för ett förslag som ändå är frivilligt."""
+        if self.control_systems_cached():
+            return self._control_systems[1]
         data = await self._request("GET", "/control-systems", timeout=PREFILL_TIMEOUT)
-        return data if isinstance(data, list) else []
+        rows = data if isinstance(data, list) else []
+        if rows:
+            self._control_systems = (time.monotonic(), rows)
+        return rows
+
+    def control_systems_cached(self) -> bool:
+        """True while a GET /control-systems answer younger than CONTROL_SYSTEMS_TTL_S is
+        held (an empty or failed answer is never kept)."""
+        cached = self._control_systems
+        return cached is not None and time.monotonic() - cached[0] < CONTROL_SYSTEMS_TTL_S
 
     async def get_prices_now(self, zone: str) -> dict:
         """GET /prices/now?zone=<zone> (public, no Authorization header): current,

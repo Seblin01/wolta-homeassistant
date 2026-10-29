@@ -685,6 +685,37 @@ async def test_get_control_systems():
 
 
 @pytest.mark.asyncio
+async def test_get_control_systems_keeps_a_good_answer_for_a_day(monkeypatch):
+    """The endpoint is cacheable a day (Cache-Control max-age=86400); the client keeps a
+    non-empty answer that long, so the repair form need not wait on the network."""
+    from custom_components.wolta import api as api_mod
+
+    now = [1000.0]
+    monkeypatch.setattr(api_mod.time, "monotonic", lambda: now[0])
+    client = WoltaApiClient(session=None)
+    rows = [{"id": "other", "label": "Annat", "label_en": "Other", "ha_domains": []}]
+    client._request = AsyncMock(return_value=rows)
+    assert not client.control_systems_cached()
+    assert await client.get_control_systems() == rows
+    assert client.control_systems_cached()
+    assert await client.get_control_systems() == rows
+    assert client._request.await_count == 1
+    now[0] += api_mod.CONTROL_SYSTEMS_TTL_S
+    assert not client.control_systems_cached()
+    await client.get_control_systems()
+    assert client._request.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_control_systems_never_keeps_an_empty_answer():
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value=[])
+    await client.get_control_systems()
+    await client.get_control_systems()
+    assert client._request.await_count == 2 and not client.control_systems_cached()
+
+
+@pytest.mark.asyncio
 async def test_get_control_systems_skickar_bunden_timeout():
     """Samma grund som de två mintarna: uppslaget awaitas INLINE i övergången
     entities → plant, alltså medan användaren väntar på att nästa steg ska ritas.

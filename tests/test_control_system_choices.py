@@ -100,3 +100,18 @@ def test_selector_uses_the_given_options():
     assert [o["value"] for o in selector.config["options"]] == ["tibber", "other"]
     assert [o["value"] for o in control_system_selector().config["options"]] == [
         c for c, _ in CONTROL_SYSTEMS]
+
+
+def test_a_partial_server_list_is_logged_as_a_warning(caplog):
+    rows = [_row("tibber", "Tibber"), {"id": "other", "label": "Annat", "ha_domains": []}]
+    with caplog.at_level("WARNING"):
+        assert options_from_server(rows) is None
+    assert "incomplete" in caplog.text
+
+
+def test_an_older_server_without_label_en_falls_back_quietly(caplog):
+    rows = [{"id": "tibber", "label": "Tibber", "ha_domains": []},
+            {"id": "other", "label": "Annat", "ha_domains": []}]
+    with caplog.at_level("WARNING"):
+        assert options_from_server(rows) is None
+    assert caplog.text == ""

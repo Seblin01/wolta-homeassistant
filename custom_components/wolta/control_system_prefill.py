@@ -15,6 +15,7 @@ reserven när anropet misslyckas eller en äldre server svarar utan engelska eti
 halvt svar används aldrig: en lista som tappat ett system hade dolt ägarens eget val."""
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,8 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import CONTROL_SYSTEMS
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # HA:s Riemann-summa-hjälpare (domän `integration`, kWh integrerat ur en effektsensor) är den
@@ -100,16 +103,31 @@ def options_from_server(rows: Any) -> list[tuple[str, str]] | None:
     is there (without it an unlisted system cannot be named). None means: use const."""
     if not isinstance(rows, list) or not rows:
         return None
+    # A server from before api 0.123.0 sends no label_en at all: the expected fallback, quiet.
+    # An answer where SOME rows carry it is a broken server list and is logged as a warning,
+    # since the fallback then hides whatever the server added after this release.
+    if not any(isinstance(r, dict) and "label_en" in r for r in rows):
+        return None
     pairs: list[tuple[str, str]] = []
+    problem = None
     for row in rows:
         if not isinstance(row, dict):
-            return None
+            problem = f"row is not an object: {row!r}"
+            break
         cs_id, label = row.get("id"), row.get("label_en")
         if not (isinstance(cs_id, str) and cs_id and isinstance(label, str) and label.strip()):
-            return None
+            problem = f"row without id or label_en: {row!r}"
+            break
         pairs.append((cs_id, label.strip()))
-    ids = [cs_id for cs_id, _ in pairs]
-    if "other" not in ids or len(ids) != len(set(ids)):
+    if problem is None:
+        ids = [cs_id for cs_id, _ in pairs]
+        if "other" not in ids:
+            problem = "no 'other' row"
+        elif len(ids) != len(set(ids)):
+            problem = "duplicate ids"
+    if problem is not None:
+        _LOGGER.warning("Wolta control-system list incomplete (%s); using the built-in list",
+                        problem)
         return None
     return sorted_options(pairs)
 
