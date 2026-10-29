@@ -28,6 +28,18 @@ def test_manifest_required_keys():
         assert key in data, f"Missing required key: {key}"
 
 
+def test_manifest_categories():
+    """The Marketplace catalog (HA 2026.11) lists integrations by `categories`. The HACS
+    action fails on an unknown value and wants one to three without duplicates."""
+    manifest_path = REPO_ROOT / "custom_components" / "wolta" / "manifest.json"
+    with open(manifest_path) as f:
+        data = json.load(f)
+    categories = data["categories"]
+    assert 1 <= len(categories) <= 3
+    assert len(set(categories)) == len(categories)
+    assert categories == ["energy.solar_batteries", "energy.energy_prices"]
+
+
 def test_manifest_version():
     """Version must be present and a valid semver (no hardcoded value — bumps must not
     break this test; hassfest already requires the key)."""
