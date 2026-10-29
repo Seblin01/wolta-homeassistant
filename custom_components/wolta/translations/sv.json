@@ -358,6 +358,11 @@
           "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
+          "batt_in": "Energi som laddats in i batteriet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för energi in i batteriet. Flera sensorer läggs ihop.",
+          "batt_out": "Energi som laddats ur batteriet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för energi ut ur batteriet. Flera sensorer läggs ihop.",
+          "grid_in": "El som köpts från nätet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för förbrukning från nätet. Den ska öka varje natt och när huset drar mer än sol och batteri ger. Slutar den att ändras ser Wolta ingen köpt el.",
+          "grid_out": "El som sålts till nätet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för el tillbaka till nätet. Den ökar när sol eller batteri ger mer än huset drar.",
+          "solar": "Solproduktion i kWh: en totalmätare som bara ökar, till exempel växelriktarens totala produktion. Flera sensorer läggs ihop, till exempel två växelriktare.",
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
@@ -429,6 +434,11 @@
           "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
+          "batt_in": "Energi som laddats in i batteriet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för energi in i batteriet. Flera sensorer läggs ihop.",
+          "batt_out": "Energi som laddats ur batteriet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för energi ut ur batteriet. Flera sensorer läggs ihop.",
+          "grid_in": "El som köpts från nätet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för förbrukning från nätet. Den ska öka varje natt och när huset drar mer än sol och batteri ger. Slutar den att ändras ser Wolta ingen köpt el.",
+          "grid_out": "El som sålts till nätet, i kWh: en totalmätare som bara ökar. Samma sensor som energipanelen använder för el tillbaka till nätet. Den ökar när sol eller batteri ger mer än huset drar.",
+          "solar": "Solproduktion i kWh: en totalmätare som bara ökar, till exempel växelriktarens totala produktion. Flera sensorer läggs ihop, till exempel två växelriktare.",
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
@@ -485,6 +495,7 @@
     "step": {
       "init": {
         "title": "Wolta",
+        "description": "Energisensorerna byter du inte här: stäng och välj att konfigurera om integrationen i dess ⋮-meny.",
         "menu_options": {
           "settings": "Inställningar",
           "account_link": "Koppla till ett wolta.se-konto",
