@@ -358,6 +358,11 @@
           "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
+          "batt_in": "Laddad energi i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "batt_out": "Urladdad energi i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "grid_in": "Köpt el i kWh (en mätare som bara ökar). Samma sensor som i energipanelen. Ska öka varje natt.",
+          "grid_out": "Såld el i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "solar": "Solproduktion i kWh (en mätare som bara ökar). Flera växelriktare läggs ihop.",
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
@@ -429,6 +434,11 @@
           "soc_absent": "Mitt batteri har ingen SoC-sensor"
         },
         "data_description": {
+          "batt_in": "Laddad energi i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "batt_out": "Urladdad energi i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "grid_in": "Köpt el i kWh (en mätare som bara ökar). Samma sensor som i energipanelen. Ska öka varje natt.",
+          "grid_out": "Såld el i kWh (en mätare som bara ökar). Samma sensor som i energipanelen.",
+          "solar": "Solproduktion i kWh (en mätare som bara ökar). Flera växelriktare läggs ihop.",
           "external_control_entity": "Sensor som är 'på' när batteriet styrs av en flextjänst (t.ex. Tibber Grid Rewards). Perioderna räknas neutralt i optimeringsbetyget.",
           "flex_compensation_entity": "Sensor med ersättningen din flexleverantör betalar dig (t.ex. CheckWatt eller Tibber Grid Rewards), i kronor. Wolta läser månadssumman och visar den bredvid vad flexdeltagandet kostade i avstått spotvärde. Sensorn måste ha state_class total eller total_increasing — en measurement-sensor har ingen månadssumma att läsa. Belopp du själv har matat in på wolta.se hålls separat och skrivs aldrig över.",
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
@@ -454,6 +464,7 @@
       }
     },
     "error": {
+      "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
       "grid_fixed_required": "Din sparade nätavgift är procent av spot utan fast del. Ange den fasta delen (exklusive moms och energiskatt, 0 om du bara har procent) och bekräfta igen.",
       "invalid_input": "Wolta avvisade anläggningens uppgifter – kontrollera elområde och styrsystem och försök igen.",
@@ -484,6 +495,7 @@
     "step": {
       "init": {
         "title": "Wolta",
+        "description": "Sensorerna byter du via integrationens ⋮-meny → konfigurera om.",
         "menu_options": {
           "settings": "Inställningar",
           "account_link": "Koppla till ett wolta.se-konto",
@@ -522,7 +534,7 @@
             },
             "data_description": {
               "cost_sek": "Vad du faktiskt betalade för ENDAST batteriet (inte solpaneler), i kr — fakturans slutsumma, efter eventuellt grönt avdrag. Används för IRR och återbetalningstid. Rensa fältet för att ta bort värdet.",
-              "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Används för 'Facit i år'. Datum i framtiden (planerat köp)? Resultaten visar bara det faktiska utfallet hittills – för ett planerat köp, använd beslutskalkylatorn på wolta.se i stället. Rensa fältet för att ta bort värdet."
+              "purchase_date": "Datum då batteriet (eller sol+batteri) installerades. Byggd i etapper? Ange första etappens datum; senare etapper anges på wolta.se. Används för 'Facit i år'. Datum i framtiden (planerat köp)? Resultaten visar bara det faktiska utfallet hittills – för ett planerat köp, använd beslutskalkylatorn på wolta.se i stället. Rensa fältet för att ta bort värdet."
             }
           },
           "tariffs": {
@@ -581,6 +593,8 @@
       "retail_fixed_surcharge": "Ett fastpris är elhandlarens hela pris och har inget påslag. Töm ”Elhandlarens påslag” i sektionen Tariffer, eller välj ett annat avtal.",
       "tariff_zone_se_only": "Tidsperioderna, helgdagsreglerna och elhandelsavtalet kan bara anges i elområde SE1–SE4, så de kan inte sparas för anläggningens elområde.",
       "grid_benefit_history_requires_base": "Din nätnytta har en historik på wolta.se, och dagens post i den behöver ett baspris. Fyll i ”Nätnytta” i sektionen Tariffer igen (0 är ett giltigt svar), eller ta bort historiken på wolta.se.",
+      "purchase_date_after_stages": "Anläggningen har etapper på wolta.se. Inköpsdatumet är första etappens och kan inte vara senare eller tas bort. Lägg senare köp som etapper på wolta.se.",
+      "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
     },

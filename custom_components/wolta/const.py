@@ -59,6 +59,9 @@ KEY_GRID_BENEFIT_PERIODS = "grid_benefit_periods"
 KEY_RETAIL_EVENTS = "retail_events"
 KEY_EXPORT_EVENTS = "export_events"
 KEY_GRID_BENEFIT_EVENTS = "grid_benefit_events"
+# The plant's stages (GET /profile): a battery or solar purchase each, with its date.
+KEY_BATTERY_EVENTS = "battery_events"
+KEY_SOLAR_EVENTS = "solar_events"
 # Percent-of-spot tariff components (backend api 0.55.0): variable grid fee as % of
 # spot (southern-Sweden DSO model) and export compensation as % of spot.
 CONF_GRID_VAR_PCT = "grid_var_pct"

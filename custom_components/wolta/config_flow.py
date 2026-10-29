@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import secrets
+from datetime import date
 from typing import Any
 
 import voluptuous as vol
@@ -60,12 +62,14 @@ from .control_system_prefill import (
 )
 from .coordinator import desired_invert_intervals, with_desired_intervals
 from .const import (
+    KEY_BATTERY_EVENTS,
     KEY_BATTERY_STATUS,
     KEY_EXPORT_EVENTS,
     KEY_GRID_BENEFIT_EVENTS,
     KEY_GRID_BENEFIT_PERIODS,
     KEY_GRID_FEE_PERIODS,
     KEY_RETAIL_EVENTS,
+    KEY_SOLAR_EVENTS,
     BATTERY_STATUS_NEEDS_INPUT,
     BATTERY_STATUS_NONE,
     BATTERY_STATUS_PENDING,
@@ -351,13 +355,17 @@ def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
 #   tidsperioderna, helgdagsreglerna och elhandelsavtalet gäller bara SE1–SE4
 #   en nätnyttepost behöver datum (inte i framtiden, inte två på samma dag) och ett baspris
 #     (grid_benefit_ore)
-# The last is the grid benefit history's rule (Tillägg 5), which a save from here meets by
+#   purchase_date härleds ur etapperna och kan bara sättas TIDIGARE än den första etappen (...)
+# The purchase date's rule is not a tariff rule but is met the same way: a plant with stages (a
+# battery bought years after the solar panels) where the owner types the later date here
+# (2026-10-29). The stages are edited on wolta.se.
+# The grid benefit history's rule (Tillägg 5) is the one a save from here meets by
 # clearing the base price while the server keeps a grid benefit history: today's entry would have
 # no base price. The server checks it before the periods' rule, so it is matched first. The
 # retailer's terms have no such case (a cleared value is plain spot from today, the server's
 # ruling 10), so their list's rule is not here. The rules for the period lists themselves and
 # for the contract history are not here either: this form never sends them.
-_TARIFF_RULES = (
+_SERVER_RULES = (
     (re.compile(r"en\s+nätnyttepost\s+behöver\s+datum", re.IGNORECASE),
      "grid_benefit_history_requires_base"),
     (re.compile(r"tidsperioder\s+kräver\s+ett\s+baspris", re.IGNORECASE),
@@ -367,23 +375,71 @@ _TARIFF_RULES = (
                 re.IGNORECASE),
      "retail_fixed_surcharge"),
     (re.compile(r"elhandelsavtalet\s+gäller\s+bara", re.IGNORECASE), "tariff_zone_se_only"),
+    (re.compile(r"purchase_date\s+härleds\s+ur\s+etapperna", re.IGNORECASE),
+     "purchase_date_after_stages"),
 )
 _UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+# api.py's WoltaApiError text: "HTTP <status> from <url>: <body, one line, at most 200 chars>".
+_ERROR_BODY = re.compile(r"^HTTP \d+ from \S+: (.*)$", re.DOTALL)
+# The detail string; the closing quote is optional because api.py may have cut the body inside it.
+_DETAIL_FIELD = re.compile(r'"detail"\s*:\s*"((?:[^"\\]|\\.)*)(")?')
 
 
-def _tariff_rule_error(err: WoltaApiError) -> str | None:
+def _server_reason(err: WoltaApiError) -> str:
+    """The server's own words for a refusal the form has no rule for, shown instead of
+    cannot_connect: the `detail` of its JSON with its escapes decoded (marked with " …" when
+    api.py's 200-character cut fell inside it), else the body as api.py kept it (a proxy page)."""
+    text = str(err)
+    body = m.group(1) if (m := _ERROR_BODY.match(text)) else text
+    if not (detail := _DETAIL_FIELD.search(body)):
+        return body.strip()
+    raw, closed = detail.group(1), detail.group(2)
+    try:
+        reason = json.loads(f'"{raw}"')
+    except ValueError:  # the cut fell inside an escape
+        reason = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), raw)
+    return reason.strip() if closed else f"{reason.strip()} …"
+
+
+def _first_stage_date(server: dict[str, Any] | None) -> date | None:
+    """The earliest date among the plant's battery and solar stages in a GET /profile snapshot
+    (the server's tl.first_date over both lists), else None: no stages, or an older server
+    without the lists. Malformed entries are skipped, never guessed at."""
+    dates = [
+        parsed
+        for key in (KEY_BATTERY_EVENTS, KEY_SOLAR_EVENTS)
+        for event in ((server or {}).get(key) or [])
+        if isinstance(event, dict)
+        and (parsed := dt_util.parse_date(str(event.get("date") or ""))) is not None
+    ]
+    return min(dates) if dates else None
+
+
+def _refusal(err: WoltaApiError, errors: dict[str, str]) -> str:
+    """Set errors["base"] for an API error without a rule of its own, and return the text for
+    the form's server_detail placeholder. A 422 is the server's answer, shown in its own words
+    (server_rejected): an owner told to check the internet connection checks the wrong thing
+    (2026-10-29). Anything else (no answer, 5xx) is cannot_connect, with no detail."""
+    if getattr(err, "status", None) == 422:
+        errors["base"] = "server_rejected"
+        return _server_reason(err)
+    errors["base"] = "cannot_connect"
+    return ""
+
+
+def _server_rule_error(err: WoltaApiError) -> str | None:
     """The options-form error code for one of the server's period, contract or grid benefit
     history 422s, else None."""
     if getattr(err, "status", None) != 422:
         return None
     text = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), str(err))
-    for rule, code in _TARIFF_RULES:
+    for rule, code in _SERVER_RULES:
         if rule.search(text):
             return code
     return None
 
 
-def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
+def _server_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
     """The field a server period, contract or grid benefit history 422 is shown at.
 
     The periods text names both base prices: the one this save cleared is the one (the grid
@@ -398,6 +454,8 @@ def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
         return CONF_RETAIL_FIXED_ORE
     if code == "retail_fixed_surcharge":
         return CONF_SURCHARGE_ORE
+    if code == "purchase_date_after_stages":
+        return CONF_PURCHASE_DATE
     return CONF_RETAIL_PRICE_MODEL
 
 
@@ -652,6 +710,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # Reauth: set when the server refused the re-created profile because the cached
         # tariff has a percentage of spot without the fixed part; the form then asks for it.
         self._reauth_ask_fixed: bool = False
+        # The server's words for the last refusal shown as server_rejected (the placeholder of
+        # that error's text). Set together with the error, so a stale value is never shown.
+        self._server_detail: str = ""
         self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
         # Styrsystemets val och förslag (sätts i entitetssteget): serverns lista eller
         # const.CONTROL_SYSTEMS, och förslaget ur batterisensorernas integrationsdomän.
@@ -1112,6 +1173,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="entities",
             data_schema=schema,
             errors=errors,
+            description_placeholders={"server_detail": self._server_detail},
         )
 
     async def _async_sync_link_soc_absent(
@@ -1121,7 +1183,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         On success the cached GET snapshot is updated, so _create_linked_entry copies
         the value the server now holds (and nothing when the server holds none). A
-        failed PATCH sets cannot_connect and the entities form is shown again."""
+        failed PATCH sets server_rejected or cannot_connect (_refusal) and the entities form
+        is shown again."""
         prof = self._link_profile if self._link_profile is not None else {}
         if absent == bool(prof.get(CONF_SOC_ABSENT)):
             return
@@ -1130,7 +1193,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._link_token, soc_absent=absent)
         except WoltaApiError as err:
             _LOGGER.error("Failed to patch soc_absent on the linked profile: %s", err)
-            errors["base"] = "cannot_connect"
+            self._server_detail = _refusal(err, errors)
             return
         prof[CONF_SOC_ABSENT] = absent
         self._link_profile = prof
@@ -1166,8 +1229,8 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_mismatch()
                 # soc_absent is mirrored from the server (coordinator _PROFILE_SYNC_KEYS),
                 # so a changed answer is PATCHed first and stored only once the server has
-                # it. A failed PATCH saves nothing from this submit: the form shows
-                # cannot_connect and the user retries.
+                # it. A failed PATCH saves nothing from this submit: the form shows the
+                # server's reason or cannot_connect (_refusal) and the user retries.
                 soc_absent_changed = soc_absent != bool(entry.data.get(CONF_SOC_ABSENT))
                 if soc_absent_changed:
                     try:
@@ -1176,7 +1239,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         ).patch_profile(entry.data[CONF_TOKEN], soc_absent=soc_absent)
                     except WoltaApiError as err:
                         _LOGGER.error("Failed to patch soc_absent: %s", err)
-                        errors["base"] = "cannot_connect"
+                        self._server_detail = _refusal(err, errors)
             if not errors:
                 data_updates: dict[str, Any] = {
                     CONF_BATT_IN: user_input[CONF_BATT_IN],
@@ -1283,7 +1346,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_SOC_ABSENT, default=defaults[CONF_SOC_ABSENT]): bool,
             }
         )
-        return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=schema, errors=errors,
+            description_placeholders={"server_detail": self._server_detail})
 
     # ------------------------------------------------------------------
     # Linked-profile entry creation (+ invert check when stats suggest swap)
@@ -1575,7 +1640,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     if getattr(err, "status", None) == 409:
                         errors["profile_input"] = "token_other_plant"
                     else:
-                        errors["base"] = "cannot_connect"
+                        self._server_detail = _refusal(err, errors)
                 else:
                     return self.async_update_reload_and_abort(
                         entry, data_updates={CONF_TOKEN: token, CONF_PLANT_ID: plant_id}
@@ -1590,6 +1655,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders={"server_detail": self._server_detail},
         )
 
     async def async_step_reauth_view_only(
@@ -1857,6 +1923,7 @@ class WoltaOptionsFlow(OptionsFlow):
         """Show and handle the options form."""
         entry = self.config_entry
         errors: dict[str, str] = {}
+        server_detail = ""   # the server's words for a refusal without a rule here
         token: str = entry.data[CONF_TOKEN]
         session = async_get_clientsession(self.hass)
         client = WoltaApiClient(session)
@@ -2034,6 +2101,18 @@ class WoltaOptionsFlow(OptionsFlow):
                 errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = (
                     "grid_benefit_history_requires_base")
 
+            # A plant built in stages (set on wolta.se) has the first stage's purchase date: the
+            # server refuses a later date and a cleared one (calibration.patch_profile_core), so
+            # the form says it first, at the field and on base. A later purchase, such as a
+            # battery bought years after the solar panels, is a stage of its own (2026-10-29).
+            if CONF_PURCHASE_DATE in patch_fields:
+                first_stage = _first_stage_date(self._server)
+                if first_stage is not None:
+                    typed = dt_util.parse_date(str(patch_fields[CONF_PURCHASE_DATE] or ""))
+                    if typed is None or typed > first_stage:
+                        errors[CONF_PURCHASE_DATE] = errors["base"] = (
+                            "purchase_date_after_stages")
+
             # The electricity contract, said before sending (field AND base, like the above). A
             # change applies from today: the server adds an entry dated today to the contract
             # history (or corrects today's), and the history is never rewritten from here. Only a
@@ -2072,19 +2151,19 @@ class WoltaOptionsFlow(OptionsFlow):
                     # The same refusal from the server (a cache that is out of step with it)
                     # reads as the same fault, not as a connection problem.
                     benefit_err = _grid_benefit_error(err)
-                    tariff_err = _tariff_rule_error(err)
+                    rule_err = _server_rule_error(err)
                     if benefit_err is not None:
                         # Field AND base, as for the prechecks above. A zone refusal can come
                         # while the field is hidden (a cache out of step), where base is the
                         # only place the owner can read it.
                         errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
-                    elif tariff_err is not None:
-                        errors[_tariff_rule_field(tariff_err, patch_fields)] = tariff_err
-                        errors["base"] = tariff_err
+                    elif rule_err is not None:
+                        errors[_server_rule_field(rule_err, patch_fields)] = rule_err
+                        errors["base"] = rule_err
+                    elif _is_grid_fixed_error(err):
+                        errors["base"] = "grid_fixed_required"
                     else:
-                        errors["base"] = (
-                            "grid_fixed_required" if _is_grid_fixed_error(err)
-                            else "cannot_connect")
+                        server_detail = _refusal(err, errors)
 
             if not errors:
                 # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -2334,8 +2413,9 @@ class WoltaOptionsFlow(OptionsFlow):
         # The time periods and the contract history are shown, never edited (spec
         # 2026-10-27-marknadsanpassning, Tillägg 2 and 4): a short summary in the description,
         # empty when the plant has none. Always passed, so the description never shows a raw
-        # placeholder.
+        # placeholder; server_detail too, for the server_rejected error text.
         summary = _web_summary(self.hass.config.language, srv)
         return self.async_show_form(
             step_id="settings", data_schema=schema, errors=errors,
-            description_placeholders={"web_summary": f"\n\n{summary}" if summary else ""})
+            description_placeholders={"web_summary": f"\n\n{summary}" if summary else "",
+                                      "server_detail": server_detail})
