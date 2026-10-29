@@ -3914,10 +3914,22 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         missing = not control_system or control_system_name_error(
             control_system, data.get(CONF_CONTROL_SYSTEM_NAME)) is not None
+        fire = missing and not self._view_only
         self._set_measured_issue(
             _ISSUE_CONTROL_SYSTEM_REQUIRED,
-            fire=missing and not self._view_only,
+            fire=fire,
             translation_key=_ISSUE_CONTROL_SYSTEM_REQUIRED, placeholders={}, data={})
+        if fire and not self.client.control_systems_cached():
+            # The repair form's options come from GET /control-systems. Fetching it now,
+            # in the background, means opening the repair does not wait on the network.
+            self.hass.async_create_background_task(
+                self._async_warm_control_systems(), name="wolta control systems")
+
+    async def _async_warm_control_systems(self) -> None:
+        try:
+            await self.client.get_control_systems()
+        except Exception:  # noqa: BLE001 - optional; the repair fetches again or falls back
+            _LOGGER.debug("control_system list warm-up failed", exc_info=True)
 
     def _evaluate_grid_fee_issue(self, results: dict) -> None:
         """Warn when the server finds the owner's grid fee implausible (results.tariff_check).

@@ -192,27 +192,35 @@ def link_url(link_token: str) -> str:
 
     return f"{WOLTA_API_BASE}/anlaggning#link={quote(link_token, safe='')}"
 
-# Control systems for the plant-step selector. Values MUST match the backend's
-# CONTROL_SYSTEMS set (api/calibration.py) and the web's control-systems.ts - the
-# server 422s on unknown values. Order mirrors the web picker. Brand names are
-# language-neutral; only the last three carry language (inline English labels,
-# same convention as SUPPORTED_ZONES below).
+# Control systems for the plant-step selector. The picker takes the server's list
+# (GET /control-systems, `label_en`, api >= 0.123.0) and falls back to this one when the
+# request fails or an older server answers without English labels - see
+# control_system_prefill.async_control_system_choices. Values MUST match the backend's
+# CONTROL_SYSTEMS set (api/calibration.py) - the server 422s on unknown values - and the
+# labels match its CONTROL_SYSTEM_LABELS_EN. Alphabetical by label with Other last
+# (control_system_prefill.sorted_options, checked by tests/test_control_system_choices.py).
+# Brand names are language-neutral; only the four modes carry language (inline English
+# labels, same convention as SUPPORTED_ZONES below).
 CONTROL_SYSTEMS: list[tuple[str, str]] = [
-    ("tibber", "Tibber"),
-    ("checkwatt", "CheckWatt"),
-    ("greenely", "Greenely"),
+    ("1komma5", "1KOMMA5°"),
     ("aikion", "Aikion"),
-    ("sigenergy", "Sigenergy"),
+    ("checkwatt", "CheckWatt"),
+    ("custom", "Custom-built (Home Assistant, script)"),
+    ("darkstar", "Darkstar"),
     ("emaldo", "Emaldo"),
-    ("ferroamp", "Ferroamp"),
-    ("sonnen", "Sonnen"),
-    ("reduxi", "Reduxi"),
-    ("huawei", "Huawei"),
-    ("pixii", "Pixii"),
-    ("keepai", "KeepAI"),
     ("emhass", "EMHASS"),
-    ("self_consumption", "Self-consumption (passive)"),
+    ("ferroamp", "Ferroamp"),
+    ("greenely", "Greenely"),
+    ("huawei", "Huawei"),
+    ("keepai", "KeepAI"),
     ("manual", "Manual"),
+    ("pixii", "Pixii"),
+    ("reduxi", "Reduxi"),
+    ("self_consumption", "Self-consumption (passive)"),
+    ("sigenergy", "Sigenergy"),
+    ("solis", "Solis"),
+    ("sonnen", "Sonnen"),
+    ("tibber", "Tibber"),
     ("other", "Other"),
 ]
 

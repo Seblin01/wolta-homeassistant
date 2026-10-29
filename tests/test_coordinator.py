@@ -6822,6 +6822,38 @@ async def test_cs_issue_keeps_an_ignored_issue_when_the_profile_is_unread(hass, 
 
 
 @pytest.mark.asyncio
+async def test_cs_issue_warms_the_control_system_list(hass, mock_entry):
+    """The repair's options come from GET /control-systems; fetching them when the issue
+    fires means opening the repair does not wait on the network."""
+    c = await _cs_coordinator(hass, mock_entry)
+    c.client.control_systems_cached = MagicMock(return_value=False)
+    c.client.get_control_systems = AsyncMock(return_value=[])
+    c._evaluate_control_system_issue()
+    await hass.async_block_till_done()
+    c.client.get_control_systems.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_does_not_refetch_a_warm_list(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c.client.control_systems_cached = MagicMock(return_value=True)
+    c.client.get_control_systems = AsyncMock(return_value=[])
+    c._evaluate_control_system_issue()
+    await hass.async_block_till_done()
+    c.client.get_control_systems.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cs_issue_warm_up_failure_is_swallowed(hass, mock_entry):
+    c = await _cs_coordinator(hass, mock_entry)
+    c.client.control_systems_cached = MagicMock(return_value=False)
+    c.client.get_control_systems = AsyncMock(side_effect=TimeoutError)
+    c._evaluate_control_system_issue()
+    await hass.async_block_till_done()
+    assert _cs_issue(hass) is not None
+
+
+@pytest.mark.asyncio
 async def test_cs_issue_never_in_view_only(hass, mock_entry):
     c = await _cs_coordinator(hass, mock_entry)
     c._view_only = True

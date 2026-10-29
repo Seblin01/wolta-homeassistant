@@ -2483,6 +2483,37 @@ async def test_control_system_unknown_id_is_not_defaulted(hass: HomeAssistant) -
 
 
 @pytest.mark.asyncio
+async def test_control_system_options_come_from_the_server(hass: HomeAssistant) -> None:
+    """With label_en on every row the plant step lists the server's control systems, so one
+    added on the backend can be picked without a HACS release (2026-10-29)."""
+    mock_client = _mock_client()
+    mock_client.get_control_systems = AsyncMock(return_value=[
+        {"id": "tibber", "label": "Tibber", "label_en": "Tibber", "ha_domains": []},
+        {"id": "darkstar", "label": "Darkstar", "label_en": "Darkstar", "ha_domains": []},
+        {"id": "other", "label": "Annat", "label_en": "Other", "ha_domains": []}])
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+    marker = next(k for k in result["data_schema"].schema if str(k) == "control_system")
+    selector = result["data_schema"].schema[marker]
+    assert [o["value"] for o in selector.config["options"]] == ["darkstar", "tibber", "other"]
+
+
+@pytest.mark.asyncio
+async def test_control_system_options_fall_back_when_the_fetch_fails(
+        hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import CONTROL_SYSTEMS
+
+    mock_client = _mock_client()
+    mock_client.get_control_systems = AsyncMock(side_effect=TimeoutError)
+    with _patched(mock_client):
+        result = await _drive_create_to_plant(hass)
+    marker = next(k for k in result["data_schema"].schema if str(k) == "control_system")
+    selector = result["data_schema"].schema[marker]
+    assert [o["value"] for o in selector.config["options"]] == [c for c, _ in CONTROL_SYSTEMS]
+    assert _plant_schema_default(result, "control_system") is vol.UNDEFINED
+
+
+@pytest.mark.asyncio
 async def test_control_system_no_default_without_suggestion(hass: HomeAssistant) -> None:
     """No suggestion (unknown domain, a tie, or a failed mapping fetch) leaves the
     field without a default, as before the prefill existed - a guessed default would
