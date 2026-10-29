@@ -581,7 +581,7 @@
       "retail_fixed_surcharge": "Ett fastpris är elhandlarens hela pris och har inget påslag. Töm ”Elhandlarens påslag” i sektionen Tariffer, eller välj ett annat avtal.",
       "tariff_zone_se_only": "Tidsperioderna, helgdagsreglerna och elhandelsavtalet kan bara anges i elområde SE1–SE4, så de kan inte sparas för anläggningens elområde.",
       "grid_benefit_history_requires_base": "Din nätnytta har en historik på wolta.se, och dagens post i den behöver ett baspris. Fyll i ”Nätnytta” i sektionen Tariffer igen (0 är ett giltigt svar), eller ta bort historiken på wolta.se.",
-      "purchase_date_after_stages": "Din anläggning är byggd i etapper (anges på wolta.se), och inköpsdatumet är den första etappens. Det kan bara sättas tidigare, inte senare. Lägg ett senare köp, till exempel ett batteri som köptes efter solcellerna, som en etapp på wolta.se och låt datumet här vara som det var.",
+      "purchase_date_after_stages": "Din anläggning är byggd i etapper (anges på wolta.se), och inköpsdatumet är den första etappens: det kan inte vara senare än den, och inte tas bort så länge anläggningen har etapper. Lägg ett senare köp, till exempel ett batteri som köptes efter solcellerna, som en etapp på wolta.se och låt datumet här vara som det var.",
       "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."

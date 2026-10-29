@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import secrets
@@ -377,18 +378,24 @@ _TARIFF_RULES = (
 _UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 # api.py's WoltaApiError text: "HTTP <status> from <url>: <body, one line, at most 200 chars>".
 _ERROR_BODY = re.compile(r"^HTTP \d+ from \S+: (.*)$", re.DOTALL)
-_DETAIL_FIELD = re.compile(r'"detail"\s*:\s*"((?:[^"\\]|\\.)*)"')
+# The detail string; the closing quote is optional because api.py may have cut the body inside it.
+_DETAIL_FIELD = re.compile(r'"detail"\s*:\s*"((?:[^"\\]|\\.)*)(")?')
 
 
 def _server_reason(err: WoltaApiError) -> str:
     """The server's own words for a refusal the form has no rule for, shown instead of
-    cannot_connect: the `detail` of its JSON with the \\uXXXX escapes decoded, else the body as
-    api.py kept it (a proxy page, or a body cut at 200 characters that is no longer JSON)."""
+    cannot_connect: the `detail` of its JSON with its escapes decoded (marked with " …" when
+    api.py's 200-character cut fell inside it), else the body as api.py kept it (a proxy page)."""
     text = str(err)
     body = m.group(1) if (m := _ERROR_BODY.match(text)) else text
-    if detail := _DETAIL_FIELD.search(body):
-        body = detail.group(1).replace('\\"', '"')
-    return _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), body).strip()
+    if not (detail := _DETAIL_FIELD.search(body)):
+        return body.strip()
+    raw, closed = detail.group(1), detail.group(2)
+    try:
+        reason = json.loads(f'"{raw}"')
+    except ValueError:  # the cut fell inside an escape
+        reason = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), raw)
+    return reason.strip() if closed else f"{reason.strip()} …"
 
 
 def _tariff_rule_error(err: WoltaApiError) -> str | None:

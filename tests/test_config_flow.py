@@ -5489,8 +5489,12 @@ def test_is_grid_fixed_error_needs_the_rules_own_wording(detail, matched) -> Non
         ('HTTP 422 from x: {"detail":"något annat"}', "något annat"),
         # Not the server's JSON (a proxy page, a body cut at 200 characters): the body as is.
         ("HTTP 422 from x: something else", "something else"),
+        # api.py cuts the body at 200 characters: the text so far, marked as cut, no JSON.
+        ('HTTP 422 from x: {"detail":"en l\\u00e5ng regel som klipp', "en lång regel som klipp …"),
+        # Every JSON escape, not just \" and \uXXXX.
+        ('HTTP 422 from x: {"detail":"a\\\\b \\"c\\" d\\/e"}', 'a\\b "c" d/e'),
     ],
-    ids=["escaped", "plain", "not-json"],
+    ids=["escaped", "plain", "not-json", "cut", "all-escapes"],
 )
 async def test_options_other_422_shows_the_servers_reason(
     hass: HomeAssistant, message: str, shown: str

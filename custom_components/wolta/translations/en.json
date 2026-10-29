@@ -581,7 +581,7 @@
       "retail_fixed_surcharge": "A fixed price is the retailer's whole price and carries no markup. Clear \"Electricity supplier markup\" in the Tariffs section, or choose another contract.",
       "tariff_zone_se_only": "Time periods, holiday rules and the electricity contract can only be given in price zones SE1–SE4, so they cannot be saved for this plant's zone.",
       "grid_benefit_history_requires_base": "Your grid benefit has a history on wolta.se, and today's entry in it needs a base price. Fill in \"Grid benefit\" in the Tariffs section again (0 is a valid answer), or remove the history on wolta.se.",
-      "purchase_date_after_stages": "Your plant was built in stages (set on wolta.se), and the purchase date is the first stage's. It can only be set earlier, not later. Enter a later purchase, such as a battery bought after the solar panels, as a stage on wolta.se and keep the date here as it was.",
+      "purchase_date_after_stages": "Your plant was built in stages (set on wolta.se), and the purchase date is the first stage's: it cannot be later than that, or be removed while the plant has stages. Enter a later purchase, such as a battery bought after the solar panels, as a stage on wolta.se and keep the date here as it was.",
       "server_rejected": "Wolta refused the change: {server_detail}",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
