@@ -5554,6 +5554,169 @@ async def test_options_server_422_for_the_purchase_date_shows_at_the_field_and_o
                                 "base": "purchase_date_after_stages"}
 
 
+# The stages as GET /profile sends them: a battery bought years after the solar panels (the
+# plant from 2026-10-29).
+_STAGES = {
+    "battery_events": [{"date": "2026-10-02", "capacity_kwh": 10.0, "power_kw": 6.11}],
+    "solar_events": [{"date": "2020-09-30", "kwp": 12.3}],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "submitted", ["2026-10-02", None], ids=["later-date", "cleared"])
+async def test_options_purchase_date_after_the_first_stage_is_said_before_sending(
+    hass: HomeAssistant, submitted
+) -> None:
+    """The server's rule, said before sending like the other prechecks: with stages the
+    purchase date is the first stage's, never later and never removed."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PURCHASE_DATE: "2020-09-30"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry, **_STAGES))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_PURCHASE_DATE: submitted})))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_PURCHASE_DATE: "purchase_date_after_stages",
+                                "base": "purchase_date_after_stages"}
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_options_purchase_date_on_or_before_the_first_stage_is_sent(
+    hass: HomeAssistant,
+) -> None:
+    entry = _make_mock_entry(hass, extra_data={CONF_PURCHASE_DATE: "2020-09-30"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry, **_STAGES))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_PURCHASE_DATE: "2020-09-01"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_client.patch_profile.await_args.kwargs[CONF_PURCHASE_DATE] == "2020-09-01"
+
+
+@pytest.mark.asyncio
+async def test_options_purchase_date_without_stages_is_not_checked(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass, extra_data={CONF_PURCHASE_DATE: "2020-09-30"})
+    mock_client, _ = _mock_options_env(entry)
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_PURCHASE_DATE: "2026-10-02"})))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+def test_server_rejected_says_the_reason_is_in_swedish_in_english() -> None:
+    """The server's reasons are Swedish: the English text says so, so an English owner knows
+    why the sentence after the colon is in another language."""
+    import json
+    import pathlib
+
+    root = pathlib.Path(__file__).parent.parent / "custom_components" / "wolta"
+    for name in ("strings.json", "translations/en.json"):
+        data = json.loads((root / name).read_text(encoding="utf-8"))
+        for flow in ("config", "options"):
+            assert "Swedish" in data[flow]["error"]["server_rejected"], (name, flow)
+    sv = json.loads((root / "translations/sv.json").read_text(encoding="utf-8"))
+    assert "svenska" not in sv["options"]["error"]["server_rejected"]
+
+
+_SERVER_REFUSAL = 'HTTP 422 from x: {"detail":"soc_absent kan bara \\u00e4ndras av \\u00e4garen"}'
+
+
+@pytest.mark.asyncio
+async def test_link_flow_absent_patch_422_shows_the_servers_reason(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = _mock_client()
+    mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+    mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_SERVER_REFUSAL, status=422))
+    with _patched(mock_client):
+        result = await _drive_link_entities(
+            hass, mock_client, {**_STREAMS_ONLY, CONF_SOC_ABSENT: True})
+    assert result["step_id"] == "entities"
+    assert result["errors"] == {"base": "server_rejected"}
+    assert result["description_placeholders"]["server_detail"] == (
+        "soc_absent kan bara ändras av ägaren")
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_absent_patch_422_shows_the_servers_reason(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _entry_without_answer(hass, **{CONF_SOC_ISSUE_IGNORED: True})
+    mock_client = _mock_client()
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_SERVER_REFUSAL, status=422))
+    result = await _reconfigure(
+        hass, entry, mock_client, _reconfigure_streams(**{CONF_SOC_ABSENT: True}))
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {"base": "server_rejected"}
+    assert result["description_placeholders"]["server_detail"] == (
+        "soc_absent kan bara ändras av ägaren")
+
+
+@pytest.mark.asyncio
+async def test_reauth_new_token_422_shows_the_servers_reason(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = _mock_client()
+    mock_client.adopt_profile = AsyncMock(
+        side_effect=WoltaApiError(_SERVER_REFUSAL, status=422))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        entry, result = await _reauth_to_new_token_step(hass, mock_client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"profile_input": "NYTOKEN"})
+    assert result["step_id"] == "reauth_new_token"
+    assert result["errors"] == {"base": "server_rejected"}
+    assert result["description_placeholders"]["server_detail"] == (
+        "soc_absent kan bara ändras av ägaren")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["link", "reconfigure", "reauth_new_token"])
+async def test_flows_still_show_cannot_connect_for_a_network_error(
+    hass: HomeAssistant, step: str
+) -> None:
+    from custom_components.wolta.api import WoltaApiError
+
+    mock_client = _mock_client()
+    if step == "link":
+        mock_client.get_profile = AsyncMock(return_value=dict(LINK_PROFILE))
+        mock_client.adopt_profile = AsyncMock(return_value={"adopted": True})
+        mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+        with _patched(mock_client):
+            result = await _drive_link_entities(
+                hass, mock_client, {**_STREAMS_ONLY, CONF_SOC_ABSENT: True})
+    elif step == "reconfigure":
+        entry = _entry_without_answer(hass, **{CONF_SOC_ISSUE_IGNORED: True})
+        mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+        result = await _reconfigure(
+            hass, entry, mock_client, _reconfigure_streams(**{CONF_SOC_ABSENT: True}))
+    else:
+        mock_client.adopt_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+        with (
+            patch("custom_components.wolta.config_flow.WoltaApiClient",
+                  return_value=mock_client),
+            patch("custom_components.wolta.config_flow.async_get_clientsession"),
+        ):
+            entry, result = await _reauth_to_new_token_step(hass, mock_client)
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], {"profile_input": "NYTOKEN"})
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
 # Reauth: the stored answer travels with the re-created profile, and a 422 for the
 # fixed-part rule is explained instead of surfacing as a bare invalid_input.
 
@@ -6709,12 +6872,12 @@ async def test_options_server_422_for_the_period_and_contract_rules_shows_at_the
         ('HTTP 422 from x: {"detail":"tv\\u00e5 tidsperioder \\u00f6verlappar"}', None),
     ],
 )
-def test_tariff_rule_error_matches_the_rules_own_wording(detail: str, code) -> None:
+def test_server_rule_error_matches_the_rules_own_wording(detail: str, code) -> None:
     from custom_components.wolta.api import WoltaApiError
-    from custom_components.wolta.config_flow import _tariff_rule_error
+    from custom_components.wolta.config_flow import _server_rule_error
 
-    assert _tariff_rule_error(WoltaApiError(detail, status=422)) == code
-    assert _tariff_rule_error(WoltaApiError(detail, status=500)) is None
+    assert _server_rule_error(WoltaApiError(detail, status=422)) == code
+    assert _server_rule_error(WoltaApiError(detail, status=500)) is None
 
 
 @pytest.mark.asyncio
@@ -7109,14 +7272,14 @@ async def test_options_server_422_for_the_grid_benefit_history_shows_at_the_fiel
     ],
     ids=["benefit-history", "benefit-history-plain", "export-history", "type-error"],
 )
-def test_tariff_rule_error_matches_the_sale_history_rule(detail: str, code) -> None:
+def test_server_rule_error_matches_the_sale_history_rule(detail: str, code) -> None:
     from custom_components.wolta.api import WoltaApiError
-    from custom_components.wolta.config_flow import _tariff_rule_error, _tariff_rule_field
+    from custom_components.wolta.config_flow import _server_rule_error, _server_rule_field
 
-    assert _tariff_rule_error(WoltaApiError(detail, status=422)) == code
-    assert _tariff_rule_error(WoltaApiError(detail, status=500)) is None
+    assert _server_rule_error(WoltaApiError(detail, status=422)) == code
+    assert _server_rule_error(WoltaApiError(detail, status=500)) is None
     if code is not None:
-        assert _tariff_rule_field(code, {CONF_GRID_BENEFIT_ORE: None}) == CONF_GRID_BENEFIT_ORE
+        assert _server_rule_field(code, {CONF_GRID_BENEFIT_ORE: None}) == CONF_GRID_BENEFIT_ORE
 
 
 @pytest.mark.asyncio
