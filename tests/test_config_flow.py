@@ -5577,7 +5577,9 @@ async def test_options_purchase_date_after_the_first_stage_is_said_before_sendin
         result = await _settings_session(hass, entry)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
-            user_input=_opts(**_core(**{CONF_PURCHASE_DATE: submitted})))
+            # A cleared field is absent from user_input (HA leaves it out).
+            user_input=_opts(**_core(**({} if submitted is None
+                                        else {CONF_PURCHASE_DATE: submitted}))))
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {CONF_PURCHASE_DATE: "purchase_date_after_stages",
                                 "base": "purchase_date_after_stages"}

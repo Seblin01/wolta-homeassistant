@@ -454,6 +454,7 @@
       }
     },
     "error": {
+      "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte ansluta till Wolta API – kontrollera din internetanslutning och försök igen.",
       "grid_fixed_required": "Din sparade nätavgift är procent av spot utan fast del. Ange den fasta delen (exklusive moms och energiskatt, 0 om du bara har procent) och bekräfta igen.",
       "invalid_input": "Wolta avvisade anläggningens uppgifter – kontrollera elområde och styrsystem och försök igen.",
