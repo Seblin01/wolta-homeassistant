@@ -971,3 +971,27 @@ def test_tariffs_description_names_the_sale_side_and_its_history(path: Path) -> 
                    "electricity", "the history of the grid benefit and the retailer's terms")
     for needle in needles:
         assert needle in text, (path.name, needle)
+
+
+_ENERGY_FIELDS = ("batt_in", "batt_out", "grid_in", "grid_out", "solar")
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+@pytest.mark.parametrize("step", ["entities", "reconfigure"])
+def test_every_energy_sensor_has_a_description(path: Path, step: str) -> None:
+    """An owner picks the energy sensors here and nowhere else: each picker says what it wants
+    (a total in kWh that only grows, the one the energy dashboard uses), not just its name
+    (2026-10-29: grid sensors that had stopped updating went unnoticed for a month)."""
+    descriptions = _load(path)["config"]["step"][step].get("data_description", {})
+    for field in _ENERGY_FIELDS:
+        assert descriptions.get(field), (path.name, step, field)
+        assert "kWh" in descriptions[field], (path.name, step, field)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_configure_menu_says_where_the_sensors_are_changed(path: Path) -> None:
+    """The sensors are not in Configure (the cog) but in Reconfigure (the ⋮ menu), and owners
+    look for them in Configure first (2026-10-29)."""
+    text = _load(path)["options"]["step"]["init"].get("description", "")
+    needle = "konfigurera om" if path.name == "sv.json" else "Reconfigure"
+    assert needle in text, path.name
