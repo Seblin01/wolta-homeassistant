@@ -5482,19 +5482,72 @@ def test_is_grid_fixed_error_needs_the_rules_own_wording(detail, matched) -> Non
 
 
 @pytest.mark.asyncio
-async def test_options_other_422_is_still_cannot_connect(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize(
+    "message, shown",
+    [
+        ('HTTP 422 from x: {"detail":"n\\u00e5got annat"}', "något annat"),
+        ('HTTP 422 from x: {"detail":"något annat"}', "något annat"),
+        # Not the server's JSON (a proxy page, a body cut at 200 characters): the body as is.
+        ("HTTP 422 from x: something else", "something else"),
+    ],
+    ids=["escaped", "plain", "not-json"],
+)
+async def test_options_other_422_shows_the_servers_reason(
+    hass: HomeAssistant, message: str, shown: str
+) -> None:
+    """A refusal the form has no rule for is the server's answer, not a connection problem:
+    an owner told to check the internet connection checks the wrong thing (2026-10-29)."""
     from custom_components.wolta.api import WoltaApiError
 
     entry = _make_mock_entry(hass)
     mock_client, _ = _mock_options_env(entry)
-    mock_client.patch_profile = AsyncMock(
-        side_effect=WoltaApiError("HTTP 422 from x: something else", status=422))
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError(message, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_GRID_VAR_ORE: 30.0})))
+    assert result["errors"] == {"base": "server_rejected"}
+    assert result["description_placeholders"]["server_detail"] == shown
+
+
+@pytest.mark.asyncio
+async def test_options_network_error_is_still_cannot_connect(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.patch_profile = AsyncMock(side_effect=WoltaApiError("Network error: timeout"))
     with _options_patched(mock_client):
         result = await _settings_session(hass, entry)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input=_opts(**_core(**{CONF_GRID_VAR_ORE: 30.0})))
     assert result["errors"] == {"base": "cannot_connect"}
+
+
+@pytest.mark.asyncio
+async def test_options_server_422_for_the_purchase_date_shows_at_the_field_and_on_base(
+    hass: HomeAssistant,
+) -> None:
+    """A plant with stages (solar 2020, battery bought later) where the owner types the
+    battery's date as the purchase date: the server refuses a date after the first stage. The
+    form says so at the field, where the date was typed, and on base (the field sits in a
+    section)."""
+    from custom_components.wolta.api import WoltaApiError
+
+    entry = _make_mock_entry(hass, extra_data={CONF_PURCHASE_DATE: "2020-09-30"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_PURCHASE_DATE_DETAIL, status=422))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**_core(**{CONF_PURCHASE_DATE: "2026-10-02"})))
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_PURCHASE_DATE: "purchase_date_after_stages",
+                                "base": "purchase_date_after_stages"}
 
 
 # Reauth: the stored answer travels with the re-created profile, and a 422 for the
@@ -5955,6 +6008,12 @@ _RETAIL_FIXED_SURCHARGE_DETAIL = (
 _TARIFF_ZONE_DETAIL = (
     'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"tidsperioderna, helgdagsreglerna '
     'och elhandelsavtalet g\\u00e4ller bara SE1\\u2013SE4"}')
+# Plain letters, exactly as an owner's log showed it (2026-10-29): the server does not always
+# escape.
+_PURCHASE_DATE_DETAIL = (
+    'HTTP 422 from https://wolta.se/api/v1/profile: {"detail":"purchase_date härleds ur '
+    'etapperna och kan bara sättas TIDIGARE än den första etappen (2020-09-30) – ett senare '
+    'datum säger emot etapperna; redigera etapperna i stället"}')
 
 
 def _selector_values(selector) -> list[str]:
@@ -6630,6 +6689,10 @@ async def test_options_server_422_for_the_period_and_contract_rules_shows_at_the
         (_RETAIL_FIXED_DETAIL, "retail_fixed_invalid"),
         (_RETAIL_FIXED_SURCHARGE_DETAIL, "retail_fixed_surcharge"),
         (_TARIFF_ZONE_DETAIL, "tariff_zone_se_only"),
+        (_PURCHASE_DATE_DETAIL, "purchase_date_after_stages"),
+        ('HTTP 422 from x: {"detail":"purchase_date h\\u00e4rleds ur etapperna och kan bara '
+         's\\u00e4ttas TIDIGARE"}', "purchase_date_after_stages"),
+        ('HTTP 422 from x: {"detail":"purchase_date m\\u00e5ste vara ISO-format"}', None),
         # Plain letters, as a server that does not escape would send them.
         ('HTTP 422 from x: {"detail":"retail_fixed_ore krävs med retail_price_model fixed"}',
          "retail_fixed_invalid"),
