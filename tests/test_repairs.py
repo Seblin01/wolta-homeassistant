@@ -1112,6 +1112,20 @@ async def test_cs_flow_uses_the_onboarding_picker(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
+async def test_cs_flow_lists_the_servers_control_systems(hass: HomeAssistant):
+    """Same rule as onboarding: the server's list when every row has label_en, so a stored
+    value added on the server later is one of the options and stays the default."""
+    flow, _, _ = _cs_flow(hass, mapping=[
+        {"id": "darkstar", "label": "Darkstar", "label_en": "Darkstar", "ha_domains": []},
+        {"id": "other", "label": "Annat", "label_en": "Other", "ha_domains": []}],
+        **{CONF_CONTROL_SYSTEM: "darkstar"})
+    form = await flow.async_step_pick()
+    selector = form["data_schema"].schema[_cs_key(form, CONF_CONTROL_SYSTEM)]
+    assert [o["value"] for o in selector.config["options"]] == ["darkstar", "other"]
+    assert _cs_key(form, CONF_CONTROL_SYSTEM).default() == "darkstar"
+
+
+@pytest.mark.asyncio
 async def test_cs_flow_suggests_from_the_battery_integration(hass: HomeAssistant):
     """The suggestion is onboarding's: battery sensors' integration domain looked up against
     the backend's mapping. It is only a default; the owner confirms by submitting."""
@@ -1155,11 +1169,19 @@ async def test_cs_flow_survives_a_failing_suggestion_lookup(hass: HomeAssistant)
 @pytest.mark.asyncio
 async def test_cs_flow_keeps_an_existing_other_as_the_default(hass: HomeAssistant):
     """An entry with 'other' and no name is asked for the name: the choice stays, the name
-    is what is missing."""
-    flow, _, coordinator = _cs_flow(hass, **{CONF_CONTROL_SYSTEM: "other"})
-    form = await flow.async_step_pick()
+    is what is missing - even when the battery integration would suggest something else.
+
+    The list is fetched anyway (once): since 2026-10-29 it is the picker's options, not only
+    the suggestion."""
+    flow, _, coordinator = _cs_flow(hass, mapping=[
+        {"id": "huawei", "label": "Huawei", "ha_domains": ["huawei_solar"]}],
+        **{CONF_CONTROL_SYSTEM: "other"})
+    with patch("custom_components.wolta.repairs.battery_platforms",
+               return_value=["huawei_solar"]):
+        form = await flow.async_step_pick()
+        await flow.async_step_pick()
     assert _cs_key(form, CONF_CONTROL_SYSTEM).default() == "other"
-    coordinator.client.get_control_systems.assert_not_awaited()
+    coordinator.client.get_control_systems.assert_awaited_once()
 
 
 @pytest.mark.asyncio

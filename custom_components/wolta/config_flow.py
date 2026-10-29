@@ -50,8 +50,10 @@ from .api import (
     WoltaRateLimitError,
 )
 from .control_system_prefill import (
-    async_control_system_suggestion,
+    ControlSystemChoices,
+    async_control_system_choices,
     battery_platforms,
+    fallback_choices,
     control_system_name_error,
     control_system_name_selector,
     control_system_selector,
@@ -651,9 +653,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # tariff has a percentage of spot without the fixed part; the form then asks for it.
         self._reauth_ask_fixed: bool = False
         self._prefill: dict[str, Any] = {}  # eff/purchase_date/invert från statistiken
-        # Styrsystem-förslaget ur batterisensorernas integrationsdomän (sätts i
-        # entitetssteget). None = inget förslag → plant-fältet får ingen default.
-        self._cs_suggest: str | None = None
+        # Styrsystemets val och förslag (sätts i entitetssteget): serverns lista eller
+        # const.CONTROL_SYSTEMS, och förslaget ur batterisensorernas integrationsdomän.
+        # suggestion None = inget förslag → plant-fältet får ingen default.
+        self._cs_choices: ControlSystemChoices = fallback_choices()
         # Stable plant identity for this entry, minted once here and persisted in entry.data.
         # Minted at flow start (not at entry creation) because BOTH the create path and the
         # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
@@ -818,8 +821,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # backend rather than from a guess, and a plant whose battery integration we
         # recognise is not an inattentive user being parked in a bucket. No suggestion
         # (unknown domain, a tie, a failed fetch) -> no default, as before.
-        cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=self._cs_suggest)
-                    if self._cs_suggest else vol.Required(CONF_CONTROL_SYSTEM))
+        suggestion = self._cs_choices.suggestion
+        cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=suggestion)
+                    if suggestion else vol.Required(CONF_CONTROL_SYSTEM))
         schema = vol.Schema(
             {
                 # Deliberately NO default: the zone is an ACTIVE choice (directive
@@ -829,7 +833,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # guess is surfaced by moving that zone to the TOP of the list with a
                 # label (and repeated as text in the description) instead.
                 vol.Required(CONF_ZONE): _zone_selector(guess, lang),
-                cs_field: control_system_selector(),
+                cs_field: control_system_selector(self._cs_choices.options),
                 vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
                 # Visas ALLTID (beslut 2026-09-14), förbockad vid misstanke ur
                 # historiken (stadigt ur > in = omkastade batterisensorer).
@@ -998,20 +1002,22 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # förslag (fältet utan default, som i dag) – ett halvt uppslag får
                 # aldrig stoppa onboardingen. Bara skapa-spåret frågar efter styrsystem,
                 # så koppla-spåret slipper anropet.
-                self._cs_suggest = None
+                self._cs_choices = fallback_choices()
                 if self._link_token is None:
                     try:
                         platforms = battery_platforms(
                             self.hass,
                             list(user_input[CONF_BATT_IN]) + list(user_input[CONF_BATT_OUT]),
                         )
-                        # Okänt id ⇒ inget förslag (se async_control_system_suggestion):
-                        # annars MultipleInvalid i sista onboarding-steget.
-                        self._cs_suggest = await async_control_system_suggestion(
+                        # Förslaget är alltid ett av alternativen (se
+                        # async_control_system_choices): annars MultipleInvalid i sista
+                        # onboarding-steget.
+                        self._cs_choices = await async_control_system_choices(
                             WoltaApiClient(async_get_clientsession(self.hass)), platforms)
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug(
-                            "control_system prefill failed; no suggestion", exc_info=True
+                            "control_system prefill failed; const list, no suggestion",
+                            exc_info=True,
                         )
                 if self._link_token is not None:
                     if self._prefill.get("invert_suspected"):

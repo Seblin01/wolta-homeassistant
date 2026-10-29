@@ -7,10 +7,16 @@ förslag – då lämnas fältet utan default, som i dag.
 Samma regel som webben (web/src/lib/control-system-suggest.ts). Håll dem i takt.
 
 Här bor också väljaren och reglerna som onboardingens plant-steg och reparationen
-control_system_required (repairs.py) delar: en lista, ett förslag, en namnregel."""
+control_system_required (repairs.py) delar: en lista, ett förslag, en namnregel.
+
+Listan kommer sedan 2026-10-29 ur samma svar som mappningen (`label_en`, api >= 0.123.0), så
+att ett styrsystem som läggs till på servern går att välja utan en ny release. const.py är
+reserven när anropet misslyckas eller en äldre server svarar utan engelska etiketter. Ett
+halvt svar används aldrig: en lista som tappat ett system hade dolt ägarens eget val."""
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -82,25 +88,65 @@ def suggest_control_system(platforms: list[str], mapping: list[dict]) -> str | N
     return ranked[0][0]
 
 
-async def async_control_system_suggestion(client: Any, platforms: list[str]) -> str | None:
-    """Förslaget för väljaren: batterisensorernas integrationsdomäner slagna mot backendens
-    mappning (GET /control-systems), eller None.
-
-    Kastar vid nätfel – anroparen fångar och går vidare utan förslag, så ett halvt uppslag
-    aldrig stoppar ett flöde. Backendens lista ligger FÖRE den lokala (se
-    const.CONTROL_SYSTEMS): ett id vi inte känner igen som default hade förvalt ett värde som
-    SelectSelector själv avvisar, så okänt ⇒ inget förslag."""
-    suggestion = suggest_control_system(platforms, await client.get_control_systems())
-    return suggestion if suggestion in {c for c, _ in CONTROL_SYSTEMS} else None
+def sorted_options(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Alphabetical by label (case-insensitive), Other last - the order on wolta.se too."""
+    rest = sorted((p for p in pairs if p[0] != "other"), key=lambda p: p[1].casefold())
+    return rest + [p for p in pairs if p[0] == "other"]
 
 
-def control_system_selector() -> SelectSelector:
-    """Väljaren med const.CONTROL_SYSTEMS (samma lista i onboardingen och reparationen)."""
+def options_from_server(rows: Any) -> list[tuple[str, str]] | None:
+    """The picker's options from GET /control-systems, or None when the answer is not a
+    complete list: every row needs an id and an English label, the ids are unique, and Other
+    is there (without it an unlisted system cannot be named). None means: use const."""
+    if not isinstance(rows, list) or not rows:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        cs_id, label = row.get("id"), row.get("label_en")
+        if not (isinstance(cs_id, str) and cs_id and isinstance(label, str) and label.strip()):
+            return None
+        pairs.append((cs_id, label.strip()))
+    ids = [cs_id for cs_id, _ in pairs]
+    if "other" not in ids or len(ids) != len(set(ids)):
+        return None
+    return sorted_options(pairs)
+
+
+@dataclass(frozen=True)
+class ControlSystemChoices:
+    """What the picker shows and what it starts on. `suggestion` is always one of
+    `options` or None: a default outside the options is rejected by SelectSelector."""
+
+    options: list[tuple[str, str]]
+    suggestion: str | None
+
+
+def fallback_choices() -> ControlSystemChoices:
+    return ControlSystemChoices(sorted_options(CONTROL_SYSTEMS), None)
+
+
+async def async_control_system_choices(client: Any, platforms: list[str]) -> ControlSystemChoices:
+    """The options (the server's list, else const) and the suggestion from the battery
+    sensors' integration domains against the backend's mapping, from ONE request.
+
+    Raises on a network error - the caller catches and uses fallback_choices(), so a failed
+    lookup never stops a flow."""
+    rows = await client.get_control_systems()
+    options = options_from_server(rows) or sorted_options(CONTROL_SYSTEMS)
+    suggestion = suggest_control_system(platforms, rows if isinstance(rows, list) else [])
+    return ControlSystemChoices(
+        options, suggestion if suggestion in {c for c, _ in options} else None)
+
+
+def control_system_selector(options: list[tuple[str, str]] | None = None) -> SelectSelector:
+    """The picker (same in onboarding and the repair). Without options: const's list."""
     return SelectSelector(
         SelectSelectorConfig(
             options=[
                 SelectOptionDict(value=cs_id, label=label)
-                for cs_id, label in CONTROL_SYSTEMS
+                for cs_id, label in (options or sorted_options(CONTROL_SYSTEMS))
             ],
             mode=SelectSelectorMode.DROPDOWN,
         )

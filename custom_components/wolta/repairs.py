@@ -65,15 +65,16 @@ from .const import (
     CONF_RESERVE_PCT,
     CONF_SOC,
     CONF_SOC_ABSENT,
-    CONTROL_SYSTEMS,
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
 )
 from . import intervals
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
 from .control_system_prefill import (
-    async_control_system_suggestion,
+    ControlSystemChoices,
+    async_control_system_choices,
     battery_platforms,
+    fallback_choices,
     control_system_name_error,
     control_system_name_selector,
     control_system_selector,
@@ -373,9 +374,9 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
 
     def __init__(self, entry: ConfigEntry | None) -> None:
         self._entry = entry
-        # The suggestion is looked up once per flow, not on every re-show after an error.
-        self._suggested: str | None = None
-        self._suggestion_looked_up = False
+        # The options and the suggestion are looked up once per flow, not on every re-show
+        # after an error.
+        self._cs_choices: ControlSystemChoices | None = None
 
     async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
         # Same race as _AdoptRepairFlow: the entry can be removed between the issue being
@@ -384,16 +385,9 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
             return self.async_abort(reason="entry_not_found")
         return await self.async_step_pick()
 
-    async def _default_choice(self) -> str | None:
-        """The control system the form starts on: what the entry has (an "other" that only
-        lacks its name), else onboarding's suggestion, else nothing (no guess)."""
-        current = self._entry.data.get(CONF_CONTROL_SYSTEM)
-        # Same guard as the suggestion: an id this client does not list (added on the
-        # server later) would be a default outside the selector's options, which HA rejects.
-        if current in {c for c, _ in CONTROL_SYSTEMS}:
-            return current
-        if not self._suggestion_looked_up:
-            self._suggestion_looked_up = True
+    async def _choices(self) -> ControlSystemChoices:
+        """Onboarding's options and suggestion (the server's list, else const)."""
+        if self._cs_choices is None:
             coordinator = self._entry.runtime_data
             batt = [
                 entity_id
@@ -401,11 +395,23 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
                 for entity_id in _as_list(self._entry.data.get(key))
             ]
             try:
-                self._suggested = await async_control_system_suggestion(
+                self._cs_choices = await async_control_system_choices(
                     coordinator.client, battery_platforms(self.hass, batt))
-            except Exception:  # noqa: BLE001 - a suggestion is optional, never blocks the form
-                _LOGGER.debug("control_system suggestion failed; no default", exc_info=True)
-        return self._suggested
+            except Exception:  # noqa: BLE001 - the lookup is optional, never blocks the form
+                _LOGGER.debug("control_system lookup failed; const list, no default",
+                              exc_info=True)
+                self._cs_choices = fallback_choices()
+        return self._cs_choices
+
+    def _default_choice(self, choices: ControlSystemChoices) -> str | None:
+        """The control system the form starts on: what the entry has (an "other" that only
+        lacks its name), else onboarding's suggestion, else nothing (no guess)."""
+        current = self._entry.data.get(CONF_CONTROL_SYSTEM)
+        # Same guard as the suggestion: an id that is not one of the options (an older
+        # fallback list) would be a default HA rejects.
+        if current in {c for c, _ in choices.options}:
+            return current
+        return choices.suggestion
 
     async def async_step_pick(self, user_input=None) -> data_entry_flow.FlowResult:
         if self._entry is None:
@@ -438,11 +444,12 @@ class ControlSystemRequiredRepairFlow(RepairsFlow):
                 # the dialog need not wait for a whole update cycle (upload, profile, results).
                 self.hass.async_create_task(coordinator.async_request_refresh())
                 return self.async_create_entry(title="", data={})
-        default = await self._default_choice()
+        choices = await self._choices()
+        default = self._default_choice(choices)
         cs_field = (vol.Required(CONF_CONTROL_SYSTEM, default=default)
                     if default else vol.Required(CONF_CONTROL_SYSTEM))
         schema = vol.Schema({
-            cs_field: control_system_selector(),
+            cs_field: control_system_selector(choices.options),
             vol.Optional(CONF_CONTROL_SYSTEM_NAME): control_system_name_selector(),
         })
         # After an error the form keeps what was typed; the first time it offers the stored name.
