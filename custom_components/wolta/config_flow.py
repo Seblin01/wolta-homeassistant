@@ -351,7 +351,11 @@ def _contract_profile_kwargs(zone: Any, data: dict[str, Any]) -> dict[str, Any]:
 #   tidsperioderna, helgdagsreglerna och elhandelsavtalet gäller bara SE1–SE4
 #   en nätnyttepost behöver datum (inte i framtiden, inte två på samma dag) och ett baspris
 #     (grid_benefit_ore)
-# The last is the grid benefit history's rule (Tillägg 5), which a save from here meets by
+#   purchase_date härleds ur etapperna och kan bara sättas TIDIGARE än den första etappen (...)
+# The purchase date's rule is not a tariff rule but is met the same way: a plant with stages (a
+# battery bought years after the solar panels) where the owner types the later date here
+# (2026-10-29). The stages are edited on wolta.se.
+# The grid benefit history's rule (Tillägg 5) is the one a save from here meets by
 # clearing the base price while the server keeps a grid benefit history: today's entry would have
 # no base price. The server checks it before the periods' rule, so it is matched first. The
 # retailer's terms have no such case (a cleared value is plain spot from today, the server's
@@ -367,8 +371,24 @@ _TARIFF_RULES = (
                 re.IGNORECASE),
      "retail_fixed_surcharge"),
     (re.compile(r"elhandelsavtalet\s+gäller\s+bara", re.IGNORECASE), "tariff_zone_se_only"),
+    (re.compile(r"purchase_date\s+härleds\s+ur\s+etapperna", re.IGNORECASE),
+     "purchase_date_after_stages"),
 )
 _UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+# api.py's WoltaApiError text: "HTTP <status> from <url>: <body, one line, at most 200 chars>".
+_ERROR_BODY = re.compile(r"^HTTP \d+ from \S+: (.*)$", re.DOTALL)
+_DETAIL_FIELD = re.compile(r'"detail"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _server_reason(err: WoltaApiError) -> str:
+    """The server's own words for a refusal the form has no rule for, shown instead of
+    cannot_connect: the `detail` of its JSON with the \\uXXXX escapes decoded, else the body as
+    api.py kept it (a proxy page, or a body cut at 200 characters that is no longer JSON)."""
+    text = str(err)
+    body = m.group(1) if (m := _ERROR_BODY.match(text)) else text
+    if detail := _DETAIL_FIELD.search(body):
+        body = detail.group(1).replace('\\"', '"')
+    return _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), body).strip()
 
 
 def _tariff_rule_error(err: WoltaApiError) -> str | None:
@@ -398,6 +418,8 @@ def _tariff_rule_field(code: str, patch_fields: dict[str, Any]) -> str:
         return CONF_RETAIL_FIXED_ORE
     if code == "retail_fixed_surcharge":
         return CONF_SURCHARGE_ORE
+    if code == "purchase_date_after_stages":
+        return CONF_PURCHASE_DATE
     return CONF_RETAIL_PRICE_MODEL
 
 
@@ -1857,6 +1879,7 @@ class WoltaOptionsFlow(OptionsFlow):
         """Show and handle the options form."""
         entry = self.config_entry
         errors: dict[str, str] = {}
+        server_detail = ""   # the server's words for a refusal without a rule here
         token: str = entry.data[CONF_TOKEN]
         session = async_get_clientsession(self.hass)
         client = WoltaApiClient(session)
@@ -2081,10 +2104,15 @@ class WoltaOptionsFlow(OptionsFlow):
                     elif tariff_err is not None:
                         errors[_tariff_rule_field(tariff_err, patch_fields)] = tariff_err
                         errors["base"] = tariff_err
+                    elif _is_grid_fixed_error(err):
+                        errors["base"] = "grid_fixed_required"
+                    elif getattr(err, "status", None) == 422:
+                        # A refusal without a rule here is still the server's answer, not a
+                        # connection problem: its own words, so the owner fixes the right thing.
+                        errors["base"] = "server_rejected"
+                        server_detail = _server_reason(err)
                     else:
-                        errors["base"] = (
-                            "grid_fixed_required" if _is_grid_fixed_error(err)
-                            else "cannot_connect")
+                        errors["base"] = "cannot_connect"
 
             if not errors:
                 # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -2334,8 +2362,9 @@ class WoltaOptionsFlow(OptionsFlow):
         # The time periods and the contract history are shown, never edited (spec
         # 2026-10-27-marknadsanpassning, Tillägg 2 and 4): a short summary in the description,
         # empty when the plant has none. Always passed, so the description never shows a raw
-        # placeholder.
+        # placeholder; server_detail too, for the server_rejected error text.
         summary = _web_summary(self.hass.config.language, srv)
         return self.async_show_form(
             step_id="settings", data_schema=schema, errors=errors,
-            description_placeholders={"web_summary": f"\n\n{summary}" if summary else ""})
+            description_placeholders={"web_summary": f"\n\n{summary}" if summary else "",
+                                      "server_detail": server_detail})

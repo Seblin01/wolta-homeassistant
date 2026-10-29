@@ -6400,12 +6400,12 @@ async def test_options_summary_names_the_contract_history_in_swedish(hass: HomeA
 @pytest.mark.asyncio
 async def test_options_summary_is_empty_without_periods_or_history(hass: HomeAssistant) -> None:
     """Always passed (the description must never show a raw placeholder), empty when there is
-    nothing to summarise."""
+    nothing to summarise. server_detail likewise, for the server_rejected error."""
     entry = _make_mock_entry(hass)
     mock_client, _ = _mock_options_env(entry)
     with _options_patched(mock_client):
         result = await _settings_session(hass, entry)
-    assert result["description_placeholders"] == {"web_summary": ""}
+    assert result["description_placeholders"] == {"web_summary": "", "server_detail": ""}
 
 
 def test_web_summary_reads_only_well_formed_lists() -> None:
