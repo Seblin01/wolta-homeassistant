@@ -358,11 +358,11 @@
           "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
-          "batt_in": "Energy charged into the battery, in kWh: a total that only grows. The same sensor the energy dashboard uses for energy going into the battery. Several sensors are added together.",
-          "batt_out": "Energy discharged from the battery, in kWh: a total that only grows. The same sensor the energy dashboard uses for energy coming out of the battery. Several sensors are added together.",
-          "grid_in": "Electricity bought from the grid, in kWh: a total that only grows. The same sensor the energy dashboard uses for grid consumption. It should rise every night and whenever the house uses more than solar and battery give. If it stops changing, Wolta sees no bought electricity.",
-          "grid_out": "Electricity sold to the grid, in kWh: a total that only grows. The same sensor the energy dashboard uses for return to grid. It rises when solar or battery give more than the house uses.",
-          "solar": "Solar production, in kWh: a total that only grows, such as the inverter's total yield. Several sensors are added together, for example two inverters.",
+          "batt_in": "Energy charged, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "batt_out": "Energy discharged, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "grid_in": "Electricity bought, in kWh (a meter that only goes up). The same sensor as in the energy dashboard. Should rise every night.",
+          "grid_out": "Electricity sold, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "solar": "Solar production, in kWh (a meter that only goes up). Several inverters are added together.",
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
           "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
           "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
@@ -434,11 +434,11 @@
           "soc_absent": "My battery has no SoC sensor"
         },
         "data_description": {
-          "batt_in": "Energy charged into the battery, in kWh: a total that only grows. The same sensor the energy dashboard uses for energy going into the battery. Several sensors are added together.",
-          "batt_out": "Energy discharged from the battery, in kWh: a total that only grows. The same sensor the energy dashboard uses for energy coming out of the battery. Several sensors are added together.",
-          "grid_in": "Electricity bought from the grid, in kWh: a total that only grows. The same sensor the energy dashboard uses for grid consumption. It should rise every night and whenever the house uses more than solar and battery give. If it stops changing, Wolta sees no bought electricity.",
-          "grid_out": "Electricity sold to the grid, in kWh: a total that only grows. The same sensor the energy dashboard uses for return to grid. It rises when solar or battery give more than the house uses.",
-          "solar": "Solar production, in kWh: a total that only grows, such as the inverter's total yield. Several sensors are added together, for example two inverters.",
+          "batt_in": "Energy charged, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "batt_out": "Energy discharged, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "grid_in": "Electricity bought, in kWh (a meter that only goes up). The same sensor as in the energy dashboard. Should rise every night.",
+          "grid_out": "Electricity sold, in kWh (a meter that only goes up). The same sensor as in the energy dashboard.",
+          "solar": "Solar production, in kWh (a meter that only goes up). Several inverters are added together.",
           "external_control_entity": "Sensor that is 'on' when the battery is controlled by a flex-market service (e.g. Tibber Grid Rewards). Those periods are counted neutrally in the optimisation grade.",
           "flex_compensation_entity": "Sensor holding the compensation your flex-market provider pays you (e.g. CheckWatt or Tibber Grid Rewards), in SEK. Wolta reads the monthly total and shows it next to what the flex participation cost you in foregone spot value. It must be a sensor with state_class total or total_increasing — a measurement sensor has no monthly sum to read. Amounts you have entered yourself on wolta.se are kept separately and are never overwritten.",
           "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
@@ -464,7 +464,7 @@
       }
     },
     "error": {
-      "server_rejected": "Wolta refused the change. Wolta's reason, in Swedish: {server_detail}",
+      "server_rejected": "Wolta refused the change (reason in Swedish): {server_detail}",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "grid_fixed_required": "Your saved grid fee is a percentage of spot without a fixed part. Enter the fixed part (excluding VAT and energy tax, 0 if you only have a percentage) and confirm again.",
       "invalid_input": "Wolta rejected the plant details – check the price zone and control system and try again.",
@@ -495,7 +495,7 @@
     "step": {
       "init": {
         "title": "Wolta",
-        "description": "To change the energy sensors, close this and choose Reconfigure in the integration's ⋮ menu.",
+        "description": "Change the sensors via the integration's ⋮ menu → Reconfigure.",
         "menu_options": {
           "settings": "Settings",
           "account_link": "Link to a wolta.se account",
@@ -534,7 +534,7 @@
             },
             "data_description": {
               "cost_sek": "What you actually paid for the BATTERY ONLY (not solar panels), in SEK — the invoice total, after any green deduction. Used to calculate the battery's IRR and payback. Clear the field to remove the value.",
-              "purchase_date": "Date the battery (or solar+battery) system was installed. Built in stages, like a battery added years after the solar panels? Then it is the first stage's date, and the later stages are set on wolta.se. Used to calculate this year's actual savings. Date in the future (a planned purchase)? The results only show the actual outcome so far — for a planned purchase, use the decision calculator on wolta.se instead. Clear the field to remove the value."
+              "purchase_date": "Date the battery (or solar+battery) system was installed. Built in stages? Enter the first stage's date; later stages are set on wolta.se. Used to calculate this year's actual savings. Date in the future (a planned purchase)? The results only show the actual outcome so far — for a planned purchase, use the decision calculator on wolta.se instead. Clear the field to remove the value."
             }
           },
           "tariffs": {
@@ -593,8 +593,8 @@
       "retail_fixed_surcharge": "A fixed price is the retailer's whole price and carries no markup. Clear \"Electricity supplier markup\" in the Tariffs section, or choose another contract.",
       "tariff_zone_se_only": "Time periods, holiday rules and the electricity contract can only be given in price zones SE1–SE4, so they cannot be saved for this plant's zone.",
       "grid_benefit_history_requires_base": "Your grid benefit has a history on wolta.se, and today's entry in it needs a base price. Fill in \"Grid benefit\" in the Tariffs section again (0 is a valid answer), or remove the history on wolta.se.",
-      "purchase_date_after_stages": "Your plant was built in stages (set on wolta.se), and the purchase date is the first stage's: it cannot be later than that, or be removed while the plant has stages. Enter a later purchase, such as a battery bought after the solar panels, as a stage on wolta.se and keep the date here as it was.",
-      "server_rejected": "Wolta refused the change. Wolta's reason, in Swedish: {server_detail}",
+      "purchase_date_after_stages": "The plant has stages on wolta.se. The purchase date is the first stage's and cannot be later or removed. Add later purchases as stages on wolta.se.",
+      "server_rejected": "Wolta refused the change (reason in Swedish): {server_detail}",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
     },
