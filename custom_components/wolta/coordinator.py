@@ -1688,6 +1688,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return floor
         return max(floor, _floor_hour(created - timedelta(days=_BACKFILL_DAYS)))
 
+    def replacement_floor(self) -> datetime | None | coverage._Missing:
+        """Where a sensor change of this client would start rebuilding stored rows, read
+        like the entity job plans it (_plan_since) from the latest profile GET's data_since:
+        its _replacement_floor; MISSING while data_since is unknown; None when the server
+        holds no rows (nothing is rebuilt). Reconfigure names it before a battery role swap."""
+        since = self._data_since
+        if since is coverage.MISSING or since is None:
+            return since
+        return self._replacement_floor(since)
+
     async def _discard_replacement(self, rid: str) -> None:
         """Best-effort DELETE of a replacement left open server-side (it expires anyway)."""
         try:

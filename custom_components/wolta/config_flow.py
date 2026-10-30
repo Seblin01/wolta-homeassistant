@@ -38,7 +38,7 @@ from homeassistant.helpers.selector import (
 
 from homeassistant.util import dt as dt_util
 
-from . import intervals, stats
+from . import coverage, intervals, stats
 from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-exported
     MAX_SOC_SENSORS,
     soc_error as _soc_error,
@@ -226,6 +226,20 @@ def _as_list(val: str | list | None) -> list[str]:
     if isinstance(val, str) and val:
         return [val]
     return []
+
+
+def _battery_sensors(data: dict) -> tuple[list[str], list[str]]:
+    """The battery pair (charge, discharge), normalised and order-independent, so only a real
+    change of sensors compares unequal."""
+    return (sorted(_as_list(data.get(CONF_BATT_IN))), sorted(_as_list(data.get(CONF_BATT_OUT))))
+
+
+def _battery_roles_swapped(old: dict, new: dict) -> bool:
+    """Whether a sensor moved between charge and discharge: one in the new charge list was a
+    discharge sensor before, or the other way round. A newly added sensor is no swap."""
+    old_in, old_out = set(_as_list(old.get(CONF_BATT_IN))), set(_as_list(old.get(CONF_BATT_OUT)))
+    return bool(set(_as_list(new.get(CONF_BATT_IN))) & old_out
+                or set(_as_list(new.get(CONF_BATT_OUT))) & old_in)
 
 
 def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSelector:
@@ -612,6 +626,7 @@ _DIRECTION_TEXT: dict[str, dict[str, str]] = {
     },
 }
 _DIRECTION_OVERRIDE = "direction_override"
+_CONFIRM_SWAP = "confirm_swap"  # Reconfigure: a battery role swap, confirmed
 _DIRECTION_FLIP_FROM = "start"
 _TICK = timedelta(microseconds=1)  # an end is exclusive: its last instant is the one before
 
@@ -864,6 +879,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
         # this is not the config entry_id.
         self._plant_id: str = secrets.token_hex(16)
+        # Reconfigure, a battery role swap waiting for its confirmation: the entry.data
+        # updates of the submit, the battery pair they were computed against
+        # (_battery_sensors), the soc_absent answer still to PATCH (None: unchanged), and
+        # the rebuilt period shown.
+        self._swap_updates: dict[str, Any] | None = None
+        self._swap_from: tuple[list[str], list[str]] | None = None
+        self._swap_soc_absent: bool | None = None
+        self._swap_placeholders: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Step 1: menu – create a new profile or link an existing one
@@ -1357,6 +1380,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="view_only_no_reconfigure")
         errors: dict[str, str] = {}
         if user_input is not None:
+            swap_floor: datetime | None = None
             for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
                 if not user_input.get(key):
                     errors[key] = "required_sensor"
@@ -1368,12 +1392,32 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 await self.async_set_unique_id(entry.unique_id)
                 self._abort_if_unique_id_mismatch()
+                # A sensor moved between charge and discharge: the entity job then rebuilds
+                # both battery fields of every stored row from the replacement floor, months
+                # of history, so the save waits for a confirmation that names the period
+                # (async_step_reconfigure_battery_swap). Nothing uploaded, or no rows on the
+                # server: nothing stored changes, and the save goes ahead unasked. Decided
+                # before the PATCH, so an abort here leaves the server as it was too.
+                if _battery_roles_swapped(entry.data, user_input):
+                    coordinator = getattr(entry, "runtime_data", None)
+                    if coordinator is None:
+                        # Not running: what is uploaded is unknown, and the reload after a
+                        # save would rebuild it unasked.
+                        return self.async_abort(reason="battery_swap_not_loaded")
+                    if coordinator.has_uploaded():
+                        floor = coordinator.replacement_floor()
+                        if floor is coverage.MISSING:
+                            # Never a confirmation without a period: the profile poll
+                            # brings data_since shortly.
+                            return self.async_abort(reason="battery_swap_period_unknown")
+                        swap_floor = floor
                 # soc_absent is mirrored from the server (coordinator _PROFILE_SYNC_KEYS),
                 # so a changed answer is PATCHed first and stored only once the server has
                 # it. A failed PATCH saves nothing from this submit: the form shows the
                 # server's reason or cannot_connect (_refusal) and the user retries.
+                # Behind a swap confirmation the PATCH waits for it, so Cancel sends nothing.
                 soc_absent_changed = soc_absent != bool(entry.data.get(CONF_SOC_ABSENT))
-                if soc_absent_changed:
+                if soc_absent_changed and swap_floor is None:
                     try:
                         await WoltaApiClient(
                             async_get_clientsession(self.hass)
@@ -1397,29 +1441,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 if soc_absent_changed:
                     # Unchanged, the entry keeps the server's mirrored value as it is.
                     data_updates[CONF_SOC_ABSENT] = soc_absent
-                new_data = {**entry.data, **data_updates}
-                # The old "ignore" of the soc_missing repair answered an offer, not the
-                # requirement (spec 2026-10-20 §4.2): it is never read again, and any
-                # save drops it.
-                new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
-                # Changed battery sensors replace the stored battery fields (an entity job),
-                # so an open direction repair rests on the old grade: stamp as for a flip
-                # so it is not raised again until the server has recounted.
-                # Order-independent and normalised like the coordinator (a v0.1.0 entry
-                # stores a plain string), so only a real change of sensors stamps.
-                if (sorted(_as_list(user_input[CONF_BATT_IN]))
-                        != sorted(_as_list(entry.data.get(CONF_BATT_IN)))
-                        or sorted(_as_list(user_input[CONF_BATT_OUT]))
-                        != sorted(_as_list(entry.data.get(CONF_BATT_OUT)))):
-                    new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
-                    ir.async_delete_issue(
-                        self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
-                    new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
-                # Reload: the coordinator sees a new entity fingerprint and an entity job
-                # replaces only the changed sensors' fields in the stored history.
-                # `data=` (whole dict), not `data_updates=`: the ignore flags above must
-                # be removed, which a merge cannot do.
-                return self.async_update_reload_and_abort(entry, data=new_data)
+                if swap_floor is not None:
+                    self._swap_updates = data_updates
+                    self._swap_from = _battery_sensors(entry.data)
+                    self._swap_soc_absent = soc_absent if soc_absent_changed else None
+                    self._swap_placeholders = {
+                        "start": dt_util.as_local(swap_floor).date().isoformat(),
+                        "days": str(_local_days([(swap_floor, dt_util.utcnow())])),
+                    }
+                    return await self.async_step_reconfigure_battery_swap()
+                return self._save_reconfigure(entry, data_updates)
 
         defaults = {
             k: entry.data.get(k)
@@ -1490,6 +1521,88 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure", data_schema=schema, errors=errors,
             description_placeholders={"server_detail": self._server_detail})
+
+    def _save_reconfigure(
+        self, entry: ConfigEntry, data_updates: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Store a reconfigure submit and reload. Merged into entry.data as it is now: a
+        swap confirmation answered later (which re-checks only the battery pair) does not
+        revert other keys written meanwhile."""
+        new_data = {**entry.data, **data_updates}
+        # The old "ignore" of the soc_missing repair answered an offer, not the
+        # requirement (spec 2026-10-20 §4.2): it is never read again, and any
+        # save drops it.
+        new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
+        # Changed battery sensors replace the stored battery fields (an entity job),
+        # so an open direction repair rests on the old grade: stamp as for a flip
+        # so it is not raised again until the server has recounted.
+        # Order-independent and normalised like the coordinator (a v0.1.0 entry
+        # stores a plain string), so only a real change of sensors stamps.
+        if _battery_sensors(data_updates) != _battery_sensors(entry.data):
+            new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
+            new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
+        # Reload: the coordinator sees a new entity fingerprint and an entity job
+        # replaces only the changed sensors' fields in the stored history.
+        # `data=` (whole dict), not `data_updates=`: the ignore flags above must
+        # be removed, which a merge cannot do.
+        return self.async_update_reload_and_abort(entry, data=new_data)
+
+    async def async_step_reconfigure_battery_swap(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """A sensor moved between charge and discharge over uploaded data: the period the
+        entity job rebuilds, and Battery direction (Configure) as the way to fix mixed-up
+        charge and discharge. A menu, since a form has one button: go on to the
+        confirmation, or cancel and save nothing."""
+        return self.async_show_menu(
+            step_id="reconfigure_battery_swap",
+            menu_options=["reconfigure_battery_swap_confirm", "reconfigure_battery_swap_cancel"],
+            description_placeholders=self._swap_placeholders,
+        )
+
+    async def async_step_reconfigure_battery_swap_cancel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(reason="battery_swap_cancelled")
+
+    async def async_step_reconfigure_battery_swap_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The specific confirmation, unticked: ticked, the submit is saved as the form
+        would have saved it, a changed soc_absent PATCHed first (held back from the submit,
+        so Cancel sends nothing); a failed PATCH saves nothing and is shown here. The battery
+        pair is checked again first: the confirmation was computed from it, and two dialogs
+        open at once must not stack two changes."""
+        entry = self._get_reconfigure_entry()
+        if self._swap_updates is None or _battery_sensors(entry.data) != self._swap_from:
+            return self.async_abort(reason="battery_swap_changed")
+        errors: dict[str, str] = {}
+        self._server_detail = ""
+        if user_input is not None:
+            if not user_input.get(_CONFIRM_SWAP):
+                errors[_CONFIRM_SWAP] = "override_required"
+            elif self._swap_soc_absent is not None:
+                try:
+                    await WoltaApiClient(
+                        async_get_clientsession(self.hass)
+                    ).patch_profile(entry.data[CONF_TOKEN], soc_absent=self._swap_soc_absent)
+                except WoltaApiError as err:
+                    _LOGGER.error("Failed to patch soc_absent: %s", err)
+                    self._server_detail = _refusal(err, errors)
+            if not errors:
+                return self._save_reconfigure(entry, self._swap_updates)
+        return self.async_show_form(
+            step_id="reconfigure_battery_swap_confirm",
+            data_schema=vol.Schema({
+                vol.Required(_CONFIRM_SWAP, default=False): BooleanSelector(
+                    BooleanSelectorConfig()),
+            }),
+            errors=errors,
+            description_placeholders={
+                **self._swap_placeholders, "server_detail": self._server_detail},
+        )
 
     # ------------------------------------------------------------------
     # Linked-profile entry creation (+ invert check when stats suggest swap)

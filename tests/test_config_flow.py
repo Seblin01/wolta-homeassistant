@@ -4607,6 +4607,8 @@ async def test_reconfigure_battery_sensor_swap_stamps_flip_and_clears_repair(
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_DIRECTION_ISSUE_IGNORED: True})
     issue_id = _raise_direction_issue(hass, entry)
+    # Nothing uploaded yet: a swap saves without the confirmation (see the tests below).
+    _swap_coordinator(entry, uploaded=False)
     with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
                return_value={}):
         result = await entry.start_reconfigure_flow(hass)
@@ -4677,6 +4679,343 @@ async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip
     assert result["reason"] == "reconfigure_successful"
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert CONF_DIRECTION_FLIPPED_AT not in updated.data
+
+
+# ---------------------------------------------------------------------------
+# Reconfigure: moving a sensor between charge and discharge asks first
+# ---------------------------------------------------------------------------
+
+# Local 2026-05-02 00:00 in Europe/Stockholm.
+_SWAP_FLOOR = datetime(2026, 5, 1, 22, tzinfo=timezone.utc)
+_SWAPPED = {
+    CONF_BATT_IN: ["sensor.battery_discharge"],
+    CONF_BATT_OUT: ["sensor.battery_charge"],
+}
+
+
+def _swap_coordinator(entry, *, uploaded: bool = True, floor=_SWAP_FLOOR) -> MagicMock:
+    coordinator = MagicMock()
+    coordinator.has_uploaded = MagicMock(return_value=uploaded)
+    coordinator.replacement_floor = MagicMock(return_value=floor)
+    entry.runtime_data = coordinator
+    return coordinator
+
+
+async def _submit_reconfigure(hass: HomeAssistant, entry, **streams):
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}):
+        result = await entry.start_reconfigure_flow(hass)
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=_reconfigure_input(**streams))
+
+
+async def _open_swap_confirm(hass: HomeAssistant, entry):
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["step_id"] == "reconfigure_battery_swap"
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "reconfigure_battery_swap_confirm"})
+
+
+@pytest.mark.parametrize("old, new, expected", [
+    ({CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"]},
+     {CONF_BATT_IN: ["sensor.b"], CONF_BATT_OUT: ["sensor.a"]}, True),
+    ({CONF_BATT_IN: ["sensor.a", "sensor.c"], CONF_BATT_OUT: ["sensor.b"]},
+     {CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b", "sensor.c"]}, True),
+    ({CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"]},
+     {CONF_BATT_IN: ["sensor.a", "sensor.d"], CONF_BATT_OUT: ["sensor.b", "sensor.e"]}, False),
+    ({CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"]},
+     {CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"]}, False),
+    ({CONF_BATT_IN: "sensor.a", CONF_BATT_OUT: "sensor.b"},
+     {CONF_BATT_IN: ["sensor.b"], CONF_BATT_OUT: ["sensor.a"]}, True),
+    ({CONF_BATT_IN: "sensor.a", CONF_BATT_OUT: "sensor.b"},
+     {CONF_BATT_IN: ["sensor.a"], CONF_BATT_OUT: ["sensor.b"]}, False),
+], ids=["full_swap", "one_of_several", "added_only", "unchanged", "string_vs_list",
+        "string_unchanged"])
+def test_roles_swapped_detects_any_moved_entity(old, new, expected) -> None:
+    from custom_components.wolta.config_flow import _battery_roles_swapped
+    assert _battery_roles_swapped(old, new) is expected
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_shows_confirmation(hass: HomeAssistant, freezer) -> None:
+    """A swap over uploaded data stops before saving: the menu names the rebuilt period from
+    the replacement floor, recommends Battery direction and offers a way out."""
+    freezer.move_to("2026-10-30T12:00:00+00:00")
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry)
+    before = dict(entry.data)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "reconfigure_battery_swap"
+    assert result["menu_options"] == [
+        "reconfigure_battery_swap_confirm", "reconfigure_battery_swap_cancel"]
+    assert result["description_placeholders"] == {"start": "2026-05-02", "days": "182"}
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_requires_override(hass: HomeAssistant, freezer) -> None:
+    freezer.move_to("2026-10-30T12:00:00+00:00")
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry)
+    before = dict(entry.data)
+    result = await _open_swap_confirm(hass, entry)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_battery_swap_confirm"
+    assert result["description_placeholders"] == {
+        "start": "2026-05-02", "days": "182", "server_detail": ""}
+    # Unticked by default: no default yes.
+    assert result["data_schema"]({}) == {"confirm_swap": False}
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"confirm_swap": False})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"confirm_swap": "override_required"}
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_confirmed_updates_entry(hass: HomeAssistant) -> None:
+    """Ticked, the save is the one the form would have made: the sensors, the flip stamp, the
+    direction repair and its ignore flag gone."""
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)
+    entry = _make_mock_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_DIRECTION_ISSUE_IGNORED: True})
+    issue_id = _raise_direction_issue(hass, entry)
+    _swap_coordinator(entry)
+    result = await _open_swap_confirm(hass, entry)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"confirm_swap": True})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
+    assert updated.data[CONF_BATT_OUT] == ["sensor.battery_charge"]
+    assert updated.data[CONF_DIRECTION_FLIPPED_AT]
+    assert CONF_DIRECTION_ISSUE_IGNORED not in updated.data
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_cancel_aborts(hass: HomeAssistant) -> None:
+    from homeassistant.helpers import issue_registry as ir
+    entry = _make_mock_entry(hass)
+    issue_id = _raise_direction_issue(hass, entry)
+    _swap_coordinator(entry)
+    before = dict(entry.data)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "reconfigure_battery_swap_cancel"})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "battery_swap_cancelled"
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_without_swap_unchanged(hass: HomeAssistant) -> None:
+    """A new battery sensor that took no other's role, and every other change, saves at once
+    as before, uploaded data or not: an everyday save gets no confirmation."""
+    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    entry = _make_mock_entry(hass)
+    coordinator = _swap_coordinator(entry)
+    result = await _submit_reconfigure(hass, entry, **{
+        CONF_BATT_IN: ["sensor.battery_charge", "sensor.battery_charge_2"],
+        CONF_SOLAR: ["sensor.other_solar"]})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_charge", "sensor.battery_charge_2"]
+    assert updated.data[CONF_SOLAR] == ["sensor.other_solar"]
+    assert updated.data[CONF_DIRECTION_FLIPPED_AT]  # a battery sensor changed, as before
+    coordinator.replacement_floor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_without_uploads_saves_directly(hass: HomeAssistant) -> None:
+    """Nothing uploaded: the swap rebuilds nothing stored, so nothing is asked."""
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry, uploaded=False)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_aborts_when_the_period_is_unknown(hass: HomeAssistant) -> None:
+    """Uploaded, but the server's data_since not read yet: never a confirmation without a
+    period, so the flow aborts and asks to try again."""
+    from custom_components.wolta import coverage
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry, floor=coverage.MISSING)
+    before = dict(entry.data)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "battery_swap_period_unknown"
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attach, reason", [
+    (True, "battery_swap_period_unknown"),
+    (False, "battery_swap_not_loaded"),
+], ids=["period_unknown", "not_loaded"])
+async def test_reconfigure_swap_abort_sends_no_soc_absent_patch(
+        hass: HomeAssistant, attach, reason) -> None:
+    """The swap is decided before the soc_absent PATCH: an abort leaves the server as it was."""
+    from custom_components.wolta import coverage
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC_ABSENT: False})
+    if attach:
+        _swap_coordinator(entry, floor=coverage.MISSING)
+    mock_client = _mock_client()
+    result = await _reconfigure(hass, entry, mock_client, _reconfigure_input(**_SWAPPED))
+    assert result["reason"] == reason
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_without_rows_saves_directly(hass: HomeAssistant) -> None:
+    """Uploaded, but the server holds no rows (data_since null): the entity job rebuilds
+    nothing, so nothing is asked, as with nothing uploaded."""
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry, floor=None)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
+
+
+@contextlib.contextmanager
+def _swap_api(mock_client):
+    with patch("custom_components.wolta.config_flow._energy_dashboard_defaults",
+               return_value={}), \
+         patch("custom_components.wolta.config_flow.WoltaApiClient",
+               return_value=mock_client), \
+         patch("custom_components.wolta.config_flow.async_get_clientsession"):
+        yield
+
+
+async def _swap_with_absent_change(hass: HomeAssistant, entry):
+    """A swap that also ticks 'no SoC sensor' (stored False): up to the menu."""
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input=_reconfigure_input(**_SWAPPED))
+    assert result["step_id"] == "reconfigure_battery_swap"
+    return result
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_cancel_sends_no_patch(hass: HomeAssistant) -> None:
+    """The soc_absent PATCH waits for the confirmation: Cancel leaves the server as it was."""
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC_ABSENT: False})
+    _swap_coordinator(entry)
+    before = dict(entry.data)
+    mock_client = _mock_client()
+    with _swap_api(mock_client):
+        result = await _swap_with_absent_change(hass, entry)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "reconfigure_battery_swap_cancel"})
+    assert result["reason"] == "battery_swap_cancelled"
+    mock_client.patch_profile.assert_not_awaited()
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_confirmed_patches_then_saves(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC_ABSENT: False})
+    _swap_coordinator(entry)
+    mock_client = _mock_client()
+    with _swap_api(mock_client):
+        result = await _swap_with_absent_change(hass, entry)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "reconfigure_battery_swap_confirm"})
+        mock_client.patch_profile.assert_not_awaited()
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"confirm_swap": True})
+    assert result["reason"] == "reconfigure_successful"
+    mock_client.patch_profile.assert_awaited_once_with(TOKEN, soc_absent=True)
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_SOC_ABSENT] is True
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_refused_patch_reshows_confirm(hass: HomeAssistant) -> None:
+    """A refused PATCH at the confirmation saves nothing and shows the server's reason on
+    the confirmation itself."""
+    from custom_components.wolta.api import WoltaApiError
+    entry = _make_mock_entry(hass, extra_data={CONF_SOC_ABSENT: False})
+    _swap_coordinator(entry)
+    before = dict(entry.data)
+    mock_client = _mock_client()
+    mock_client.patch_profile = AsyncMock(
+        side_effect=WoltaApiError(_SERVER_REFUSAL, status=422))
+    with _swap_api(mock_client):
+        result = await _swap_with_absent_change(hass, entry)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "reconfigure_battery_swap_confirm"})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"confirm_swap": True})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_battery_swap_confirm"
+    assert result["errors"] == {"base": "server_rejected"}
+    assert result["description_placeholders"]["server_detail"] == (
+        "soc_absent kan bara ändras av ägaren")
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_aborts_while_not_loaded(hass: HomeAssistant) -> None:
+    """No coordinator: what is uploaded is not known, and the reload after a save would
+    rebuild it unasked. Other changes still save (test_reconfigure_* above)."""
+    entry = _make_mock_entry(hass)
+    before = dict(entry.data)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "battery_swap_not_loaded"
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_confirm_aborts_when_sensors_changed(
+        hass: HomeAssistant) -> None:
+    """Two dialogs open at once: the confirmation was computed from the battery sensors of
+    its own submit and saves nothing when they changed underneath."""
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry)
+    result = await _open_swap_confirm(hass, entry)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_BATT_IN: ["sensor.battery_charge_new"]})
+    changed = dict(entry.data)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"confirm_swap": True})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "battery_swap_changed"
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == changed
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_swap_confirm_keeps_data_written_meanwhile(
+        hass: HomeAssistant) -> None:
+    """The save merges into the entry as it is at confirm time: a key the coordinator wrote
+    while the dialog was open (a mirrored profile field) is not reverted."""
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry)
+    result = await _open_swap_confirm(hass, entry)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BATTERY_KWH: 30.0})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"confirm_swap": True})
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data[CONF_BATTERY_KWH] == 30.0
+    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
 
 
 # ---------------------------------------------------------------------------

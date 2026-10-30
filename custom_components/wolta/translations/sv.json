@@ -448,6 +448,24 @@
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
         }
       },
+      "reconfigure_battery_swap": {
+        "title": "Byta sensorer för laddning och urladdning?",
+        "description": "Du har flyttat en sensor mellan laddning och urladdning. Då bygger Wolta om båda batterifälten i lagrad data från tidigast {start}, där sensorerna har statistik, fram till nu (högst {days} dygn).\n\nÄr laddat och urladdat förväxlade, använd i stället Konfigurera → Batteriets riktning. Den byter bara det som är lagrat, visar perioden och kan ångras.",
+        "menu_options": {
+          "reconfigure_battery_swap_confirm": "Byt roller ändå",
+          "reconfigure_battery_swap_cancel": "Avbryt – byt inga sensorer"
+        }
+      },
+      "reconfigure_battery_swap_confirm": {
+        "title": "Bygga om batteridata?",
+        "description": "Båda batterifälten i lagrad data byggs om från tidigast {start}, där de nya sensorerna har statistik, fram till nu (högst {days} dygn). Dina övriga ändringar i formuläret sparas samtidigt.",
+        "data": {
+          "confirm_swap": "Byt roller ändå – bygg om batteridata från datumet ovan"
+        },
+        "data_description": {
+          "confirm_swap": "Kryssa bara om sensorerna själva är tilldelade åt fel håll. Är det bara lagrad data som är förväxlad, använd Konfigurera → Batteriets riktning."
+        }
+      },
       "view_only": {
         "title": "Lägg till i visningsläge",
         "description": "Anläggningen strömmar redan sin data till wolta.se via sin egen koppling (Sonnen-webhook eller Reduxi), så Home Assistant kommer inte att ladda upp något till den. Du får Wolta-sensorerna — betyg, batterivärde, besparing, IRR, payback — och omräkningsknappen. Allt annat hanteras på wolta.se. Skicka för att lägga till anläggningen i visningsläge."
@@ -486,13 +504,18 @@
       "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
       "control_system_name_required": "Ange styrsystemets namn när du valt Annat.",
       "link_is_read_link": "Det där är anläggningens läslänk. Att koppla integrationen kräver ägar-tokenet – om du har tappat det, koppla anläggningen till ett konto och skapa ett nytt token där.",
-      "token_other_plant": "Den token hör till en annan anläggning. Klistra in den token du skapade för den här anläggningen."
+      "token_other_plant": "Den token hör till en annan anläggning. Klistra in den token du skapade för den här anläggningen.",
+      "override_required": "Kryssa i rutan för att byta roller ändå, eller stäng dialogen."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
       "reauth_successful": "Återautentiseringen lyckades",
       "reconfigure_successful": "Sensorerna uppdaterade. De ändrade sensorernas värden ersätts i historiken i bakgrunden.",
-      "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen."
+      "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen.",
+      "battery_swap_cancelled": "Inga sensorer ändrades. För att byta plats på laddat och urladdat i lagrad data, använd Konfigurera → Batteriets riktning.",
+      "battery_swap_period_unknown": "Wolta har ännu inte läst vilken period den har data för och kan inte visa vad bytet bygger om. Försök igen om några minuter.",
+      "battery_swap_not_loaded": "Wolta körs inte just nu, så det går inte att visa vad som byggs om när en sensor flyttas mellan laddning och urladdning. Försök igen när integrationen har startat, eller läs in Wolta igen under Inställningar → Enheter och tjänster.",
+      "battery_swap_changed": "Batterisensorerna ändrades medan dialogen var öppen. Inget sparades; öppna Konfigurera om på nytt."
     }
   },
   "options": {

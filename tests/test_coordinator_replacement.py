@@ -3343,6 +3343,30 @@ async def test_direction_effect_none_without_bookmark(hass: HomeAssistant, mock_
 
 
 @pytest.mark.asyncio
+async def test_replacement_floor_known_only_with_data_since(hass: HomeAssistant, mock_entry):
+    """The floor Reconfigure names before a role swap, as the entity job plans it
+    (_plan_since): _replacement_floor of the latest profile's data_since; MISSING while that
+    is unknown, None when the server holds no rows (nothing is rebuilt)."""
+    from custom_components.wolta import coverage
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[])
+    assert coordinator.replacement_floor() is coverage.MISSING  # no profile read yet
+
+    await coordinator.async_check_profile_sync()
+    assert coordinator.replacement_floor() == coordinator._replacement_floor(
+        datetime.fromisoformat(D_SINCE))
+
+    client.get_profile.return_value = {**BASE_PROFILE, "data_since": None}
+    await coordinator.async_check_profile_sync()
+    assert coordinator.replacement_floor() is None
+
+    client.get_profile.return_value = dict(BASE_PROFILE)  # an older server: no data_since
+    await coordinator.async_check_profile_sync()
+    assert coordinator.replacement_floor() is coverage.MISSING
+
+
+@pytest.mark.asyncio
 async def test_role_swap_entity_job_rebuilds_from_floor(hass: HomeAssistant, mock_entry):
     """Characterization: swapping the charge and discharge sensors under Reconfigure is a
     sensor change of both battery streams. The entity job rebuilds both battery fields

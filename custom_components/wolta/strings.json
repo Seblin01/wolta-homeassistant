@@ -448,6 +448,24 @@
           "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
         }
       },
+      "reconfigure_battery_swap": {
+        "title": "Swap the charge and discharge sensors?",
+        "description": "You moved a sensor between charge and discharge. Wolta then rebuilds both battery fields of the stored data from {start} at the earliest, where the sensors have statistics, up to now ({days} days at most).\n\nIf charge and discharge are mixed up, use Configure → Battery direction instead. It swaps only what is stored, shows the period and can be undone.",
+        "menu_options": {
+          "reconfigure_battery_swap_confirm": "Swap the roles anyway",
+          "reconfigure_battery_swap_cancel": "Cancel – change no sensors"
+        }
+      },
+      "reconfigure_battery_swap_confirm": {
+        "title": "Rebuild the battery data?",
+        "description": "Both battery fields of the stored data are rebuilt from {start} at the earliest, where the new sensors have statistics, up to now ({days} days at most). Your other changes in the form are saved at the same time.",
+        "data": {
+          "confirm_swap": "Swap the roles anyway – rebuild the battery data from the date above"
+        },
+        "data_description": {
+          "confirm_swap": "Tick only if the sensors themselves were assigned the wrong way round. If only the stored data is mixed up, use Configure → Battery direction."
+        }
+      },
       "view_only": {
         "title": "Add in view-only mode",
         "description": "This plant already streams its data to wolta.se through its own connection (Sonnen webhook or Reduxi), so Home Assistant will not upload anything to it. You get the Wolta sensors — grade, battery value, savings, IRR, payback — and the recompute button. Everything else is managed on wolta.se. Submit to add the plant in view-only mode."
@@ -486,13 +504,18 @@
       "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
       "control_system_name_required": "Enter the control system's name when you have chosen Other.",
       "link_is_read_link": "That is the plant's read link. Linking the integration needs the owner token – if you have lost it, link the plant to an account and create a new token there.",
-      "token_other_plant": "That token belongs to a different plant. Paste the token you created for this plant."
+      "token_other_plant": "That token belongs to a different plant. Paste the token you created for this plant.",
+      "override_required": "Tick the box to swap the roles anyway, or close the dialog."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful",
       "reconfigure_successful": "Sensors updated. The changed sensors' values are being replaced in your history in the background.",
-      "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again."
+      "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again.",
+      "battery_swap_cancelled": "No sensors were changed. To swap charged and discharged in the stored data, use Configure → Battery direction.",
+      "battery_swap_period_unknown": "Wolta has not yet read which period it holds data for, so it cannot show what the swap would rebuild. Try again in a few minutes.",
+      "battery_swap_not_loaded": "Wolta is not running right now, so it cannot show what moving a sensor between charge and discharge would rebuild. Try again once the integration has started, or reload Wolta under Settings → Devices & services.",
+      "battery_swap_changed": "The battery sensors changed while this dialog was open. Nothing was saved; open Reconfigure again."
     }
   },
   "options": {
