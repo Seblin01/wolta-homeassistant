@@ -342,7 +342,7 @@
     },
     "battery_direction_refused": {
       "title": "Wolta: laddning och urladdning vändes inte",
-      "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
+      "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Det som redan hunnit bytas ligger kvar. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
     }
   },
   "config": {
@@ -450,20 +450,20 @@
       },
       "reconfigure_battery_swap": {
         "title": "Byta sensorer för laddning och urladdning?",
-        "description": "Du har flyttat en sensor mellan laddning och urladdning. Då bygger Wolta om båda batterifälten i lagrad data från tidigast {start}, där sensorerna har statistik, fram till nu (högst {days} dygn).\n\nÄr laddat och urladdat förväxlade, använd i stället Konfigurera → Batteriets riktning. Den byter bara det som är lagrat, visar perioden och kan ångras.",
+        "description": "Du har flyttat en sensor mellan laddning och urladdning. Då bygger Wolta om båda batterifälten i lagrad data från tidigast {start}, där sensorerna har statistik, fram till nu (högst {days} dygn).\n\nGör det bara om fel sensor är vald för laddning eller urladdning. Rapporterar sensorerna laddning som urladdning, använd i stället Konfigurera → Batteriets riktning. Den byter bara det som är lagrat, visar perioden och kan ångras.",
         "menu_options": {
           "reconfigure_battery_swap_confirm": "Byt roller ändå",
-          "reconfigure_battery_swap_cancel": "Avbryt – byt inga sensorer"
+          "reconfigure_battery_swap_cancel": "Avbryt: byt inga sensorer"
         }
       },
       "reconfigure_battery_swap_confirm": {
         "title": "Bygga om batteridata?",
         "description": "Båda batterifälten i lagrad data byggs om från tidigast {start}, där de nya sensorerna har statistik, fram till nu (högst {days} dygn). Dina övriga ändringar i formuläret sparas samtidigt.",
         "data": {
-          "confirm_swap": "Byt roller ändå – bygg om batteridata från datumet ovan"
+          "confirm_swap": "Byt roller ändå: bygg om batteridata från datumet ovan"
         },
         "data_description": {
-          "confirm_swap": "Kryssa bara om sensorerna själva är tilldelade åt fel håll. Är det bara lagrad data som är förväxlad, använd Konfigurera → Batteriets riktning."
+          "confirm_swap": "Kryssa bara om fel sensor är vald för laddning eller urladdning. Rapporterar sensorerna laddning som urladdning, använd Konfigurera → Batteriets riktning."
         }
       },
       "view_only": {
@@ -595,16 +595,16 @@
       },
       "battery_direction": {
         "title": "Batteriets riktning",
-        "description": "Byter plats på laddat och urladdat i den data Wolta har sparad, för den period du väljer. Använd det om sensorerna för laddning och urladdning är förväxlade. Data som laddas upp från och med nu följer också inställningen. Varje val visar perioden innan något ändras.\n\nJust nu: {desired}\n\n{verdict}",
+        "description": "Byter plats på laddat och urladdat i den data Wolta har sparad, för den period du väljer. Använd det om sensorerna rapporterar laddning som urladdning och tvärtom. Data som laddas upp från och med nu följer också inställningen. Varje val visar perioden innan något ändras.\n\nJust nu: {desired}\n\n{verdict}",
         "menu_options": {
-          "direction_flip_all": "Kasta om hela historiken",
+          "direction_flip_all": "Byt i hela historiken",
           "direction_flip_from": "Byt från ett datum",
           "direction_reset": "Lagra allt som sensorerna visar det"
         }
       },
       "direction_flip_from": {
         "title": "Byt från ett datum",
-        "description": "Laddat och urladdat byter plats från början av dagen du väljer (Home Assistants tidszon) och framåt. Det som redan är omkastat efter dagen vänds tillbaka. Du ser perioden innan något ändras.",
+        "description": "Laddat och urladdat byter plats från början av dagen du väljer (Home Assistants tidszon) och framåt. Byter Wolta redan efter den dagen, slutar den byta där. Du ser perioden innan något ändras.",
         "data": {
           "start": "Från"
         }
@@ -613,7 +613,7 @@
         "title": "Byta plats på laddat och urladdat?",
         "description": "Laddat och urladdat byter plats i lagrad data {periods} ({days} dygn). Inget skickas om. Du kan ångra genom att välja det motsatta under Batteriets riktning. Wolta sparar de ersatta värdena i 90 dagar.{gate}",
         "data": {
-          "direction_override": "Ändra ändå – jag har kontrollerat vilken riktning som är rätt"
+          "direction_override": "Ändra ändå: jag har kontrollerat vilken riktning som är rätt"
         },
         "data_description": {
           "direction_override": "Kryssa bara om du har kontrollerat vilken riktning som är rätt, till exempel att sensorn för laddningsnivå är fel."
@@ -623,7 +623,7 @@
         "title": "Byta plats på laddat och urladdat?",
         "description": "Ingen lagrad data ändras. Bara data som laddas upp från och med nu följer den nya inställningen. Inget skickas om. Du kan ångra genom att välja det motsatta under Batteriets riktning.{gate}",
         "data": {
-          "direction_override": "Ändra ändå – jag har kontrollerat vilken riktning som är rätt"
+          "direction_override": "Ändra ändå: jag har kontrollerat vilken riktning som är rätt"
         },
         "data_description": {
           "direction_override": "Kryssa bara om du har kontrollerat vilken riktning som är rätt, till exempel att sensorn för laddningsnivå är fel."
@@ -655,7 +655,8 @@
       "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
       "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare.",
-      "override_required": "Kryssa i rutan för att byta ändå, eller stäng dialogen."
+      "override_required": "Kryssa i rutan för att byta ändå, eller stäng dialogen.",
+      "invalid_date": "Ange ett giltigt datum."
     },
     "abort": {
       "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare.",

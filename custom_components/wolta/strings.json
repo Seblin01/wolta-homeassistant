@@ -342,7 +342,7 @@
     },
     "battery_direction_refused": {
       "title": "Wolta: charging and discharging were not swapped",
-      "description": "You changed the battery direction, but the battery's state of charge shows that the stored direction is right: it matched on {ok_days} days and was reversed on {reversed_days}, as of {as_of}. Wolta therefore stopped the change, and the setting now matches the stored history again. If you know the state-of-charge sensor is wrong, you can make the change anyway under Configure → Battery direction."
+      "description": "You changed the battery direction, but the battery's state of charge shows that the stored direction is right: it matched on {ok_days} days and was reversed on {reversed_days}, as of {as_of}. Wolta therefore stopped the change, and the setting now matches the stored history again. What had already been swapped stays swapped. If you know the state-of-charge sensor is wrong, you can make the change anyway under Configure → Battery direction."
     }
   },
   "config": {
@@ -450,20 +450,20 @@
       },
       "reconfigure_battery_swap": {
         "title": "Swap the charge and discharge sensors?",
-        "description": "You moved a sensor between charge and discharge. Wolta then rebuilds both battery fields of the stored data from {start} at the earliest, where the sensors have statistics, up to now ({days} days at most).\n\nIf charge and discharge are mixed up, use Configure → Battery direction instead. It swaps only what is stored, shows the period and can be undone.",
+        "description": "You moved a sensor between charge and discharge. Wolta then rebuilds both battery fields of the stored data from {start} at the earliest, where the sensors have statistics, up to now ({days} days at most).\n\nDo this only if the wrong sensor is selected for charge or discharge. If the sensors report charging as discharging, use Configure → Battery direction instead. It swaps only what is stored, shows the period and can be undone.",
         "menu_options": {
           "reconfigure_battery_swap_confirm": "Swap the roles anyway",
-          "reconfigure_battery_swap_cancel": "Cancel – change no sensors"
+          "reconfigure_battery_swap_cancel": "Cancel: change no sensors"
         }
       },
       "reconfigure_battery_swap_confirm": {
         "title": "Rebuild the battery data?",
         "description": "Both battery fields of the stored data are rebuilt from {start} at the earliest, where the new sensors have statistics, up to now ({days} days at most). Your other changes in the form are saved at the same time.",
         "data": {
-          "confirm_swap": "Swap the roles anyway – rebuild the battery data from the date above"
+          "confirm_swap": "Swap the roles anyway: rebuild the battery data from the date above"
         },
         "data_description": {
-          "confirm_swap": "Tick only if the sensors themselves were assigned the wrong way round. If only the stored data is mixed up, use Configure → Battery direction."
+          "confirm_swap": "Tick only if the wrong sensor is selected for charge or discharge. If the sensors report charging as discharging, use Configure → Battery direction."
         }
       },
       "view_only": {
@@ -595,16 +595,16 @@
       },
       "battery_direction": {
         "title": "Battery direction",
-        "description": "Swaps charged and discharged in the data Wolta has stored, for the period you choose. Use it if the charge and discharge sensors are mixed up. Data uploaded from now on follows the setting too. Every choice shows the period before anything changes.\n\nNow: {desired}\n\n{verdict}",
+        "description": "Swaps charged and discharged in the data Wolta has stored, for the period you choose. Use it if the sensors report charging as discharging and the other way round. Data uploaded from now on follows the setting too. Every choice shows the period before anything changes.\n\nNow: {desired}\n\n{verdict}",
         "menu_options": {
-          "direction_flip_all": "Reverse the whole history",
+          "direction_flip_all": "Swap for the whole history",
           "direction_flip_from": "Swap from a date",
           "direction_reset": "Store everything as the sensors report it"
         }
       },
       "direction_flip_from": {
         "title": "Swap from a date",
-        "description": "Charged and discharged swap places from the start of the day you choose (Home Assistant's time zone) onward. What is already reversed after that day turns back. You see the period before anything changes.",
+        "description": "Charged and discharged swap places from the start of the day you choose (Home Assistant's time zone) onward. Where Wolta already swaps after that day, it stops swapping there. You see the period before anything changes.",
         "data": {
           "start": "From"
         }
@@ -613,7 +613,7 @@
         "title": "Swap charged and discharged?",
         "description": "Charged and discharged swap places in the stored data for {periods} ({days} days). Nothing is re-sent. You can undo it by choosing the opposite under Battery direction. Wolta keeps the replaced values for 90 days.{gate}",
         "data": {
-          "direction_override": "Change anyway – I have checked which direction is right"
+          "direction_override": "Change anyway: I have checked which direction is right"
         },
         "data_description": {
           "direction_override": "Tick only if you have checked which direction is right, for example that the state-of-charge sensor is wrong."
@@ -623,7 +623,7 @@
         "title": "Swap charged and discharged?",
         "description": "No stored data changes. Only data uploaded from now on follows the new setting. Nothing is re-sent. You can undo it by choosing the opposite under Battery direction.{gate}",
         "data": {
-          "direction_override": "Change anyway – I have checked which direction is right"
+          "direction_override": "Change anyway: I have checked which direction is right"
         },
         "data_description": {
           "direction_override": "Tick only if you have checked which direction is right, for example that the state-of-charge sensor is wrong."
@@ -655,7 +655,8 @@
       "server_rejected": "Wolta refused the change (reason in Swedish): {server_detail}",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
       "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner.",
-      "override_required": "Tick the box to swap anyway, or close the dialog."
+      "override_required": "Tick the box to swap anyway, or close the dialog.",
+      "invalid_date": "Enter a valid date."
     },
     "abort": {
       "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later.",

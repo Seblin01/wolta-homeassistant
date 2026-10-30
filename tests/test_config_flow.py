@@ -4862,6 +4862,20 @@ async def test_reconfigure_swap_aborts_when_the_period_is_unknown(hass: HomeAssi
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_swap_with_uploads_and_no_rows_known_aborts(
+        hass: HomeAssistant) -> None:
+    """Uploaded, but the latest data_since said the server holds no rows (read before the
+    first upload): the swap is never saved without a confirmation that names a period."""
+    entry = _make_mock_entry(hass)
+    _swap_coordinator(entry, uploaded=True, floor=None)
+    before = dict(entry.data)
+    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "battery_swap_period_unknown"
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("attach, reason", [
     (True, "battery_swap_period_unknown"),
     (False, "battery_swap_not_loaded"),
@@ -4877,19 +4891,6 @@ async def test_reconfigure_swap_abort_sends_no_soc_absent_patch(
     result = await _reconfigure(hass, entry, mock_client, _reconfigure_input(**_SWAPPED))
     assert result["reason"] == reason
     mock_client.patch_profile.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_reconfigure_swap_without_rows_saves_directly(hass: HomeAssistant) -> None:
-    """Uploaded, but the server holds no rows (data_since null): the entity job rebuilds
-    nothing, so nothing is asked, as with nothing uploaded."""
-    entry = _make_mock_entry(hass)
-    _swap_coordinator(entry, floor=None)
-    result = await _submit_reconfigure(hass, entry, **_SWAPPED)
-    assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "reconfigure_successful"
-    updated = hass.config_entries.async_get_entry(entry.entry_id)
-    assert updated.data[CONF_BATT_IN] == ["sensor.battery_discharge"]
 
 
 @contextlib.contextmanager
@@ -5155,13 +5156,19 @@ async def test_direction_aborts_while_change_pending(hass: HomeAssistant) -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runtime", ["not_fetched", "no_coordinator"])
+@pytest.mark.parametrize("runtime", ["not_fetched", "no_coordinator", "no_betyg",
+                                     "betyg_not_a_dict"])
 async def test_direction_aborts_without_results(hass: HomeAssistant, runtime: str) -> None:
     """After a restart, before the first fetch, there is no verdict to judge the change
-    against: the step does not guess."""
+    against: the step does not guess. Results without a grade are no grade either."""
+    from types import SimpleNamespace
     entry = _direction_entry(hass)
     if runtime == "not_fetched":
         _direction_coordinator(entry, results=False)
+    elif runtime == "no_betyg":
+        _direction_coordinator(entry).data = SimpleNamespace(results={"status": "done"})
+    elif runtime == "betyg_not_a_dict":
+        _direction_coordinator(entry).data = SimpleNamespace(results={"betyg": None})
     result = await _open_direction(hass, entry)
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "results_not_loaded"
@@ -5169,16 +5176,16 @@ async def test_direction_aborts_without_results(hass: HomeAssistant, runtime: st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("desired, needle", [
-    ([], "Nothing is reversed"),
-    ([[None, None]], "reversed for the whole history"),
-    ([["2026-09-30T22:00:00+00:00", None]], "reversed from 2026-10-01."),
+    ([], "Wolta stores everything as the sensors report it."),
+    ([[None, None]], "Wolta swaps charged and discharged for the whole history."),
+    ([["2026-09-30T22:00:00+00:00", None]], "Wolta swaps charged and discharged from 2026-10-01."),
     # Bounds at local midnight: dates, the end as the last day included.
     ([["2026-09-30T22:00:00+00:00", "2026-10-02T22:00:00+00:00"],
       ["2026-10-09T22:00:00+00:00", "2026-10-10T22:00:00+00:00"]],
-     "reversed for 2026-10-01 – 2026-10-02, 2026-10-10."),
+     "discharged for 2026-10-01 – 2026-10-02, 2026-10-10."),
     # A bound inside a day: date and time, the end exclusive.
     ([["2026-09-28T13:00:00+00:00", "2026-10-02T22:00:00+00:00"]],
-     "reversed for 2026-09-28 15:00 → 2026-10-03 00:00."),
+     "discharged for 2026-09-28 15:00 → 2026-10-03 00:00."),
 ], ids=["none", "all", "from", "periods_days", "periods_times"])
 async def test_direction_menu_describes_desired_and_verdict(
         hass: HomeAssistant, desired, needle) -> None:
@@ -5201,8 +5208,8 @@ async def test_direction_menu_describes_desired_and_verdict(
     (_block("ok"), "2026-10-29T12:00:00+00:00",
      "The battery's state of charge says the direction is right: checked 30 days, "
      "2 reversed, as of 2026-10-29. The check predates your latest change."),
-    (None, None, "Wolta has no state-of-charge check yet."),
-    (_block("unknown"), None, "Wolta has no state-of-charge check yet."),
+    (None, None, "Wolta cannot check the direction against the state of charge."),
+    (_block("unknown"), None, "Wolta cannot check the direction against the state of charge."),
 ], ids=["stale", "no_block", "unknown"])
 async def test_direction_menu_says_a_stale_or_missing_verdict(
         hass: HomeAssistant, block, changed_at, expected) -> None:
@@ -5546,6 +5553,93 @@ async def test_direction_flip_from_uses_local_midnight(
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert hass.config_entries.async_get_entry(entry.entry_id).data[
         CONF_INVERT_INTERVALS] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown, now", [("windows", []), ([], "windows")],
+                         ids=["stored_then_none", "none_then_stored"])
+async def test_direction_confirm_aborts_when_the_effect_changed_kind(
+        hass: HomeAssistant, shown, now) -> None:
+    """The form said stored rows change and on submit none would, or the other way round:
+    what the owner confirmed is not what would happen, so nothing is applied."""
+    from datetime import datetime, timezone
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    windows = [(datetime(2026, 9, 30, 22, tzinfo=timezone.utc),
+                datetime(2026, 10, 2, 22, tzinfo=timezone.utc))]
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(
+        entry, effect=windows if shown == "windows" else shown)
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert result["step_id"] == (
+        "direction_confirm" if shown == "windows" else "direction_confirm_unstored")
+    coordinator.direction_effect.return_value = windows if now == "windows" else now
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_changed"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_INVERT_INTERVALS] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_confirm_same_kind_on_submit_applies(hass: HomeAssistant) -> None:
+    """A period that grew a little (the bookmark moved on) is the same kind of change."""
+    from datetime import datetime, timezone
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    utc = timezone.utc
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(
+        entry, effect=[(datetime(2026, 9, 30, 22, tzinfo=utc), datetime(2026, 10, 2, 22, tzinfo=utc))])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    coordinator.direction_effect.return_value = [
+        (datetime(2026, 9, 30, 22, tzinfo=utc), datetime(2026, 10, 2, 23, tzinfo=utc))]
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[
+        CONF_INVERT_INTERVALS] == [[None, None]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone, day, expected", [
+    # +05:30: local midnight is 18:30 UTC the day before; the start is the first whole
+    # UTC hour after it, never 18:00 (that is still 2026-09-30 locally).
+    ("Asia/Kolkata", "2026-10-01", "2026-09-30T19:00:00+00:00"),
+    # +05:45
+    ("Asia/Kathmandu", "2026-10-01", "2026-09-30T19:00:00+00:00"),
+    # -03:30 (Newfoundland, summer time -02:30): 02:30 UTC -> 03:00 UTC.
+    ("America/St_Johns", "2026-10-01", "2026-10-01T03:00:00+00:00"),
+    # A whole-hour zone keeps local midnight exactly.
+    ("Europe/Stockholm", "2026-10-01", "2026-09-30T22:00:00+00:00"),
+], ids=["kolkata", "kathmandu", "st_johns", "stockholm"])
+async def test_direction_flip_from_never_starts_in_the_day_before(
+        hass: HomeAssistant, zone, day, expected) -> None:
+    from custom_components.wolta import intervals
+    from homeassistant.util import dt as dt_util
+    await hass.config.async_set_time_zone(zone)
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_from")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"start": day})
+    assert result["step_id"] == "direction_confirm_unstored"
+    target = coordinator.direction_effect.call_args.args[0]
+    assert intervals.dump(target) == [[expected, None]]
+    assert dt_util.as_local(target[0][0]).date().isoformat() == day
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["2026-02-30", "inte ett datum", None])
+async def test_direction_flip_from_invalid_date_shows_an_error(
+        hass: HomeAssistant, value) -> None:
+    """A date that cannot be read is said so on the form, not silently shown again."""
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_from")
+    # The selector validates in the frontend; the step's own check is called directly.
+    flow = hass.config_entries.options._progress[result["flow_id"]]
+    result = await flow.async_step_direction_flip_from({"start": value})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "direction_flip_from"
+    assert result["errors"] == {"start": "invalid_date"}
+    coordinator.direction_effect.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

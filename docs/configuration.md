@@ -46,15 +46,15 @@ The battery's charge/discharge direction is not part of **Settings** (v0.56.0+):
 
 ### Battery direction
 
-If the battery charge and discharge sensors are mixed up, open **Configure → Battery direction** (v0.56.0+, needs Wolta API 0.124.0 or newer). It is not offered in view-only mode. The step shows which periods are reversed now and what Wolta's state-of-charge check says (how many days it has checked, how many of them were reversed, and when), and offers:
+If the battery sensors report charging as discharging and the other way round, open **Configure → Battery direction** (v0.56.0+, needs Wolta API 0.124.0 or newer). It is not offered in view-only mode. The step shows which periods Wolta swaps now and what Wolta's state-of-charge check says (how many days it has checked, how many of them were reversed, and when), and offers:
 
-- **Reverse the whole history**, shown when not everything is reversed already;
-- **Swap from a date**: charge and discharge swap places from the start of the day you choose (in Home Assistant's time zone) onward. What is already reversed after that day turns back;
-- **Store everything as the sensors report it**, shown when something is reversed.
+- **Swap for the whole history**, shown when Wolta does not already swap all of it;
+- **Swap from a date**: charge and discharge swap places from the start of the day you choose (in Home Assistant's time zone) onward. Where Wolta already swaps after that day, it stops swapping there;
+- **Store everything as the sensors report it**, shown when Wolta swaps some of it.
 
 Each choice ends in a confirmation that names the stored period that will change and how many days it covers, or says that no stored data changes when Wolta holds none for it. Nothing is re-sent: the server swaps the stored values, keeps the replaced ones for 90 days, and new uploads follow the setting too. You can undo a change by choosing the opposite here.
 
-When Wolta has a current state-of-charge check, the confirmation adds a box, **Change anyway – I have checked which direction is right**, which is never ticked in advance. Tick it only if you have checked which direction is right, for example that the state-of-charge sensor is wrong. Without it, Wolta refuses a swap that goes against the state of charge, and a repair says so (see [Troubleshooting](troubleshooting.md)). A check made before your latest change does not count; the step says so. If a direction change is still being applied, or the integration has not loaded your grade yet since Home Assistant started, the step asks you to try again later.
+When Wolta has a current state-of-charge check, the confirmation adds a box, **Change anyway: I have checked which direction is right**, which is never ticked in advance. Tick it only if you have checked which direction is right, for example that the state-of-charge sensor is wrong. Without it, Wolta refuses a swap that goes against the state of charge, and a repair says so (see [Troubleshooting](troubleshooting.md)). A check made before your latest change does not count; the step says so. If a direction change is still being applied, or the integration has not loaded your grade yet since Home Assistant started, the step asks you to try again later.
 
 When the direction repair is shown, prefer it: it swaps exactly the period Wolta has found reversed.
 
@@ -68,7 +68,7 @@ A correction recalculates the grade and the economics against the new price seri
 
 **Changing energy sensors:** use the **Reconfigure** option (Settings → Devices & Services → Wolta → three-dot menu → Reconfigure) to pick new sensors. The integration reads the changed sensors' statistics and sends their values for the affected range, starting from the new sensor's first full hour of statistics; Wolta replaces only those values and recomputes the grade — no need to remove the integration. Removing a sensor never rewrites history. See [Correcting stored history](#correcting-stored-history).
 
-Moving a sensor between battery charge and battery discharge (v0.56.0+) rebuilds both battery values of all the stored history a correction may touch (see *Older history* below), wherever the sensors have statistics. Reconfigure therefore asks first: it shows the earliest date and the number of days, recommends **Configure → Battery direction** instead, and only saves after you choose to swap the roles anyway and tick the confirmation. Cancelling changes nothing. Use the role swap only when the sensors themselves were assigned the wrong way round; when only the stored data is mixed up, Battery direction swaps it without reading the statistics again and can be undone.
+Moving a sensor between battery charge and battery discharge (v0.56.0+) rebuilds both battery values of all the stored history a correction may touch (see *Older history* below), wherever the sensors have statistics. Reconfigure therefore asks first: it shows the earliest date and the number of days, recommends **Configure → Battery direction** instead, and only saves after you choose to swap the roles anyway and tick the confirmation. Cancelling changes nothing. Use the role swap only when the wrong sensor is selected for charge or discharge. When the sensors report charging as discharging, use Battery direction: it swaps the stored data without reading the statistics again and can be undone.
 
 ### Correcting stored history
 

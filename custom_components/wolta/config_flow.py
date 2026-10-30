@@ -579,19 +579,20 @@ def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
 # Batteriets riktning (options): the sentences that depend on the desired direction and the
 # server's SoC verdict, in the user's HA language (sv/en, else English), like _WEB_SUMMARY: a
 # step has one description, so what varies is passed in as a placeholder. Dates are local and
-# language-neutral. The verdict never shows a count of ok days.
+# language-neutral. The verdict never shows a count of ok days. The setting is described as
+# what Wolta does ("swaps"); "reversed" is kept for the SoC verdict alone.
 _DIRECTION_TEXT: dict[str, dict[str, str]] = {
     "sv": {
-        "none": "Inget är omkastat, data lagras som sensorerna visar den.",
-        "all": "Laddat och urladdat är omkastade i hela historiken.",
-        "from": "Laddat och urladdat är omkastade från {start}.",
-        "periods": "Laddat och urladdat är omkastade för {periods}.",
+        "none": "Wolta lagrar allt som sensorerna visar det.",
+        "all": "Wolta byter plats på laddat och urladdat i hela historiken.",
+        "from": "Wolta byter plats på laddat och urladdat från {start}.",
+        "periods": "Wolta byter plats på laddat och urladdat för {periods}.",
         "ok": ("Batteriets laddningsnivå säger att riktningen stämmer: kontrollerat "
                "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
         "reversed": ("Batteriets laddningsnivå säger att riktningen är omkastad: kontrollerat "
                      "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
         "stale": " Kontrollen är från före din senaste ändring.",
-        "no_check": "Wolta har ingen kontroll mot laddningsnivån än.",
+        "no_check": "Wolta kan inte kontrollera riktningen mot laddningsnivån.",
         # The gate's lead, true for each state: a swap against ok/verified is refused by the
         # server; with nothing stored to swap nothing is refused, but it still goes against
         # the check; against reversed the owner confirms having checked the sensors.
@@ -605,16 +606,16 @@ _DIRECTION_TEXT: dict[str, dict[str, str]] = {
                         "den period Wolta har sett."),
     },
     "en": {
-        "none": "Nothing is reversed; data is stored as the sensors report it.",
-        "all": "Charged and discharged are reversed for the whole history.",
-        "from": "Charged and discharged are reversed from {start}.",
-        "periods": "Charged and discharged are reversed for {periods}.",
+        "none": "Wolta stores everything as the sensors report it.",
+        "all": "Wolta swaps charged and discharged for the whole history.",
+        "from": "Wolta swaps charged and discharged from {start}.",
+        "periods": "Wolta swaps charged and discharged for {periods}.",
         "ok": ("The battery's state of charge says the direction is right: checked "
                "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
         "reversed": ("The battery's state of charge says the direction is reversed: checked "
                      "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
         "stale": " The check predates your latest change.",
-        "no_check": "Wolta has no state-of-charge check yet.",
+        "no_check": "Wolta cannot check the direction against the state of charge.",
         "gate_swap": ("\n\n{verdict} Wolta refuses a swap that goes against the state of "
                       "charge unless you tick the box below."),
         "gate_unstored": ("\n\n{verdict} The change goes against the state of charge; tick the "
@@ -1406,9 +1407,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                         return self.async_abort(reason="battery_swap_not_loaded")
                     if coordinator.has_uploaded():
                         floor = coordinator.replacement_floor()
-                        if floor is coverage.MISSING:
+                        if floor is coverage.MISSING or floor is None:
                             # Never a confirmation without a period: the profile poll
-                            # brings data_since shortly.
+                            # brings data_since shortly. None ("no rows") although rows
+                            # are uploaded counts as unknown too.
                             return self.async_abort(reason="battery_swap_period_unknown")
                         swap_floor = floor
                 # soc_absent is mirrored from the server (coordinator _PROFILE_SYNC_KEYS),
@@ -1538,6 +1540,11 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # so it is not raised again until the server has recounted.
         # Order-independent and normalised like the coordinator (a v0.1.0 entry
         # stores a plain string), so only a real change of sensors stamps.
+        # CONF_DIRECTION_CHANGED_AT is deliberately not set: it dates changes of the desired
+        # direction, and a sensor change is none. A SoC verdict counted before the entity job
+        # therefore still counts as current, and Battery direction may show its gate when
+        # the rebuilt rows no longer need it. That is the conservative side, and the next
+        # recount settles it.
         if _battery_sensors(data_updates) != _battery_sensors(entry.data):
             new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
             ir.async_delete_issue(
@@ -2055,6 +2062,9 @@ class WoltaOptionsFlow(OptionsFlow):
         self._direction_target: list[intervals.Interval] | None = None  # the chosen change
         # The desired direction the change was chosen from: another dialog may change it.
         self._direction_from: list[intervals.Interval] | None = None
+        # Whether the confirmation shown said stored rows change (direction_confirm) or not
+        # (direction_confirm_unstored); a submit that would do the other aborts.
+        self._direction_shown_stored: bool | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -2194,15 +2204,14 @@ class WoltaOptionsFlow(OptionsFlow):
 
     def _direction_verdict(self) -> Verdict | None:
         """The SoC verdict of the grade the coordinator holds. None while no grade is loaded:
-        after a restart before the first fetch, or with the entry not loaded. A grade
-        without the block is a verdict with state None."""
+        after a restart before the first fetch, with the entry not loaded, or with results
+        that carry no grade. A grade without the block is a verdict with state None."""
         coordinator = getattr(self.config_entry, "runtime_data", None)
         results = getattr(getattr(coordinator, "data", None), "results", None)
-        if not isinstance(results, dict):
+        betyg = results.get("betyg") if isinstance(results, dict) else None
+        if not isinstance(betyg, dict):
             return None
-        betyg = results.get("betyg")
-        return read_verdict(betyg if isinstance(betyg, dict) else {},
-                            self.config_entry.data.get(CONF_DIRECTION_CHANGED_AT))
+        return read_verdict(betyg, self.config_entry.data.get(CONF_DIRECTION_CHANGED_AT))
 
     def _desired_direction(self) -> list[intervals.Interval]:
         return intervals.normalize(desired_invert_intervals(self.config_entry.data))
@@ -2232,39 +2241,48 @@ class WoltaOptionsFlow(OptionsFlow):
             description_placeholders={"desired": _desired_text(text, desired),
                                       "verdict": _verdict_text(text, verdict)})
 
+    async def _direction_choose(self, target: list[intervals.Interval]) -> ConfigFlowResult:
+        """A choice made: remember the target and the desired direction it was chosen from,
+        and go on to the confirmation."""
+        self._direction_from = self._desired_direction()
+        self._direction_target = target
+        self._direction_shown_stored = None
+        return await self.async_step_direction_confirm()
+
     async def async_step_direction_flip_all(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        self._direction_from = self._desired_direction()
-        self._direction_target = [(None, None)]
-        return await self.async_step_direction_confirm()
+        return await self._direction_choose([(None, None)])
 
     async def async_step_direction_reset(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        self._direction_from = self._desired_direction()
-        self._direction_target = []
-        return await self.async_step_direction_confirm()
+        return await self._direction_choose([])
 
     async def async_step_direction_flip_from(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Swap from the start of a local day onward: what is reversed after it turns back,
-        the rest turns. Local midnight in HA's time zone, in UTC, on the whole hour (the
-        direction job swaps whole hours)."""
+        """Swap from the start of a local day onward: what is swapped after it stops being
+        swapped, the rest is swapped. The first whole UTC hour at or after local midnight in
+        HA's time zone (the direction job swaps whole hours): in a zone whose offset is not
+        whole hours, rounding down would reach into the day before."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            day = dt_util.parse_date(str(user_input[_DIRECTION_FLIP_FROM]))
-            if day is not None:
-                start = dt_util.as_utc(dt_util.start_of_local_day(day)).replace(
-                    minute=0, second=0, microsecond=0)
-                self._direction_from = self._desired_direction()
-                self._direction_target = intervals.sym_diff(
-                    self._direction_from, [(start, None)])
-                return await self.async_step_direction_confirm()
+            day = dt_util.parse_date(str(user_input.get(_DIRECTION_FLIP_FROM)))
+            if day is None:
+                errors[_DIRECTION_FLIP_FROM] = "invalid_date"
+            else:
+                midnight = dt_util.as_utc(dt_util.start_of_local_day(day))
+                start = midnight.replace(minute=0, second=0, microsecond=0)
+                if start < midnight:
+                    start += timedelta(hours=1)
+                return await self._direction_choose(
+                    intervals.sym_diff(self._desired_direction(), [(start, None)]))
         return self.async_show_form(
             step_id="direction_flip_from",
             data_schema=vol.Schema(
                 {vol.Required(_DIRECTION_FLIP_FROM): DateSelector(DateSelectorConfig())}),
+            errors=errors,
         )
 
     async def async_step_direction_confirm(
@@ -2299,6 +2317,11 @@ class WoltaOptionsFlow(OptionsFlow):
             if coordinator.has_uploaded():
                 return self.async_abort(reason="direction_period_unknown")
             effect = []  # nothing uploaded: the direction job has nothing stored to swap
+        if (user_input is not None and self._direction_shown_stored is not None
+                and bool(effect) != self._direction_shown_stored):
+            # The form said stored rows change and now none would, or the other way round:
+            # what was confirmed is not what would happen.
+            return self.async_abort(reason="direction_changed")
         gated = requires_override(verdict)
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -2314,6 +2337,7 @@ class WoltaOptionsFlow(OptionsFlow):
 
         placeholders = {"periods": "", "days": "0", "gate": ""}
         step_id = "direction_confirm" if effect else "direction_confirm_unstored"
+        self._direction_shown_stored = bool(effect)
         if effect:
             placeholders["periods"] = ", ".join(_local_period(s, e) for s, e in effect)
             placeholders["days"] = str(_local_days(effect))
