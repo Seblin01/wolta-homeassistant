@@ -339,6 +339,10 @@
     "battery_direction_no_fix": {
       "title": "Wolta: charging and discharging look swapped",
       "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for {reversed_days} days. Wolta cannot tell precisely enough when it started, so it flips nothing for you. Check the charge ({batt_in}) and discharge ({batt_out}) sensors under Reconfigure. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
+    },
+    "battery_direction_refused": {
+      "title": "Wolta: charging and discharging were not swapped",
+      "description": "You changed the battery direction, but the battery's state of charge shows that the stored direction is right: it matched on {ok_days} days and was reversed on {reversed_days}, as of {as_of}. Wolta therefore stopped the change, and the setting now matches the stored history again. If you know the state-of-charge sensor is wrong, you can make the change anyway under Configure → Battery direction."
     }
   },
   "config": {

@@ -23,6 +23,7 @@ from custom_components.wolta.const import (
 )
 from custom_components.wolta.coordinator import (
     _ISSUE_BATTERY_DIRECTION,
+    _ISSUE_BATTERY_DIRECTION_REFUSED,
     WoltaCoordinator,
 )
 from custom_components.wolta.direction import (
@@ -175,6 +176,21 @@ async def test_apply_target_override_defaults_to_false(hass: HomeAssistant):
     assert new_data[CONF_INVERT_BATTERY] is False
     assert new_data[CONF_DIRECTION_ORIGIN] == "repair"
     assert new_data[CONF_DIRECTION_OVERRIDE] is False
+
+
+@pytest.mark.asyncio
+async def test_apply_target_takes_down_the_refusal(hass: HomeAssistant):
+    """A new change answers the server's earlier no (direction_verified)."""
+    issue_id = f"{_ISSUE_BATTERY_DIRECTION_REFUSED}_e1"
+    assert issue_id == "battery_direction_refused_e1"
+    ir.async_create_issue(hass, DOMAIN, issue_id, is_fixable=False,
+                          severity=ir.IssueSeverity.WARNING,
+                          translation_key="battery_direction_refused",
+                          translation_placeholders={})
+    entry, _c = _entry({CONF_INVERT_INTERVALS: [], CONF_INVERT_BATTERY: False})
+    hass.config_entries.async_update_entry = MagicMock()
+    await apply_direction_target(hass, entry, [(None, None)], origin="manual", override=True)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
 
 
 @pytest.mark.asyncio

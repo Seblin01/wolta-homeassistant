@@ -31,6 +31,7 @@ from .const import (
 )
 from .coordinator import (
     _ISSUE_BATTERY_DIRECTION,
+    _ISSUE_BATTERY_DIRECTION_REFUSED,
     direction_swap_intervals,
     with_desired_intervals,
 )
@@ -125,4 +126,7 @@ async def apply_direction_target(
     # CONF_DIRECTION_FLIPPED_AT: ett betyg hämtat före omräkningen säger fortfarande
     # "reversed" och hade annars rest reparationen igen (och ett andra klick vänt tillbaka).
     ir.async_delete_issue(hass, DOMAIN, f"{_ISSUE_BATTERY_DIRECTION}_{entry.entry_id}")
+    # Ett tidigare nej från servern (direction_verified) gällde förra ändringen.
+    ir.async_delete_issue(
+        hass, DOMAIN, f"{_ISSUE_BATTERY_DIRECTION_REFUSED}_{entry.entry_id}")
     await entry.runtime_data.async_request_refresh()

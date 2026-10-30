@@ -2950,3 +2950,417 @@ async def test_a_4xx_without_a_replacement_is_no_server_failure(
     job = coordinator._state["replacement_job"]
     assert job["job_failures"] == 1
     assert "server_failures" not in job
+
+
+# ---------------------------------------------------------------------------
+# Batteriets riktning: origin, override and the server's direction_verified
+# ---------------------------------------------------------------------------
+
+from custom_components.wolta import intervals  # noqa: E402
+from custom_components.wolta.direction import read_verdict, requires_override  # noqa: E402
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_DIRECTION_CHANGED_AT,
+    CONF_DIRECTION_ORIGIN,
+    CONF_DIRECTION_OVERRIDE,
+)
+
+CHANGED_AT = "2026-10-13T08:00:00+00:00"
+VERIFIED = {"error": "direction_verified", "ok_days": 10, "reversed_days": 0,
+            "as_of": "2026-10-13T04:45:10+00:00"}
+
+
+def _writes_entry(hass):
+    """The mock entry is not registered: apply the coordinator's entry writes to it."""
+    return patch.object(hass.config_entries, "async_update_entry",
+                        side_effect=lambda e, **kw: setattr(e, "data", kw["data"]) or True)
+
+
+def _change(mock_entry, origin=None, override=None) -> None:
+    """What direction.apply_direction_target leaves in entry.data next to the intervals."""
+    data = {**mock_entry.data, CONF_DIRECTION_CHANGED_AT: CHANGED_AT}
+    if origin is not None:
+        data[CONF_DIRECTION_ORIGIN] = origin
+    if override is not None:
+        data[CONF_DIRECTION_OVERRIDE] = override
+    mock_entry.data = data
+
+
+def _refused_issue(hass, mock_entry):
+    return ir.async_get(hass).async_get_issue(
+        DOMAIN, f"battery_direction_refused_{mock_entry.entry_id}")
+
+
+@pytest.mark.asyncio
+async def test_manual_origin_sends_direction_manual_and_override(
+    hass: HomeAssistant, mock_entry
+):
+    """A change the owner made by hand, confirmed against the verdict: the job carries
+    origin and override from entry.data, and the swap is opened as direction_manual with
+    override."""
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", True)
+    at_commit: list = []
+
+    async def commit(token, rid, expected):
+        job = coordinator._state["replacement_job"]
+        at_commit.append((job["origin"], job["override"], job["replacement"]["override"]))
+        return dict(COMMIT_RESULT)
+
+    client.commit_replacement.side_effect = commit
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2026, 9, 28, 13, tzinfo=UTC), D_END, "direction_manual")]
+    assert client.open_replacement.call_args.kwargs["override"] is True
+    assert at_commit == [("manual", True, True)]
+    assert coordinator._state["applied_invert_intervals"] == [[FROM, None]]
+
+
+@pytest.mark.asyncio
+async def test_repair_origin_sends_direction_without_override(
+    hass: HomeAssistant, mock_entry
+):
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "repair", False)
+    at_commit: list = []
+
+    async def commit(token, rid, expected):
+        job = coordinator._state["replacement_job"]
+        at_commit.append((job["origin"], job["override"], "override" in job["replacement"]))
+        return dict(COMMIT_RESULT)
+
+    client.commit_replacement.side_effect = commit
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2026, 9, 28, 13, tzinfo=UTC), D_END, "direction")]
+    assert client.open_replacement.call_args.kwargs.get("override", False) is False
+    assert at_commit == [("repair", False, False)]
+
+
+@pytest.mark.asyncio
+async def test_legacy_job_without_origin_sends_direction(hass: HomeAssistant, mock_entry):
+    """A direction job saved before the upgrade has neither origin nor override: it is
+    swapped as a repair, without override."""
+    client = _direction_client()
+    job = {"type": "direction", "target": [[FROM, None]], "replacement": None,
+           "done_windows": [], "retry_at": None}
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[], job=job)
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert _opened(client) == [
+        ("swap_battery", datetime(2026, 9, 28, 13, tzinfo=UTC), D_END, "direction")]
+    assert client.open_replacement.call_args.kwargs.get("override", False) is False
+    assert coordinator._state["applied_invert_intervals"] == [[FROM, None]]
+
+
+@pytest.mark.asyncio
+async def test_parked_manual_job_keeps_origin_and_override(hass: HomeAssistant, mock_entry):
+    """A manual job refused on every open is parked; the job queued again after the
+    backoff still carries the owner's origin and override (they live in entry.data, not
+    only in the parked job)."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaApiError("refused", status=422)
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[])
+    _change(mock_entry, "manual", True)
+
+    with _writes_entry(hass):
+        for n in range(_JOB_MAX_FAILED_CYCLES):
+            await _cycle(coordinator, D_NOW + timedelta(hours=n))
+        assert "replacement_job" not in coordinator._state
+        assert "direction" in coordinator._state["job_backoff"]
+        assert mock_entry.data[CONF_DIRECTION_ORIGIN] == "manual"
+        assert mock_entry.data[CONF_DIRECTION_OVERRIDE] is True
+
+        await _cycle(coordinator, D_NOW + timedelta(hours=_JOB_MAX_FAILED_CYCLES + 24))
+
+    job = coordinator._state["replacement_job"]
+    assert (job["origin"], job["override"]) == ("manual", True)
+    assert client.open_replacement.await_count == _JOB_MAX_FAILED_CYCLES + 1
+    assert client.open_replacement.call_args.kwargs["reason"] == "direction_manual"
+    assert client.open_replacement.call_args.kwargs["override"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bookmark", [D_BOOKMARK, None])
+async def test_origin_and_override_cleared_when_applied_reaches_desired(
+    hass: HomeAssistant, mock_entry, bookmark
+):
+    """Once the stored rows carry the desired direction - after the final swap, or at once
+    with nothing stored - origin and override are removed, so the override can never ride
+    along with a later change. The change stamp stays."""
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[], bookmark=bookmark)
+    _change(mock_entry, "manual", True)
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert coordinator._state["applied_invert_intervals"] == [[FROM, None]]
+    assert "replacement_job" not in coordinator._state
+    assert CONF_DIRECTION_ORIGIN not in mock_entry.data
+    assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
+    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == CHANGED_AT
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == [[FROM, None]]
+
+
+@pytest.mark.asyncio
+async def test_direction_verified_resets_desired_and_raises_issue(
+    hass: HomeAssistant, mock_entry
+):
+    """409 direction_verified on the open: a final no. The window already swapped stays
+    (folded into applied), desired becomes applied in one entry write that also drops
+    origin and override, the job is gone without a failure count, backoff or pause, and a
+    non-fixable warning tells the owner. The next cycle opens nothing."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict(
+        "direction_verified", detail=dict(VERIFIED))
+    job = {"type": "direction", "target": [[None, None]], "replacement": None,
+           "done_windows": [[A, B]], "retry_at": None, "origin": "manual",
+           "override": False, "job_failures": 2}
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[], job=job)
+    _change(mock_entry, "manual", False)
+
+    with _writes_entry(hass) as upd:
+        await _cycle(coordinator, D_NOW)
+
+    assert client.open_replacement.await_count == 1
+    assert "replacement_job" not in coordinator._state
+    assert "job_backoff" not in coordinator._state
+    assert coordinator._state["applied_invert_intervals"] == [[A, B]]
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == [[A, B]]
+    assert mock_entry.data[CONF_INVERT_BATTERY] is False
+    assert CONF_DIRECTION_ORIGIN not in mock_entry.data
+    assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
+    # The stamp dated the refused change: gone, so the verdict behind the 409 counts as
+    # current and a second try by hand must be confirmed against it.
+    assert CONF_DIRECTION_CHANGED_AT not in mock_entry.data
+    verdict = read_verdict(
+        {"battery_direction": {"state": "verified", "checked_days": 10, "reversed_days": 0,
+                               "as_of": VERIFIED["as_of"]}},
+        mock_entry.data.get(CONF_DIRECTION_CHANGED_AT))
+    assert requires_override(verdict) is True
+    assert upd.call_count == 1
+    coordinator._store.async_save.assert_awaited()
+    client.put_data.assert_awaited()  # never paused
+
+    issue = _refused_issue(hass, mock_entry)
+    assert issue is not None
+    assert issue.is_fixable is False
+    assert issue.is_persistent is True
+    assert issue.data == {"entry_id": mock_entry.entry_id, "as_of": VERIFIED["as_of"]}
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.translation_key == "battery_direction_refused"
+    as_of = dt_util.as_local(datetime(2026, 10, 13, 4, 45, 10, tzinfo=UTC))
+    assert issue.translation_placeholders == {
+        "ok_days": "10", "reversed_days": "0", "as_of": as_of.strftime("%Y-%m-%d %H:%M")}
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW + timedelta(hours=6))
+    assert client.open_replacement.await_count == 1
+    assert "replacement_job" not in coordinator._state
+
+
+@pytest.mark.asyncio
+async def test_direction_verified_without_detail_says_dash(hass: HomeAssistant, mock_entry):
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict("direction_verified")
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", False)
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == []
+    assert _refused_issue(hass, mock_entry).translation_placeholders == {
+        "ok_days": "-", "reversed_days": "-", "as_of": "-"}
+
+
+def _verdict_betyg(state: str, as_of: str, **block) -> dict:
+    return {"battery_direction": {"state": state, "form": "all", "checked_days": 12,
+                                  "reversed_days": 12 if state == "reversed" else 0,
+                                  "as_of": as_of, **block}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("betyg,kept", [
+    # The verdict the server refused with, read again: it still stands.
+    (_verdict_betyg("verified", VERIFIED["as_of"]), True),
+    (_verdict_betyg("ok", "2026-10-12T04:45:10+00:00"), True),
+    # A recount after the refusal: what the owner was told may no longer hold.
+    (_verdict_betyg("verified", "2026-10-14T04:45:10+00:00"), False),
+    (_verdict_betyg("unknown", "2026-10-14T04:45:10+00:00"), False),
+    # The fixable repair is raised (here from the refused verdict's own as_of): the two
+    # must never contradict each other.
+    (_verdict_betyg("reversed", VERIFIED["as_of"],
+                    swap_intervals=[{"from": None, "to": None}]), False),
+])
+async def test_refused_issue_is_cleared_by_a_newer_verdict_or_the_repair(
+    hass: HomeAssistant, mock_entry, betyg, kept
+):
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict(
+        "direction_verified", detail=dict(VERIFIED))
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", False)
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+    assert _refused_issue(hass, mock_entry) is not None
+
+    with _writes_entry(hass):
+        coordinator._evaluate_battery_direction_issue(betyg)
+
+    assert (_refused_issue(hass, mock_entry) is not None) is kept
+
+
+@pytest.mark.asyncio
+async def test_refused_issue_without_as_of_waits_for_a_verdict_after_it(
+    hass: HomeAssistant, mock_entry
+):
+    """A refusal without as_of: a verdict counted after the issue was raised clears it,
+    one counted before does not."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict("direction_verified")
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", False)
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+    created = _refused_issue(hass, mock_entry).created
+
+    with _writes_entry(hass):
+        coordinator._evaluate_battery_direction_issue(
+            _verdict_betyg("verified", (created - timedelta(hours=1)).isoformat()))
+        assert _refused_issue(hass, mock_entry) is not None
+        coordinator._evaluate_battery_direction_issue(
+            _verdict_betyg("verified", (created + timedelta(hours=1)).isoformat()))
+    assert _refused_issue(hass, mock_entry) is None
+
+
+@pytest.mark.asyncio
+async def test_other_conflict_on_open_still_counts_a_failure(hass: HomeAssistant, mock_entry):
+    """Only direction_verified is a final no; any other 409 code on the open is counted as
+    before and keeps the job."""
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict("conflict")
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", False)
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    job = coordinator._state["replacement_job"]
+    assert job["job_failures"] == 1
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == [[FROM, None]]
+    assert mock_entry.data[CONF_DIRECTION_ORIGIN] == "manual"
+    assert _refused_issue(hass, mock_entry) is None
+
+
+async def _next_windows(coordinator, target) -> list[tuple[datetime, datetime]]:
+    """Every window a direction job towards `target` would swap now, as the runner asks
+    _direction_next for them one by one."""
+    job = coordinator._new_replacement_job("direction", intervals.dump(target))
+    windows: list = []
+    profile = {"data_since": D_SINCE}
+    while isinstance(spec := await coordinator._direction_next(job, D_NOW, profile), dict):
+        windows.append((datetime.fromisoformat(spec["window_start"]),
+                        datetime.fromisoformat(spec["window_end"])))
+        job["done_windows"].append([spec["window_start"], spec["window_end"]])
+    return windows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [
+    [],
+    [(None, None)],
+    [(datetime.fromisoformat(FROM), None)],
+    [(None, datetime.fromisoformat(A))],
+    [(None, datetime.fromisoformat(A)), (datetime.fromisoformat(B), None)],
+])
+async def test_direction_effect_matches_direction_next(
+    hass: HomeAssistant, mock_entry, target
+):
+    """The preview for a change is exactly what the direction job would then swap, read
+    with the data_since of the last profile the coordinator fetched."""
+    applied = [[None, A], [B, None]]
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=applied, applied=applied)
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)  # nothing to swap: just the profile read
+    coordinator._state["last_uploaded_ts"] = D_BOOKMARK
+
+    effect = coordinator.direction_effect(target)
+
+    assert effect == await _next_windows(coordinator, target)
+    if target == []:
+        assert effect == [(datetime(2025, 10, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)),
+                          (datetime(2026, 6, 1, tzinfo=UTC), D_END)]
+
+
+@pytest.mark.asyncio
+async def test_direction_effect_none_without_bookmark(hass: HomeAssistant, mock_entry):
+    """None while the bookmark or the server's data_since is unknown; [] when the server
+    holds no rows at all (nothing stored would change)."""
+    client = _direction_client()
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[])
+    target = [(None, None)]
+
+    assert coordinator.direction_effect(target) is None  # no profile read yet
+
+    await coordinator.async_check_profile_sync()
+    assert coordinator.direction_effect(target) == [(datetime(2025, 10, 1, tzinfo=UTC), D_END)]
+
+    coordinator._state.pop("last_uploaded_ts")
+    assert coordinator.direction_effect(target) is None
+
+    coordinator._state["last_uploaded_ts"] = D_BOOKMARK
+    client.get_profile.return_value = {**BASE_PROFILE, "data_since": None}
+    await coordinator.async_check_profile_sync()
+    assert coordinator.direction_effect(target) == []
+
+    client.get_profile.return_value = dict(BASE_PROFILE)  # an older server: no data_since
+    await coordinator.async_check_profile_sync()
+    assert coordinator.direction_effect(target) is None
+
+
+@pytest.mark.asyncio
+async def test_role_swap_entity_job_rebuilds_from_floor(hass: HomeAssistant, mock_entry):
+    """Characterization: swapping the charge and discharge sensors under Reconfigure is a
+    sensor change of both battery streams. The entity job rebuilds both battery fields
+    from the replacement floor - the whole stored history this client uploaded - not just
+    from some recent date."""
+    client = _direction_client(E_SINCE)
+    coordinator, _starts = await _entity_coordinator(
+        hass, mock_entry, client,
+        data_updates={CONF_BATT_IN: ["sensor.batt_out"], CONF_BATT_OUT: ["sensor.batt_in"]})
+    long_ago = datetime(2024, 1, 1, tzinfo=UTC)
+
+    await _entity_cycle(coordinator, {
+        "sensor.batt_in": long_ago, "sensor.batt_out": long_ago,
+        "sensor.grid_in": long_ago, "sensor.grid_out": long_ago, "sensor.solar": long_ago,
+    })
+
+    floor = coordinator._replacement_floor(datetime.fromisoformat(E_SINCE))
+    first = client.open_replacement.call_args_list[0].kwargs
+    assert first["kind"] == "rows"
+    assert first["fields"] == ["batt_charged_kwh", "batt_discharged_kwh"]
+    assert first["window_start"] == floor

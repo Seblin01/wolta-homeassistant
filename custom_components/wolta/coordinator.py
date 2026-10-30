@@ -47,8 +47,11 @@ from .const import (
     CONF_CAPACITY_ISSUE_IGNORED,
     CONF_CONTROL_SYSTEM,
     CONF_CONTROL_SYSTEM_NAME,
+    CONF_DIRECTION_CHANGED_AT,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
+    CONF_DIRECTION_ORIGIN,
+    CONF_DIRECTION_OVERRIDE,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
@@ -744,6 +747,14 @@ _BATTERY_DIRECTION_FIXABLE = ("all", "partial")
 # _ISSUE_BATTERY_DIRECTION_NO_FIX when the server found no boundary to flip.
 _BATTERY_DIRECTION_TEXT_FORMS = ("since", "ended")
 _ISSUE_BATTERY_DIRECTION_NO_FIX = "battery_direction_no_fix"
+# The server refused a swap of the battery direction (409 direction_verified): its SoC
+# verdict says the stored direction is right, and the change was not confirmed against it
+# (override). Final: the desired direction is set back to the applied one. Non-fixable, one
+# per entry, persistent (it survives a restart). Its data keeps the refused verdict's as_of:
+# it is taken down by a verdict counted after it, when the fixable battery_direction repair
+# is raised (the two must not contradict each other), or when the owner changes the
+# direction again (direction.apply_direction_target).
+_ISSUE_BATTERY_DIRECTION_REFUSED = "battery_direction_refused"
 _QUARTER = timedelta(minutes=15)
 # Fallback for the server's detect_min_days when the profile doesn't carry it (older
 # backend). Shared by WoltaData's default and the profile read so the sensor never
@@ -1014,6 +1025,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._battery_status: str | None = None
         self._battery_detect: dict | None = None
         self._detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+        # The server's data_since off the latest profile GET (either poll), for the
+        # preview of a direction change (direction_effect). MISSING until a profile was
+        # read, or when it carried none; None when the server holds no rows.
+        self._data_since: datetime | None | coverage._Missing = coverage.MISSING
         # Spot-price coordinator, set by async_setup_entry. Separate on purpose: the
         # price forecast is information only and never feeds the grade or the upload.
         self.prices: WoltaPriceCoordinator | None = None
@@ -1598,6 +1613,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         """Open `rep` on the server after saving its id. False when it was not opened;
         the job then has no replacement, so nothing pauses."""
         await self._store.async_save(self._state)
+        # The owner's confirmation against the SoC verdict (a direction job's spec only).
+        extra = {"override": True} if rep.get("override") else {}
         try:
             await self.client.open_replacement(
                 self.token,
@@ -1607,6 +1624,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                 window_end=datetime.fromisoformat(rep["window_end"]),
                 fields=rep.get("fields"),
                 reason=rep["reason"],
+                **extra,
             )
         except WoltaAuthError:
             raise
@@ -1626,6 +1644,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             )
             return False
         except WoltaApiError as err:
+            if (isinstance(err, WoltaReplacementConflict) and err.code == "direction_verified"
+                    and job.get("type") == "direction"):
+                # Not a failure to count or retry: the server's final no.
+                await self._direction_refused(job, err.detail)
+                return False
             if err.status is not None and 400 <= err.status < 500:
                 # A refusal (422, a stream-bound 409, a conflict or a gone id): counted,
                 # so one that never passes parks the job instead of holding the slot.
@@ -1722,7 +1745,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
 
         A direction change goes before a sensor change: an entity job that has not
         started on the server yet gives way, and is queued again once this one is done.
-        None is queued while a parked direction job's backoff lasts (_park_job)."""
+        None is queued while a parked direction job's backoff lasts (_park_job).
+
+        The change's origin and override (entry.data, direction.apply_direction_target) are
+        copied to every job queued for it, so one queued again after a backoff still swaps
+        as the owner decided; a missing origin (a change from before they existed) counts as
+        the repair's."""
         job = self._state.get("replacement_job")
         if job and not self._idle_entity_job(job):
             return
@@ -1730,14 +1758,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             return
         desired = self._desired_intervals()
         if not intervals.sym_diff(desired, self._applied_intervals()):
+            # Nothing (left) to swap: a change's origin and override must not wait for
+            # the next one.
+            self._clear_direction_origin()
             return
         if job:
             _LOGGER.info(
                 "Wolta sensor change postponed: the battery direction is swapped first")
             self._clear_waiting_issue(job)
-        self._state["replacement_job"] = self._new_replacement_job(
+        data = self.config_entry.data
+        new_job = self._new_replacement_job(
             "direction", intervals.dump(intervals.normalize(desired))
         )
+        new_job["origin"] = "manual" if data.get(CONF_DIRECTION_ORIGIN) == "manual" else "repair"
+        new_job["override"] = bool(data.get(CONF_DIRECTION_OVERRIDE))
+        self._state["replacement_job"] = new_job
         await self._store.async_save(self._state)
         _LOGGER.info("Wolta battery direction changed; swapping it in the stored history")
 
@@ -1751,12 +1786,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         uploaded, and later rows are built with the target - and split into whole-hour segments. Only the last segment may reach into the hour
         the bookmark lies in; its commit applies the target at once (_direction_committed),
         before any upload. An earlier one stops at the bookmark's hour, so no row is
-        uploaded with the old direction into a window that is already booked."""
+        uploaded with the old direction into a window that is already booked.
+
+        A change the owner made by hand is swapped as "direction_manual", and with
+        `override` when they confirmed it against the server's SoC verdict; a job without
+        an origin (saved before it existed) as the repair's "direction"."""
         target = intervals.parse(job["target"])
-        remaining = intervals.difference(
-            intervals.sym_diff(target, self._applied_intervals()),
-            intervals.parse(job["done_windows"]),
-        )
+        remaining = self._direction_remaining(target, intervals.parse(job["done_windows"]))
         bookmark = self._state.get("last_uploaded_ts")
         if not remaining or not bookmark:
             # Nothing stored by this client: the rows still to come carry the target.
@@ -1771,23 +1807,66 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         if since is None:
             return "done"
         bookmark_end = datetime.fromisoformat(bookmark) + _QUARTER
-        segments = intervals.hour_aligned(
-            intervals.clip(remaining, self._replacement_floor(since), _ceil_hour(bookmark_end))
-        )
+        segments = self._direction_segments(remaining, since, bookmark_end)
         for index, (start, end) in enumerate(segments):
             final = index == len(segments) - 1
             if not final:
                 end = min(end, _floor_hour(bookmark_end))
             if start < end:
-                return {
+                spec = {
                     "kind": "swap_battery",
                     "window_start": start.isoformat(),
                     "window_end": end.isoformat(),
                     "fields": None,
-                    "reason": "direction",
+                    "reason": (
+                        "direction_manual" if job.get("origin") == "manual" else "direction"),
                     "final": final,
                 }
+                if job.get("override"):
+                    # On the replacement too: one re-opened after a restart is sent alike.
+                    spec["override"] = True
+                return spec
         return "done"
+
+    def _direction_remaining(
+        self, target: list[intervals.Interval], done: list[intervals.Interval]
+    ) -> list[intervals.Interval]:
+        """What a direction job towards `target` still has to swap: target Δ applied,
+        less the windows it already committed."""
+        return intervals.difference(
+            intervals.sym_diff(target, self._applied_intervals()), done)
+
+    def _direction_segments(
+        self, remaining: list[intervals.Interval], since: datetime, bookmark_end: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        """`remaining` bounded to [replacement floor, ceil_hour(bookmark + 15 min)) in
+        whole hours: the windows the direction job swaps (_direction_next), and the preview
+        of a change (direction_effect)."""
+        return intervals.hour_aligned(
+            intervals.clip(remaining, self._replacement_floor(since), _ceil_hour(bookmark_end))
+        )
+
+    def direction_effect(
+        self, target: list[intervals.Interval]
+    ) -> list[tuple[datetime, datetime]] | None:
+        """The windows of stored rows a change of the desired direction to `target` would
+        swap, if it were made now: exactly those its direction job would swap
+        (_direction_next), whole UTC hours. Read with the data_since of the latest profile
+        GET and the current bookmark; the bookmark moves on, so a job started later may
+        swap a little more at the end.
+
+        None when the bookmark or the server's data_since is not known; [] when nothing
+        stored would change (the target equals the applied direction where the server
+        holds this client's rows, or the server holds no rows at all)."""
+        bookmark = self._state.get("last_uploaded_ts")
+        since = self._data_since
+        if not bookmark or since is coverage.MISSING:
+            return None
+        if since is None:
+            return []
+        return self._direction_segments(
+            self._direction_remaining(target, []), since,
+            datetime.fromisoformat(bookmark) + _QUARTER)
 
     async def _direction_committed(self, job: dict, rep: dict, result: dict) -> None:
         """After a committed swap: keep the server's data_since for the next segment, and
@@ -1803,10 +1882,88 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             datetime.fromisoformat(rep["window_end"])
         ):
             return
-        self._set_applied_intervals(intervals.parse(job["target"]))
+        self._direction_applied(job)
 
     async def _direction_finished(self, job: dict) -> None:
+        self._direction_applied(job)
+
+    def _direction_applied(self, job: dict) -> None:
+        """The stored rows carry the job's target (saved by the caller). Once that is the
+        desired direction, the change is through: its origin and override go, so the
+        override can never ride along with a later change."""
         self._set_applied_intervals(intervals.parse(job["target"]))
+        if not intervals.sym_diff(self._desired_intervals(), self._applied_intervals()):
+            self._clear_direction_origin()
+
+    def _clear_direction_origin(self) -> None:
+        """Drop the origin and override of a direction change from entry.data (the change
+        stamp stays: it dates the change for the SoC verdict, direction.read_verdict)."""
+        data = self.config_entry.data
+        if CONF_DIRECTION_ORIGIN not in data and CONF_DIRECTION_OVERRIDE not in data:
+            return
+        new_data = {k: v for k, v in data.items()
+                    if k not in (CONF_DIRECTION_ORIGIN, CONF_DIRECTION_OVERRIDE)}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+
+    async def _direction_refused(self, job: dict, detail: dict) -> None:
+        """409 direction_verified on the open: the server's SoC verdict says the stored
+        direction is right and the change was not confirmed against it. A final no, not a
+        failure: nothing is counted, parked or retried. The windows the job already
+        swapped stay (folded into applied, as _park_job does), the desired direction
+        becomes the applied one - in one entry write that also drops origin and override,
+        so the next cycle queues nothing - and the owner is told.
+
+        The same write drops CONF_DIRECTION_CHANGED_AT: it dates the refused change, and
+        kept it would make the very verdict the server refused with (counted earlier that
+        night) look stale (direction.read_verdict), so a second try by hand would go out
+        without override and be refused again until the next recount. Without the stamp
+        every verdict counts as current - the conservative side, and the 409 itself says
+        this one is.
+
+        CONF_DIRECTION_FLIPPED_AT is left as it is: the earlier value it replaced is gone,
+        and an earlier flip whose recount is still due may lie behind it. Kept, it holds
+        the fixable repair down until the next nightly recount at most; dropped, a grade of
+        the direction before that flip could raise it again and invite flipping it back."""
+        if job.get("done_windows"):
+            self._set_applied_intervals(intervals.sym_diff(
+                self._applied_intervals(), intervals.parse(job["done_windows"])))
+        job["replacement"] = None
+        self._state.pop("replacement_job", None)
+        self._clear_waiting_issue(job)
+        entry = self.config_entry
+        new_data = with_desired_intervals(entry.data, self._applied_intervals())
+        new_data.pop(CONF_DIRECTION_ORIGIN, None)
+        new_data.pop(CONF_DIRECTION_OVERRIDE, None)
+        new_data.pop(CONF_DIRECTION_CHANGED_AT, None)
+        if new_data != dict(entry.data):
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
+        await self._store.async_save(self._state)
+
+        def _count(key: str) -> str:
+            value = detail.get(key)
+            return str(value) if isinstance(value, int) and not isinstance(value, bool) else "-"
+
+        as_of = self._parse_utc(detail.get("as_of"))
+        ir.async_create_issue(
+            self.hass, DOMAIN,
+            f"{_ISSUE_BATTERY_DIRECTION_REFUSED}_{entry.entry_id}",
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=_ISSUE_BATTERY_DIRECTION_REFUSED,
+            # The verdict refused with; a later one clears the issue (_clear_stale_refusal).
+            data={"entry_id": entry.entry_id,
+                  "as_of": None if as_of is None else as_of.isoformat()},
+            translation_placeholders={
+                "ok_days": _count("ok_days"),
+                "reversed_days": _count("reversed_days"),
+                "as_of": "-" if as_of is None
+                else dt_util.as_local(as_of).strftime("%Y-%m-%d %H:%M"),
+            },
+        )
+        _LOGGER.warning(
+            "Wolta refused to swap the battery direction: its state-of-charge data says the "
+            "stored direction is right; the change was set back")
 
     # ------------------------------------------------------------------
     # Entity job: replace the fields of changed sensors in stored rows
@@ -2378,6 +2535,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         )
         return True
 
+    def _take_data_since(self, profile: dict) -> None:
+        """Keep the server's data_since off a profile GET (see _data_since)."""
+        self._data_since = coverage.server_since(profile)
+
     def _take_battery_state(self, profile: dict) -> None:
         """Read the server's battery stamp off a profile GET and (re)evaluate the repair.
 
@@ -2413,6 +2574,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Profile side-poll failed; retrying next tick", exc_info=True)
             return
+        self._take_data_since(profile)
         # A CHANGED battery stamp also warrants the refresh: the stamp is not part of
         # entry.data, so _apply_profile_sync can't see it, and without a rebuilt WoltaData
         # the status sensor would keep saying "measuring" for up to 6h while the repair
@@ -2452,6 +2614,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                     _LOGGER.debug("Profile sync fetch failed; keeping cache", exc_info=True)
                 else:
                     profile_payload = profile
+                    self._take_data_since(profile)
                     self._apply_profile_sync(profile)
                     # Samma skydd som sidopollen: stämpeln är ett VISNINGSFÄLT, och en
                     # missbildad rad (icke-dict battery_detect, osiffrig detect_min_days)
@@ -4105,6 +4268,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         issue_id = f"{_ISSUE_BATTERY_DIRECTION}_{self.config_entry.entry_id}"
         block = betyg.get("battery_direction") if isinstance(betyg, dict) else None
         form = block.get("form") if isinstance(block, dict) else None
+        self._clear_stale_refusal(block)
         if isinstance(block, dict) and block.get("state") in ("ok", "verified"):
             self._clear_direction_flags()
         if (not self._direction_reversed(betyg) or self._view_only
@@ -4144,6 +4308,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             key = f"{key}_flip"
         elif not fixable and form not in _BATTERY_DIRECTION_TEXT_FORMS:
             key = _ISSUE_BATTERY_DIRECTION_NO_FIX
+        if fixable:
+            # Ett tidigare nej (direction_verified) får inte stå kvar bredvid en reparation
+            # som föreslår att vända.
+            self._delete_refusal()
         ir.async_create_issue(
             self.hass, DOMAIN, issue_id,
             is_fixable=fixable,
@@ -4155,6 +4323,27 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             data={"entry_id": self.config_entry.entry_id, "form": form,
                   "swap_intervals": intervals.dump(swap), **placeholders},
         )
+
+    def _refusal_issue_id(self) -> str:
+        return f"{_ISSUE_BATTERY_DIRECTION_REFUSED}_{self.config_entry.entry_id}"
+
+    def _delete_refusal(self) -> None:
+        ir.async_delete_issue(self.hass, DOMAIN, self._refusal_issue_id())
+
+    def _clear_stale_refusal(self, block) -> None:
+        """Take down the battery_direction_refused issue once the server has counted the
+        direction again after the verdict it refused with: what the owner was told may no
+        longer hold. Without that verdict's as_of, the issue's own creation time stands in.
+        A grade without a readable as_of changes nothing."""
+        issue = ir.async_get(self.hass).async_get_issue(DOMAIN, self._refusal_issue_id())
+        if issue is None or not isinstance(block, dict):
+            return
+        as_of = self._parse_utc(block.get("as_of"))
+        if as_of is None:
+            return
+        refused = self._parse_utc((issue.data or {}).get("as_of")) or issue.created
+        if as_of > refused:
+            self._delete_refusal()
 
     @staticmethod
     def _swap_period(swap: list[intervals.Interval]) -> str:

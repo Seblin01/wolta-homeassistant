@@ -339,6 +339,10 @@
     "battery_direction_no_fix": {
       "title": "Wolta: laddning och urladdning ser omkastade ut",
       "description": "När din data säger att batteriet laddar, sjunker batteriets laddningsnivå, och tvärtom. Det gäller {reversed_days} dygn. Wolta kan inte avgöra tillräckligt säkert när det började, och vänder därför inget åt dig. Kontrollera sensorerna för laddning ({batt_in}) och urladdning ({batt_out}) under Konfigurera. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer."
+    },
+    "battery_direction_refused": {
+      "title": "Wolta: laddning och urladdning vändes inte",
+      "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
     }
   },
   "config": {

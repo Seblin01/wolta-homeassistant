@@ -168,8 +168,10 @@ CONF_DIRECTION_ISSUE_IGNORED = "direction_issue_ignored"
 # back. Client-only, never sent to the server, so it is absent from _PROFILE_SYNC_KEYS.
 CONF_DIRECTION_FLIPPED_AT = "direction_flipped_at"
 # When the owner last changed the desired direction, from the repair or by hand (ISO UTC).
-# Unlike CONF_DIRECTION_FLIPPED_AT it is never cleared: a SoC verdict counted before it
-# describes the old direction (direction.read_verdict). Client-only.
+# Unlike CONF_DIRECTION_FLIPPED_AT a healthy verdict never clears it (_clear_direction_flags):
+# a SoC verdict counted before it describes the old direction (direction.read_verdict). It is
+# dropped only when the server refuses the change it dates (409 direction_verified): nothing
+# changed, and the verdict behind the refusal must count as current. Client-only.
 CONF_DIRECTION_CHANGED_AT = "direction_changed_at"
 # Varifrån den senaste riktningsändringen kom: "repair" (reparationen) eller "manual"
 # (ägaren valde själv). Kopieras till riktningsjobbet; saknas den räknas den som "repair".
