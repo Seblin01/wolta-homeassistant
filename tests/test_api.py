@@ -924,6 +924,45 @@ async def test_open_replacement_swap_omits_fields(aioclient_mock: AiohttpClientM
 
 
 @pytest.mark.asyncio
+async def test_open_replacement_sends_override_only_when_true(
+    aioclient_mock: AiohttpClientMocker,
+):
+    """`override` is the owner's explicit decision against a SoC verdict: sent as true
+    when asked for, and left out entirely otherwise (never `"override": false`)."""
+    from datetime import datetime, timezone
+
+    aioclient_mock.put(REP_URL, status=200, json={"id": RID})
+    client = _client(aioclient_mock)
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    await client.open_replacement(
+        TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+        fields=None, reason="direction_manual", override=True,
+    )
+    assert _last(aioclient_mock)[2]["override"] is True
+    await client.open_replacement(
+        TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+        fields=None, reason="direction",
+    )
+    assert "override" not in _last(aioclient_mock)[2]
+
+
+@pytest.mark.asyncio
+async def test_open_replacement_sends_direction_manual(aioclient_mock: AiohttpClientMocker):
+    from datetime import datetime, timezone
+
+    aioclient_mock.put(REP_URL, status=201, json={"id": RID})
+    client = _client(aioclient_mock)
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    await client.open_replacement(
+        TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+        fields=None, reason="direction_manual", override=False,
+    )
+    body = _last(aioclient_mock)[2]
+    assert body["kind"] == "swap_battery" and body["reason"] == "direction_manual"
+    assert "override" not in body
+
+
+@pytest.mark.asyncio
 async def test_open_replacement_rejects_naive_datetimes():
     from datetime import datetime
 
@@ -1063,6 +1102,32 @@ async def test_replacement_409_carries_the_error_code(
     with pytest.raises(WoltaReplacementConflict) as exc_info:
         await client.commit_replacement(TOKEN, RID, 5)
     assert exc_info.value.code == code and exc_info.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_conflict_carries_detail(aioclient_mock: AiohttpClientMocker):
+    """The whole server `detail` rides along, so a caller can show what a refusal
+    was based on (here the SoC verdict behind `direction_verified`)."""
+    from datetime import datetime, timezone
+
+    detail = {
+        "error": "direction_verified",
+        "ok_days": 10,
+        "reversed_days": 0,
+        "as_of": "2026-10-30T04:45:10+00:00",
+    }
+    aioclient_mock.put(REP_URL, status=409, json={"detail": detail})
+    client = _client(aioclient_mock)
+    t = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    with pytest.raises(WoltaReplacementConflict) as exc_info:
+        await client.open_replacement(
+            TOKEN, RID, kind="swap_battery", window_start=t, window_end=t,
+            fields=None, reason="direction",
+        )
+    assert exc_info.value.code == "direction_verified"
+    assert exc_info.value.detail == detail and exc_info.value.detail["ok_days"] == 10
+    # Raised without a detail (as tests and older callers do), it is an empty dict.
+    assert WoltaReplacementConflict("conflict").detail == {}
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
-from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BATT_IN,
@@ -55,7 +54,6 @@ from .const import (
     CONF_CAPACITY_ISSUE_IGNORED,
     CONF_CONTROL_SYSTEM,
     CONF_CONTROL_SYSTEM_NAME,
-    CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
@@ -83,8 +81,8 @@ from .coordinator import (
     _ISSUE_CONTROL_SYSTEM_REQUIRED,
     _ISSUE_SOC_REQUIRED,
     desired_invert_intervals,
-    with_desired_intervals,
 )
+from .direction import apply_direction_target
 from .soc_picker import soc_candidates, soc_requirement_error
 
 _LOGGER = logging.getLogger(__name__)
@@ -556,16 +554,9 @@ class BatteryDirectionRepairFlow(RepairsFlow):
         # The CURRENT desired value is read here, not when the issue was raised: it may
         # have changed under Configure meanwhile.
         desired = intervals.sym_diff(desired_invert_intervals(self._entry.data), swap)
-        new_data = with_desired_intervals(self._entry.data, desired)
-        new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
-        new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
-        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-        # Issuen tas bort direkt, och koordinatorn håller den nere medan riktningsjobbet
-        # pågår och tills serverns riktningsdata (battery_direction.as_of) är nyare än
-        # CONF_DIRECTION_FLIPPED_AT: ett betyg hämtat före omräkningen säger fortfarande
-        # "reversed" och hade annars rest reparationen igen (och ett andra klick vänt tillbaka).
-        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-        await self._entry.runtime_data.async_request_refresh()
+        # Stamps, the issue and the refresh: see apply_direction_target. The repair never
+        # overrides the server's SoC verdict - it follows it.
+        await apply_direction_target(self.hass, self._entry, desired, origin="repair")
         return self.async_create_entry(title="", data={})
 
     async def async_step_ignore(self, user_input=None) -> data_entry_flow.FlowResult:

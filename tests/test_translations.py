@@ -995,3 +995,86 @@ def test_configure_menu_says_where_the_sensors_are_changed(path: Path) -> None:
     text = _load(path)["options"]["step"]["init"].get("description", "")
     needle = "konfigurera om" if path.name == "sv.json" else "Reconfigure"
     assert needle in text, path.name
+
+
+# --- battery direction (options) ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_direction_refusal_names_the_options_menu_entry(path: Path) -> None:
+    """The refusal sends the owner to Configure → Battery direction: the menu entry must be
+    called exactly that, and the invert box is gone from Settings."""
+    data = _load(path)
+    label = data["options"]["step"]["init"]["menu_options"]["battery_direction"]
+    assert f"→ {label}." in data["issues"]["battery_direction_refused"]["description"]
+    settings = data["options"]["step"]["settings"]
+    assert "invert_battery" not in json.dumps(settings)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_every_direction_confirmation_names_a_period_or_says_nothing_stored_changes(
+        path: Path) -> None:
+    steps = _load(path)["options"]["step"]
+    assert "{periods}" in steps["direction_confirm"]["description"]
+    assert "{days}" in steps["direction_confirm"]["description"]
+    assert "direction_confirm_open" not in steps  # no confirmation without a period
+    for key in ("direction_confirm", "direction_confirm_unstored"):
+        assert steps[key]["description"].endswith("{gate}"), (path.name, key)
+    assert _load(path)["options"]["abort"]["direction_changed"]
+    assert _load(path)["options"]["abort"]["direction_period_unknown"]
+    assert _load(path)["options"]["abort"]["direction_period_changed"]
+
+
+def test_swedish_direction_confirmation_is_the_agreed_copy() -> None:
+    text = _at(_load(_TRANSLATIONS / "sv.json"),
+               ("options", "step", "direction_confirm", "description"))
+    assert text == (
+        "Laddat och urladdat byter plats i lagrad data {periods} ({days} dygn). Inget skickas "
+        "om. Du kan ångra genom att välja det motsatta under Batteriets riktning. Wolta sparar "
+        "de ersatta värdena i 90 dagar.{gate}")
+
+
+@pytest.mark.parametrize("path, text", [
+    (_TRANSLATIONS / "sv.json", "Kryssa bara om du har kontrollerat vilken riktning som är rätt, "
+                                "till exempel att sensorn för laddningsnivå är fel."),
+    (_TRANSLATIONS / "en.json", "Tick only if you have checked which direction is right, for "
+                                "example that the state-of-charge sensor is wrong."),
+], ids=lambda v: v.name if isinstance(v, Path) else "")
+def test_direction_override_help_fits_every_state(path: Path, text: str) -> None:
+    steps = _load(path)["options"]["step"]
+    for key in ("direction_confirm", "direction_confirm_unstored"):
+        assert steps[key]["data_description"]["direction_override"] == text, (path.name, key)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_direction_and_role_swap_labels_have_no_dash(path: Path) -> None:
+    """A label is one statement: a colon or two sentences, never a dash as a pause."""
+    data = _load(path)
+    labels = [
+        data["options"]["step"][step]["data"]["direction_override"]
+        for step in ("direction_confirm", "direction_confirm_unstored")
+    ]
+    labels.append(data["config"]["step"]["reconfigure_battery_swap_confirm"]["data"][
+        "confirm_swap"])
+    labels += data["config"]["step"]["reconfigure_battery_swap"]["menu_options"].values()
+    labels += data["options"]["step"]["battery_direction"]["menu_options"].values()
+    for label in labels:
+        assert "–" not in label and " - " not in label, (path.name, label)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_direction_step_keeps_reversed_for_the_verdict(path: Path) -> None:
+    """In Battery direction the setting is what Wolta swaps; "reversed" (omkastad) is the
+    state-of-charge verdict's word only, and the step is for sensors that report charging
+    as discharging, while Reconfigure is for the wrong sensor selected."""
+    steps = _load(path)["options"]["step"]
+    word = "omkast" if path.name == "sv.json" else "revers"
+    for key in ("battery_direction", "direction_flip_from"):
+        assert word not in json.dumps(steps[key], ensure_ascii=False).lower(), (path.name, key)
+    config = _load(path)["config"]["step"]
+    sensors = ("rapporterar laddning som urladdning" if path.name == "sv.json"
+               else "report charging as discharging")
+    wrong = ("fel sensor är vald" if path.name == "sv.json" else "wrong sensor is selected")
+    assert sensors in steps["battery_direction"]["description"]
+    for key in ("reconfigure_battery_swap", "reconfigure_battery_swap_confirm"):
+        assert wrong in json.dumps(config[key], ensure_ascii=False), (path.name, key)

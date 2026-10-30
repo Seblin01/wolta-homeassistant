@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import secrets
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -38,7 +38,7 @@ from homeassistant.helpers.selector import (
 
 from homeassistant.util import dt as dt_util
 
-from . import stats
+from . import coverage, intervals, stats
 from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-exported
     MAX_SOC_SENSORS,
     soc_error as _soc_error,
@@ -60,7 +60,8 @@ from .control_system_prefill import (
     control_system_name_selector,
     control_system_selector,
 )
-from .coordinator import desired_invert_intervals, with_desired_intervals
+from .coordinator import _ISSUE_BATTERY_DIRECTION, desired_invert_intervals
+from .direction import Verdict, apply_direction_target, read_verdict, requires_override
 from .const import (
     KEY_BATTERY_EVENTS,
     KEY_BATTERY_STATUS,
@@ -75,6 +76,7 @@ from .const import (
     BATTERY_STATUS_PENDING,
     CONF_BATT_IN,
     CONF_CREATED_BY_HA,
+    CONF_DIRECTION_CHANGED_AT,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_BATT_OUT,
@@ -224,6 +226,20 @@ def _as_list(val: str | list | None) -> list[str]:
     if isinstance(val, str) and val:
         return [val]
     return []
+
+
+def _battery_sensors(data: dict) -> tuple[list[str], list[str]]:
+    """The battery pair (charge, discharge), normalised and order-independent, so only a real
+    change of sensors compares unequal."""
+    return (sorted(_as_list(data.get(CONF_BATT_IN))), sorted(_as_list(data.get(CONF_BATT_OUT))))
+
+
+def _battery_roles_swapped(old: dict, new: dict) -> bool:
+    """Whether a sensor moved between charge and discharge: one in the new charge list was a
+    discharge sensor before, or the other way round. A newly added sensor is no swap."""
+    old_in, old_out = set(_as_list(old.get(CONF_BATT_IN))), set(_as_list(old.get(CONF_BATT_OUT)))
+    return bool(set(_as_list(new.get(CONF_BATT_IN))) & old_out
+                or set(_as_list(new.get(CONF_BATT_OUT))) & old_in)
 
 
 def _zone_selector(suggested: str | None = None, lang: str = "en") -> SelectSelector:
@@ -560,6 +576,147 @@ def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
     return " ".join([*parts, text["tail"]])
 
 
+# Batteriets riktning (options): the sentences that depend on the desired direction and the
+# server's SoC verdict, in the user's HA language (sv/en, else English), like _WEB_SUMMARY: a
+# step has one description, so what varies is passed in as a placeholder. Dates are local and
+# language-neutral. The verdict never shows a count of ok days. The setting is described as
+# what Wolta does ("swaps"); "reversed" is kept for the SoC verdict alone.
+_DIRECTION_TEXT: dict[str, dict[str, str]] = {
+    "sv": {
+        "none": "Wolta lagrar allt som sensorerna visar det.",
+        "all": "Wolta byter plats på laddat och urladdat i hela historiken.",
+        "from": "Wolta byter plats på laddat och urladdat från {start}.",
+        "periods": "Wolta byter plats på laddat och urladdat för {periods}.",
+        "ok": ("Batteriets laddningsnivå säger att riktningen stämmer: kontrollerat "
+               "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
+        "reversed": ("Batteriets laddningsnivå säger att riktningen är omkastad: kontrollerat "
+                     "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
+        "stale": " Kontrollen är från före din senaste ändring.",
+        "no_check": "Wolta kan inte kontrollera riktningen mot laddningsnivån.",
+        # The gate's lead, true for each state: a swap against ok/verified is refused by the
+        # server; with nothing stored to swap nothing is refused, but it still goes against
+        # the check; against reversed the owner confirms having checked the sensors.
+        "gate_swap": ("\n\n{verdict} Wolta nekar ett byte som går emot laddningsnivån om du inte "
+                      "kryssar i rutan nedan."),
+        "gate_unstored": ("\n\n{verdict} Ändringen går emot laddningsnivån; kryssa i rutan "
+                          "nedan för att göra den ändå."),
+        "gate_reversed": ("\n\n{verdict} Kryssa i rutan nedan för att bekräfta att du har "
+                          "kontrollerat sensorerna."),
+        "gate_repair": (" Reparationen under Inställningar → System → Reparationer byter exakt "
+                        "den period Wolta har sett."),
+    },
+    "en": {
+        "none": "Wolta stores everything as the sensors report it.",
+        "all": "Wolta swaps charged and discharged for the whole history.",
+        "from": "Wolta swaps charged and discharged from {start}.",
+        "periods": "Wolta swaps charged and discharged for {periods}.",
+        "ok": ("The battery's state of charge says the direction is right: checked "
+               "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
+        "reversed": ("The battery's state of charge says the direction is reversed: checked "
+                     "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
+        "stale": " The check predates your latest change.",
+        "no_check": "Wolta cannot check the direction against the state of charge.",
+        "gate_swap": ("\n\n{verdict} Wolta refuses a swap that goes against the state of "
+                      "charge unless you tick the box below."),
+        "gate_unstored": ("\n\n{verdict} The change goes against the state of charge; tick the "
+                          "box below to make it anyway."),
+        "gate_reversed": ("\n\n{verdict} Tick the box below to confirm that you have checked "
+                          "the sensors."),
+        "gate_repair": (" The repair under Settings → System → Repairs swaps exactly the period "
+                        "Wolta has seen."),
+    },
+}
+_DIRECTION_OVERRIDE = "direction_override"
+_CONFIRM_SWAP = "confirm_swap"  # Reconfigure: a battery role swap, confirmed
+_DIRECTION_FLIP_FROM = "start"
+_TICK = timedelta(microseconds=1)  # an end is exclusive: its last instant is the one before
+
+
+def _direction_text(hass_language: str | None) -> dict[str, str]:
+    lang = (hass_language or "en").split("-")[0]
+    return _DIRECTION_TEXT.get(lang, _DIRECTION_TEXT["en"])
+
+
+def _at_midnight(value: datetime | None) -> bool:
+    """Open, or at local midnight."""
+    if value is None:
+        return True
+    local = dt_util.as_local(value)
+    return (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0)
+
+
+def _local_time(value: datetime) -> str:
+    """Date and time in local time. In the hour that occurs twice when summer time ends, with
+    the UTC offset: "2026-10-25 02:00+02:00" and "2026-10-25 02:00+01:00" are two instants."""
+    local = dt_util.as_local(value)
+    text = local.strftime("%Y-%m-%d %H:%M")
+    if local.replace(fold=1 - local.fold).utcoffset() != local.utcoffset():
+        text += local.isoformat(timespec="minutes")[-6:]
+    return text
+
+
+def _local_moment(value: datetime | None) -> str:
+    """An instant in local time: the date alone at midnight, else with the time; … if open."""
+    if value is None:
+        return "…"
+    if _at_midnight(value):
+        return dt_util.as_local(value).date().isoformat()
+    return _local_time(value)
+
+
+def _local_period(start: datetime | None, end: datetime | None) -> str:
+    """A half-open period in local time, the one format of the menu and the confirmation.
+
+    Two conventions, told apart by their separator so neither reads as off by one:
+    - Both bounds at local midnight (or open): dates, the END AS THE LAST DAY INCLUDED,
+      with "–": "2026-10-01 – 2026-10-02"; one day is one date; an open end is "…".
+    - A bound inside a day: date and time on both bounds, the END EXCLUSIVE, with "→":
+      "2026-10-11 00:00 → 2026-10-11 12:00" (see _local_time for the repeated hour)."""
+    if _at_midnight(start) and _at_midnight(end):
+        first = "…" if start is None else dt_util.as_local(start).date().isoformat()
+        last = "…" if end is None else dt_util.as_local(end - _TICK).date().isoformat()
+        return first if first == last and start is not None else f"{first} – {last}"
+
+    def _fmt(value: datetime | None) -> str:
+        return "…" if value is None else _local_time(value)
+
+    return f"{_fmt(start)} → {_fmt(end)}"
+
+
+def _desired_text(text: dict[str, str], desired: list[intervals.Interval]) -> str:
+    """What is reversed now: nothing, all of it, from a moment, or the periods."""
+    if not desired:
+        return text["none"]
+    if desired == [(None, None)]:
+        return text["all"]
+    if len(desired) == 1 and desired[0][1] is None:
+        return text["from"].format(start=_local_moment(desired[0][0]))
+    return text["periods"].format(
+        periods=", ".join(_local_period(start, end) for start, end in desired))
+
+
+def _verdict_text(text: dict[str, str], verdict: Verdict) -> str:
+    """The SoC verdict in one sentence. State unknown (too few days checked) is no verdict."""
+    if verdict.state not in ("ok", "verified", "reversed"):
+        return text["no_check"]
+    as_of = "-" if verdict.as_of is None else dt_util.as_local(verdict.as_of).date().isoformat()
+    sentence = text["reversed" if verdict.state == "reversed" else "ok"].format(
+        checked_days=verdict.checked_days, reversed_days=verdict.reversed_days, as_of=as_of)
+    return sentence if verdict.current else sentence + text["stale"]
+
+
+def _local_days(windows: list[tuple[datetime, datetime]]) -> int:
+    """The number of local calendar days the windows touch."""
+    days: set[date] = set()
+    for start, end in windows:
+        day = dt_util.as_local(start).date()
+        last = dt_util.as_local(end - _TICK).date()
+        while day <= last:
+            days.add(day)
+            day += timedelta(days=1)
+    return len(days)
+
+
 def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
     """`user_input` as suggested values for the re-shown form, a cleared field included.
 
@@ -723,6 +880,14 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         # link path need it while the flow is still running. See const.CONF_PLANT_ID for why
         # this is not the config entry_id.
         self._plant_id: str = secrets.token_hex(16)
+        # Reconfigure, a battery role swap waiting for its confirmation: the entry.data
+        # updates of the submit, the battery pair they were computed against
+        # (_battery_sensors), the soc_absent answer still to PATCH (None: unchanged), and
+        # the rebuilt period shown.
+        self._swap_updates: dict[str, Any] | None = None
+        self._swap_from: tuple[list[str], list[str]] | None = None
+        self._swap_soc_absent: bool | None = None
+        self._swap_placeholders: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Step 1: menu – create a new profile or link an existing one
@@ -1216,6 +1381,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="view_only_no_reconfigure")
         errors: dict[str, str] = {}
         if user_input is not None:
+            swap_floor: datetime | None = None
             for key in (CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT):
                 if not user_input.get(key):
                     errors[key] = "required_sensor"
@@ -1227,12 +1393,33 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 await self.async_set_unique_id(entry.unique_id)
                 self._abort_if_unique_id_mismatch()
+                # A sensor moved between charge and discharge: the entity job then rebuilds
+                # both battery fields of every stored row from the replacement floor, months
+                # of history, so the save waits for a confirmation that names the period
+                # (async_step_reconfigure_battery_swap). Nothing uploaded, or no rows on the
+                # server: nothing stored changes, and the save goes ahead unasked. Decided
+                # before the PATCH, so an abort here leaves the server as it was too.
+                if _battery_roles_swapped(entry.data, user_input):
+                    coordinator = getattr(entry, "runtime_data", None)
+                    if coordinator is None:
+                        # Not running: what is uploaded is unknown, and the reload after a
+                        # save would rebuild it unasked.
+                        return self.async_abort(reason="battery_swap_not_loaded")
+                    if coordinator.has_uploaded():
+                        floor = coordinator.replacement_floor()
+                        if floor is coverage.MISSING or floor is None:
+                            # Never a confirmation without a period: the profile poll
+                            # brings data_since shortly. None ("no rows") although rows
+                            # are uploaded counts as unknown too.
+                            return self.async_abort(reason="battery_swap_period_unknown")
+                        swap_floor = floor
                 # soc_absent is mirrored from the server (coordinator _PROFILE_SYNC_KEYS),
                 # so a changed answer is PATCHed first and stored only once the server has
                 # it. A failed PATCH saves nothing from this submit: the form shows the
                 # server's reason or cannot_connect (_refusal) and the user retries.
+                # Behind a swap confirmation the PATCH waits for it, so Cancel sends nothing.
                 soc_absent_changed = soc_absent != bool(entry.data.get(CONF_SOC_ABSENT))
-                if soc_absent_changed:
+                if soc_absent_changed and swap_floor is None:
                     try:
                         await WoltaApiClient(
                             async_get_clientsession(self.hass)
@@ -1256,29 +1443,16 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 if soc_absent_changed:
                     # Unchanged, the entry keeps the server's mirrored value as it is.
                     data_updates[CONF_SOC_ABSENT] = soc_absent
-                new_data = {**entry.data, **data_updates}
-                # The old "ignore" of the soc_missing repair answered an offer, not the
-                # requirement (spec 2026-10-20 §4.2): it is never read again, and any
-                # save drops it.
-                new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
-                # Changed battery sensors replace the stored battery fields (an entity job),
-                # so an open direction repair rests on the old grade: stamp as for a flip
-                # so it is not raised again until the server has recounted.
-                # Order-independent and normalised like the coordinator (a v0.1.0 entry
-                # stores a plain string), so only a real change of sensors stamps.
-                if (sorted(_as_list(user_input[CONF_BATT_IN]))
-                        != sorted(_as_list(entry.data.get(CONF_BATT_IN)))
-                        or sorted(_as_list(user_input[CONF_BATT_OUT]))
-                        != sorted(_as_list(entry.data.get(CONF_BATT_OUT)))):
-                    new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
-                    ir.async_delete_issue(
-                        self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
-                    new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
-                # Reload: the coordinator sees a new entity fingerprint and an entity job
-                # replaces only the changed sensors' fields in the stored history.
-                # `data=` (whole dict), not `data_updates=`: the ignore flags above must
-                # be removed, which a merge cannot do.
-                return self.async_update_reload_and_abort(entry, data=new_data)
+                if swap_floor is not None:
+                    self._swap_updates = data_updates
+                    self._swap_from = _battery_sensors(entry.data)
+                    self._swap_soc_absent = soc_absent if soc_absent_changed else None
+                    self._swap_placeholders = {
+                        "start": dt_util.as_local(swap_floor).date().isoformat(),
+                        "days": str(_local_days([(swap_floor, dt_util.utcnow())])),
+                    }
+                    return await self.async_step_reconfigure_battery_swap()
+                return self._save_reconfigure(entry, data_updates)
 
         defaults = {
             k: entry.data.get(k)
@@ -1349,6 +1523,93 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure", data_schema=schema, errors=errors,
             description_placeholders={"server_detail": self._server_detail})
+
+    def _save_reconfigure(
+        self, entry: ConfigEntry, data_updates: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Store a reconfigure submit and reload. Merged into entry.data as it is now: a
+        swap confirmation answered later (which re-checks only the battery pair) does not
+        revert other keys written meanwhile."""
+        new_data = {**entry.data, **data_updates}
+        # The old "ignore" of the soc_missing repair answered an offer, not the
+        # requirement (spec 2026-10-20 §4.2): it is never read again, and any
+        # save drops it.
+        new_data.pop(CONF_SOC_ISSUE_IGNORED, None)
+        # Changed battery sensors replace the stored battery fields (an entity job),
+        # so an open direction repair rests on the old grade: stamp as for a flip
+        # so it is not raised again until the server has recounted.
+        # Order-independent and normalised like the coordinator (a v0.1.0 entry
+        # stores a plain string), so only a real change of sensors stamps.
+        # CONF_DIRECTION_CHANGED_AT is deliberately not set: it dates changes of the desired
+        # direction, and a sensor change is none. A SoC verdict counted before the entity job
+        # therefore still counts as current, and Battery direction may show its gate when
+        # the rebuilt rows no longer need it. That is the conservative side, and the next
+        # recount settles it.
+        if _battery_sensors(data_updates) != _battery_sensors(entry.data):
+            new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
+            new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
+        # Reload: the coordinator sees a new entity fingerprint and an entity job
+        # replaces only the changed sensors' fields in the stored history.
+        # `data=` (whole dict), not `data_updates=`: the ignore flags above must
+        # be removed, which a merge cannot do.
+        return self.async_update_reload_and_abort(entry, data=new_data)
+
+    async def async_step_reconfigure_battery_swap(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """A sensor moved between charge and discharge over uploaded data: the period the
+        entity job rebuilds, and Battery direction (Configure) as the way to fix mixed-up
+        charge and discharge. A menu, since a form has one button: go on to the
+        confirmation, or cancel and save nothing."""
+        return self.async_show_menu(
+            step_id="reconfigure_battery_swap",
+            menu_options=["reconfigure_battery_swap_confirm", "reconfigure_battery_swap_cancel"],
+            description_placeholders=self._swap_placeholders,
+        )
+
+    async def async_step_reconfigure_battery_swap_cancel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(reason="battery_swap_cancelled")
+
+    async def async_step_reconfigure_battery_swap_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The specific confirmation, unticked: ticked, the submit is saved as the form
+        would have saved it, a changed soc_absent PATCHed first (held back from the submit,
+        so Cancel sends nothing); a failed PATCH saves nothing and is shown here. The battery
+        pair is checked again first: the confirmation was computed from it, and two dialogs
+        open at once must not stack two changes."""
+        entry = self._get_reconfigure_entry()
+        if self._swap_updates is None or _battery_sensors(entry.data) != self._swap_from:
+            return self.async_abort(reason="battery_swap_changed")
+        errors: dict[str, str] = {}
+        self._server_detail = ""
+        if user_input is not None:
+            if not user_input.get(_CONFIRM_SWAP):
+                errors[_CONFIRM_SWAP] = "override_required"
+            elif self._swap_soc_absent is not None:
+                try:
+                    await WoltaApiClient(
+                        async_get_clientsession(self.hass)
+                    ).patch_profile(entry.data[CONF_TOKEN], soc_absent=self._swap_soc_absent)
+                except WoltaApiError as err:
+                    _LOGGER.error("Failed to patch soc_absent: %s", err)
+                    self._server_detail = _refusal(err, errors)
+            if not errors:
+                return self._save_reconfigure(entry, self._swap_updates)
+        return self.async_show_form(
+            step_id="reconfigure_battery_swap_confirm",
+            data_schema=vol.Schema({
+                vol.Required(_CONFIRM_SWAP, default=False): BooleanSelector(
+                    BooleanSelectorConfig()),
+            }),
+            errors=errors,
+            description_placeholders={
+                **self._swap_placeholders, "server_detail": self._server_detail},
+        )
 
     # ------------------------------------------------------------------
     # Linked-profile entry creation (+ invert check when stats suggest swap)
@@ -1798,6 +2059,12 @@ class WoltaOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         """Initialise the options flow."""
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
+        self._direction_target: list[intervals.Interval] | None = None  # the chosen change
+        # The desired direction the change was chosen from: another dialog may change it.
+        self._direction_from: list[intervals.Interval] | None = None
+        # Whether the confirmation shown said stored rows change (direction_confirm) or not
+        # (direction_confirm_unstored); a submit that would do the other aborts.
+        self._direction_shown_stored: bool | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -1805,7 +2072,13 @@ class WoltaOptionsFlow(OptionsFlow):
         """Meny (beslut 2026-08-25): options växte från ETT formulär till flera
         åtgärder. Kostar ett klick för den som bara ska ändra ett värde, men ger
         varje ny åtgärd en plats utan att formuläret sväller."""
-        options = ["settings", "account_link"]
+        options = ["settings"]
+        # Batteriets riktning ändrar lagrad historik, så den har ett eget steg i stället
+        # för en ruta bland inställningarna. Inte i visningsläget: där mappar Woltas
+        # koppling fälten, och den här klienten laddar inte upp något.
+        if not self.config_entry.data.get(CONF_VIEW_ONLY):
+            options.append("battery_direction")
+        options.append("account_link")
         # Zonrättelsen visas bara när det FINNS något att byta till: ett land med en enda
         # zon (t.ex. FI) skulle annars få en meny-post som leder till ett formulär med ett
         # enda alternativ - det redan valda.
@@ -1917,6 +2190,183 @@ class WoltaOptionsFlow(OptionsFlow):
             errors=errors,
         )
 
+    # ------------------------------------------------------------------
+    # Batteriets riktning
+    # ------------------------------------------------------------------
+
+    def _direction_pending(self) -> bool:
+        """A direction change is still on its way to the stored rows (a direction job, or
+        desired ≠ applied). Another change now would be judged from a grade of the old
+        direction, so the step waits, like the repair."""
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        pending = getattr(coordinator, "direction_change_pending", None)
+        return bool(pending()) if callable(pending) else False
+
+    def _direction_verdict(self) -> Verdict | None:
+        """The SoC verdict of the grade the coordinator holds. None while no grade is loaded:
+        after a restart before the first fetch, with the entry not loaded, or with results
+        that carry no grade. A grade without the block is a verdict with state None."""
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        results = getattr(getattr(coordinator, "data", None), "results", None)
+        betyg = results.get("betyg") if isinstance(results, dict) else None
+        if not isinstance(betyg, dict):
+            return None
+        return read_verdict(betyg, self.config_entry.data.get(CONF_DIRECTION_CHANGED_AT))
+
+    def _desired_direction(self) -> list[intervals.Interval]:
+        return intervals.normalize(desired_invert_intervals(self.config_entry.data))
+
+    async def async_step_battery_direction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Swap charged and discharged in the stored history, for a period the owner chooses
+        (it replaces the invert box in Settings). What is reversed now and the server's
+        SoC verdict are shown first; only the choices that change something are offered,
+        and each leads to a confirmation that names the period."""
+        if self._direction_pending():
+            return self.async_abort(reason="direction_pending")
+        verdict = self._direction_verdict()
+        if verdict is None:
+            return self.async_abort(reason="results_not_loaded")
+        desired = self._desired_direction()
+        options = []
+        if desired != [(None, None)]:
+            options.append("direction_flip_all")
+        options.append("direction_flip_from")
+        if desired:
+            options.append("direction_reset")
+        text = _direction_text(self.hass.config.language)
+        return self.async_show_menu(
+            step_id="battery_direction", menu_options=options,
+            description_placeholders={"desired": _desired_text(text, desired),
+                                      "verdict": _verdict_text(text, verdict)})
+
+    async def _direction_choose(self, target: list[intervals.Interval]) -> ConfigFlowResult:
+        """A choice made: remember the target and the desired direction it was chosen from,
+        and go on to the confirmation."""
+        self._direction_from = self._desired_direction()
+        self._direction_target = target
+        self._direction_shown_stored = None
+        return await self.async_step_direction_confirm()
+
+    async def async_step_direction_flip_all(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._direction_choose([(None, None)])
+
+    async def async_step_direction_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._direction_choose([])
+
+    async def async_step_direction_flip_from(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Swap from the start of a local day onward: what is swapped after it stops being
+        swapped, the rest is swapped. The first whole UTC hour at or after local midnight in
+        HA's time zone (the direction job swaps whole hours): in a zone whose offset is not
+        whole hours, rounding down would reach into the day before."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            day = dt_util.parse_date(str(user_input.get(_DIRECTION_FLIP_FROM)))
+            if day is None:
+                errors[_DIRECTION_FLIP_FROM] = "invalid_date"
+            else:
+                midnight = dt_util.as_utc(dt_util.start_of_local_day(day))
+                start = midnight.replace(minute=0, second=0, microsecond=0)
+                if start < midnight:
+                    start += timedelta(hours=1)
+                return await self._direction_choose(
+                    intervals.sym_diff(self._desired_direction(), [(start, None)]))
+        return self.async_show_form(
+            step_id="direction_flip_from",
+            data_schema=vol.Schema(
+                {vol.Required(_DIRECTION_FLIP_FROM): DateSelector(DateSelectorConfig())}),
+            errors=errors,
+        )
+
+    async def async_step_direction_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The specific confirmation every choice leads to: the stored period that changes
+        and how many days, never a confirmation without a period. Two texts, by what the
+        coordinator says about the effect (direction_effect):
+
+        - direction_confirm: the windows of stored rows that swap, as local periods;
+        - direction_confirm_unstored: nothing stored changes (the change lies outside what
+          the server holds from this client, or nothing has been uploaded yet), only the
+          rows still to come follow the new setting.
+
+        Rows are uploaded but the server's data_since is not known yet (the profile poll
+        brings it shortly): the period cannot be named, so the step aborts and asks to try
+        again. Against a current ok/verified/reversed verdict the server refuses the swap
+        without override, so the form then asks for it, unticked. All of it is checked
+        again on submit: two dialogs open at once must not stack two changes."""
+        entry = self.config_entry
+        if self._direction_from is None or self._direction_from != self._desired_direction():
+            return self.async_abort(reason="direction_changed")
+        if self._direction_pending():
+            return self.async_abort(reason="direction_pending")
+        verdict = self._direction_verdict()
+        target = self._direction_target
+        if verdict is None or target is None:
+            return self.async_abort(reason="results_not_loaded")
+        coordinator = entry.runtime_data
+        effect = coordinator.direction_effect(target)
+        if effect is None:
+            if coordinator.has_uploaded():
+                return self.async_abort(reason="direction_period_unknown")
+            effect = []  # nothing uploaded: the direction job has nothing stored to swap
+        if (user_input is not None and self._direction_shown_stored is not None
+                and bool(effect) != self._direction_shown_stored):
+            # The form said stored rows change and now none would, or the other way round:
+            # what was confirmed is not what would happen.
+            return self.async_abort(reason="direction_period_changed")
+        gated = requires_override(verdict)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            # The field exists only when the gate was shown, so a tick means it was.
+            override = bool(user_input.get(_DIRECTION_OVERRIDE))
+            if gated and not override:
+                errors[_DIRECTION_OVERRIDE] = "override_required"
+            else:
+                await apply_direction_target(
+                    self.hass, entry, target, origin="manual", override=override)
+                # The options are not touched: the change lives in entry.data.
+                return self.async_create_entry(title="", data=dict(entry.options))
+
+        placeholders = {"periods": "", "days": "0", "gate": ""}
+        step_id = "direction_confirm" if effect else "direction_confirm_unstored"
+        self._direction_shown_stored = bool(effect)
+        if effect:
+            placeholders["periods"] = ", ".join(_local_period(s, e) for s, e in effect)
+            placeholders["days"] = str(_local_days(effect))
+        schema: dict[Any, Any] = {}
+        if gated:
+            text = _direction_text(self.hass.config.language)
+            if verdict.state == "reversed":
+                gate = text["gate_reversed"]
+                # Only while the repair is there to be opened: the registry, not the verdict,
+                # since the coordinator also keeps it down for some forms and while a flip
+                # is pending, and an ignored one is not shown.
+                issue = ir.async_get(self.hass).async_get_issue(
+                    DOMAIN, f"{_ISSUE_BATTERY_DIRECTION}_{entry.entry_id}")
+                if issue is not None and issue.is_fixable and issue.dismissed_version is None:
+                    gate += text["gate_repair"]
+            else:
+                gate = text["gate_swap" if effect else "gate_unstored"]
+            placeholders["gate"] = gate.format(verdict=_verdict_text(text, verdict))
+            schema[vol.Required(_DIRECTION_OVERRIDE, default=False)] = BooleanSelector(
+                BooleanSelectorConfig())
+        return self.async_show_form(
+            step_id=step_id, data_schema=vol.Schema(schema), errors=errors,
+            description_placeholders=placeholders)
+
+    async def async_step_direction_confirm_unstored(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self.async_step_direction_confirm(user_input)
+
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -2025,13 +2475,6 @@ class WoltaOptionsFlow(OptionsFlow):
                             patch_fields[key] = None
                     elif val != server_val:
                         patch_fields[key] = val
-
-            # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend
-            # field → not PATCHed. It means "the whole history": on → [[None, None]], off →
-            # []. It shows whether any interval is inverted, so only a flip of that writes;
-            # the coordinator's direction job then swaps the stored rows on the server.
-            invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
-            invert_changed = invert_new != bool(desired_invert_intervals(entry.data))
 
             # A percentage of spot needs the fixed part of the grid fee (0 is an answer): the
             # server refuses the PATCH otherwise (422), so the form says it first and sends
@@ -2171,7 +2614,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 # föreslagit datumet igen och därmed återuppväckt ett datum användaren
                 # medvetet rensade.
                 prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
-                if patch_fields or invert_changed or prefill_offered:
+                if patch_fields or prefill_offered:
                     new_data = dict(entry.data)
                     for key, val in patch_fields.items():
                         if val is None:
@@ -2183,15 +2626,6 @@ class WoltaOptionsFlow(OptionsFlow):
                         # above): the fixed price leaving `fixed`, the markup going to it.
                         for key in dropped:
                             new_data.pop(key, None)
-                    if invert_changed:
-                        new_data = with_desired_intervals(
-                            new_data, [(None, None)] if invert_new else [])
-                        # Samma stämpel som när riktningsreparationen vänder: det gamla
-                        # betyget säger fortfarande "reversed" tills servern räknat om.
-                        new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
-                        new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
-                        ir.async_delete_issue(
-                            self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
                     new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
@@ -2215,7 +2649,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
-                    # swallow 429 gracefully anyway. (This refresh also self-heals invert.)
+                    # swallow 429 gracefully anyway.
                     try:
                         await coordinator.async_trigger_recompute()
                     except WoltaRateLimitError:
@@ -2234,15 +2668,6 @@ class WoltaOptionsFlow(OptionsFlow):
                             await coordinator.async_request_refresh()
                         except Exception:  # pylint: disable=broad-except
                             pass
-                elif invert_changed and coordinator is not None:
-                    # Only invert changed (no PATCH): trigger a refresh so the coordinator
-                    # starts the direction job.
-                    try:
-                        await coordinator.async_request_refresh()
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug(
-                            "Options flow: invert refresh failed; will retry.", exc_info=True
-                        )
 
                 return self.async_create_entry(title="", data={})
 
@@ -2399,10 +2824,6 @@ class WoltaOptionsFlow(OptionsFlow):
                 {"collapsed": not (errors.get("base") == "grid_fixed_required"
                                    or any(key in errors
                                           for key in _SECTION_FIELDS[_SEC_TARIFFS]))}),
-            vol.Required(
-                CONF_INVERT_BATTERY,
-                default=bool(desired_invert_intervals(entry.data)),
-            ): BooleanSelector(BooleanSelectorConfig()),
         })
         # Re-show after an error keeps what the user typed (suggested values, section by
         # section), so a refused save does not send them back to the stored values. A field

@@ -339,6 +339,10 @@
     "battery_direction_no_fix": {
       "title": "Wolta: laddning och urladdning ser omkastade ut",
       "description": "När din data säger att batteriet laddar, sjunker batteriets laddningsnivå, och tvärtom. Det gäller {reversed_days} dygn. Wolta kan inte avgöra tillräckligt säkert när det började, och vänder därför inget åt dig. Kontrollera sensorerna för laddning ({batt_in}) och urladdning ({batt_out}) under Konfigurera. Ditt betyg ingår inte i jämförelsen med andra anläggningar, och ekonomin räknas med schabloner, tills riktningen stämmer."
+    },
+    "battery_direction_refused": {
+      "title": "Wolta: laddning och urladdning vändes inte",
+      "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Det som redan hunnit bytas ligger kvar. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
     }
   },
   "config": {
@@ -444,6 +448,24 @@
           "soc_entities": "Krävs för att betyget ska kunna jämföras med andra anläggningar. Historik upp till 365 dagar laddas upp direkt. Du kan ändra valet senare under Konfigurera om."
         }
       },
+      "reconfigure_battery_swap": {
+        "title": "Byta sensorer för laddning och urladdning?",
+        "description": "Du har flyttat en sensor mellan laddning och urladdning. Då bygger Wolta om båda batterifälten i lagrad data från tidigast {start}, där sensorerna har statistik, fram till nu (högst {days} dygn).\n\nGör det bara om fel sensor är vald för laddning eller urladdning. Rapporterar sensorerna laddning som urladdning, använd i stället Konfigurera → Batteriets riktning. Den byter bara det som är lagrat, visar perioden och kan ångras.",
+        "menu_options": {
+          "reconfigure_battery_swap_confirm": "Byt roller ändå",
+          "reconfigure_battery_swap_cancel": "Avbryt: byt inga sensorer"
+        }
+      },
+      "reconfigure_battery_swap_confirm": {
+        "title": "Bygga om batteridata?",
+        "description": "Båda batterifälten i lagrad data byggs om från tidigast {start}, där de nya sensorerna har statistik, fram till nu (högst {days} dygn). Dina övriga ändringar i formuläret sparas samtidigt.",
+        "data": {
+          "confirm_swap": "Byt roller ändå: bygg om batteridata från datumet ovan"
+        },
+        "data_description": {
+          "confirm_swap": "Kryssa bara om fel sensor är vald för laddning eller urladdning. Rapporterar sensorerna laddning som urladdning, använd Konfigurera → Batteriets riktning."
+        }
+      },
       "view_only": {
         "title": "Lägg till i visningsläge",
         "description": "Anläggningen strömmar redan sin data till wolta.se via sin egen koppling (Sonnen-webhook eller Reduxi), så Home Assistant kommer inte att ladda upp något till den. Du får Wolta-sensorerna — betyg, batterivärde, besparing, IRR, payback — och omräkningsknappen. Allt annat hanteras på wolta.se. Skicka för att lägga till anläggningen i visningsläge."
@@ -482,13 +504,18 @@
       "identity_conflict": "Anläggningsidentiteten är redan knuten till en annan profil på wolta.se. Ta bort den andra posten först, eller koppla en annan profil.",
       "control_system_name_required": "Ange styrsystemets namn när du valt Annat.",
       "link_is_read_link": "Det där är anläggningens läslänk. Att koppla integrationen kräver ägar-tokenet – om du har tappat det, koppla anläggningen till ett konto och skapa ett nytt token där.",
-      "token_other_plant": "Den token hör till en annan anläggning. Klistra in den token du skapade för den här anläggningen."
+      "token_other_plant": "Den token hör till en annan anläggning. Klistra in den token du skapade för den här anläggningen.",
+      "override_required": "Kryssa i rutan för att byta roller ändå, eller stäng dialogen."
     },
     "abort": {
       "already_configured": "Wolta är redan konfigurerat",
       "reauth_successful": "Återautentiseringen lyckades",
       "reconfigure_successful": "Sensorerna uppdaterade. De ändrade sensorernas värden ersätts i historiken i bakgrunden.",
-      "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen."
+      "view_only_no_reconfigure": "Anläggningen är tillagd i visningsläge och har inga sensorval att omkonfigurera. För att i stället börja strömma från Home Assistant: ta bort posten och länka om profilen.",
+      "battery_swap_cancelled": "Inga sensorer ändrades. För att byta plats på laddat och urladdat i lagrad data, använd Konfigurera → Batteriets riktning.",
+      "battery_swap_period_unknown": "Wolta har ännu inte läst vilken period den har data för och kan inte visa vad bytet bygger om. Försök igen om några minuter.",
+      "battery_swap_not_loaded": "Wolta körs inte just nu, så det går inte att visa vad som byggs om när en sensor flyttas mellan laddning och urladdning. Försök igen när integrationen har startat, eller läs in Wolta igen under Inställningar → Enheter och tjänster.",
+      "battery_swap_changed": "Batterisensorerna ändrades medan dialogen var öppen. Inget sparades; öppna Konfigurera om på nytt."
     }
   },
   "options": {
@@ -498,6 +525,7 @@
         "description": "Sensorerna byter du via integrationens ⋮-meny → konfigurera om.",
         "menu_options": {
           "settings": "Inställningar",
+          "battery_direction": "Batteriets riktning",
           "account_link": "Koppla till ett wolta.se-konto",
           "zone_correction": "Rätta elområdet"
         }
@@ -563,12 +591,42 @@
               "reduced_energy_tax": "Vissa kommuner i norra Sverige har reducerad energiskatt: ditt nätbolag drar av 9,6 öre/kWh exklusive moms på fakturan. Det gäller alla kommuner i Norrbotten, Västerbotten och Jämtland samt Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen och Torsby. Källa: Skatteverket. Välj Ja om du bor i någon av dem och Nej om du inte gör det. Inte angivet betyder att du inte har svarat: i SE1–SE3 saknar sensorn för inköpspris pris (tillståndet är okänt) tills du gör det."
             }
           }
-        },
+        }
+      },
+      "battery_direction": {
+        "title": "Batteriets riktning",
+        "description": "Byter plats på laddat och urladdat i den data Wolta har sparad, för den period du väljer. Använd det om sensorerna rapporterar laddning som urladdning och tvärtom. Data som laddas upp från och med nu följer också inställningen. Varje val visar perioden innan något ändras.\n\nJust nu: {desired}\n\n{verdict}",
+        "menu_options": {
+          "direction_flip_all": "Byt i hela historiken",
+          "direction_flip_from": "Byt från ett datum",
+          "direction_reset": "Lagra allt som sensorerna visar det"
+        }
+      },
+      "direction_flip_from": {
+        "title": "Byt från ett datum",
+        "description": "Laddat och urladdat byter plats från början av dagen du väljer (Home Assistants tidszon) och framåt. Byter Wolta redan efter den dagen, slutar Wolta byta där. Du ser perioden innan något ändras.",
         "data": {
-          "invert_battery": "Batteriladdning/urladdning omvänd"
+          "start": "Från"
+        }
+      },
+      "direction_confirm": {
+        "title": "Byta plats på laddat och urladdat?",
+        "description": "Laddat och urladdat byter plats i lagrad data {periods} ({days} dygn). Inget skickas om. Du kan ångra genom att välja det motsatta under Batteriets riktning. Wolta sparar de ersatta värdena i 90 dagar.{gate}",
+        "data": {
+          "direction_override": "Ändra ändå: jag har kontrollerat vilken riktning som är rätt"
         },
         "data_description": {
-          "invert_battery": "Slå på om ditt betyg ser inverterat ut (kraftigt negativt). Byter batteriets laddning och urladdning för hela historiken, så du slipper ändra dina Home Assistant-sensorer. Wolta rättar den data som redan finns, inget skickas om. Visas som på även när en reparation vänt bara en del av historiken. Slår du av den gäller den ursprungliga riktningen överallt."
+          "direction_override": "Kryssa bara om du har kontrollerat vilken riktning som är rätt, till exempel att sensorn för laddningsnivå är fel."
+        }
+      },
+      "direction_confirm_unstored": {
+        "title": "Byta plats på laddat och urladdat?",
+        "description": "Ingen lagrad data ändras. Bara data som laddas upp från och med nu följer den nya inställningen. Inget skickas om. Du kan ångra genom att välja det motsatta under Batteriets riktning.{gate}",
+        "data": {
+          "direction_override": "Ändra ändå: jag har kontrollerat vilken riktning som är rätt"
+        },
+        "data_description": {
+          "direction_override": "Kryssa bara om du har kontrollerat vilken riktning som är rätt, till exempel att sensorn för laddningsnivå är fel."
         }
       },
       "account_link": {
@@ -596,11 +654,18 @@
       "purchase_date_after_stages": "Anläggningen har etapper på wolta.se. Inköpsdatumet är första etappens och kan inte vara senare eller tas bort. Lägg senare köp som etapper på wolta.se.",
       "server_rejected": "Wolta nekade ändringen: {server_detail}",
       "cannot_connect": "Kunde inte nå Wolta-API:t – kontrollera internetanslutningen och försök igen.",
-      "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare."
+      "zone_rejected": "Wolta nekade rättelsen. Ett elområde kan bara rättas inom samma valuta, och bara av anläggningens ägare.",
+      "override_required": "Kryssa i rutan för att byta ändå, eller stäng dialogen.",
+      "invalid_date": "Ange ett giltigt datum."
     },
     "abort": {
       "cannot_connect": "Kunde inte nå wolta.se – profilredigering kräver anslutning. Försök igen senare.",
-      "reauth_required": "Profilen finns inte längre på wolta.se – återautentisering har startats, se dina aviseringar."
+      "reauth_required": "Profilen finns inte längre på wolta.se – återautentisering har startats, se dina aviseringar.",
+      "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och försök igen.",
+      "direction_changed": "Batteriets riktning ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
+      "direction_period_changed": "Den lagrade perioden ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
+      "results_not_loaded": "Wolta har inte hämtat ditt betyg sedan Home Assistant startade. Försök igen om några minuter.",
+      "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter."
     }
   },
   "selector": {

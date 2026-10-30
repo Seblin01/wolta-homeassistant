@@ -339,6 +339,10 @@
     "battery_direction_no_fix": {
       "title": "Wolta: charging and discharging look swapped",
       "description": "When your data says the battery is charging, the battery's state of charge falls, and the other way round. This holds for {reversed_days} days. Wolta cannot tell precisely enough when it started, so it flips nothing for you. Check the charge ({batt_in}) and discharge ({batt_out}) sensors under Reconfigure. Your grade is kept out of the comparison with other installations, and the economics use rule-of-thumb figures, until the direction is right."
+    },
+    "battery_direction_refused": {
+      "title": "Wolta: charging and discharging were not swapped",
+      "description": "You changed the battery direction, but the battery's state of charge shows that the stored direction is right: it matched on {ok_days} days and was reversed on {reversed_days}, as of {as_of}. Wolta therefore stopped the change, and the setting now matches the stored history again. What had already been swapped stays swapped. If you know the state-of-charge sensor is wrong, you can make the change anyway under Configure → Battery direction."
     }
   },
   "config": {
@@ -444,6 +448,24 @@
           "soc_entities": "Required for the grade to be compared with other plants. History of up to 365 days is uploaded right away. You can change the choice later under Reconfigure."
         }
       },
+      "reconfigure_battery_swap": {
+        "title": "Swap the charge and discharge sensors?",
+        "description": "You moved a sensor between charge and discharge. Wolta then rebuilds both battery fields of the stored data from {start} at the earliest, where the sensors have statistics, up to now ({days} days at most).\n\nDo this only if the wrong sensor is selected for charge or discharge. If the sensors report charging as discharging, use Configure → Battery direction instead. It swaps only what is stored, shows the period and can be undone.",
+        "menu_options": {
+          "reconfigure_battery_swap_confirm": "Swap the roles anyway",
+          "reconfigure_battery_swap_cancel": "Cancel: change no sensors"
+        }
+      },
+      "reconfigure_battery_swap_confirm": {
+        "title": "Rebuild the battery data?",
+        "description": "Both battery fields of the stored data are rebuilt from {start} at the earliest, where the new sensors have statistics, up to now ({days} days at most). Your other changes in the form are saved at the same time.",
+        "data": {
+          "confirm_swap": "Swap the roles anyway: rebuild the battery data from the date above"
+        },
+        "data_description": {
+          "confirm_swap": "Tick only if the wrong sensor is selected for charge or discharge. If the sensors report charging as discharging, use Configure → Battery direction."
+        }
+      },
       "view_only": {
         "title": "Add in view-only mode",
         "description": "This plant already streams its data to wolta.se through its own connection (Sonnen webhook or Reduxi), so Home Assistant will not upload anything to it. You get the Wolta sensors — grade, battery value, savings, IRR, payback — and the recompute button. Everything else is managed on wolta.se. Submit to add the plant in view-only mode."
@@ -482,13 +504,18 @@
       "identity_conflict": "This plant identity is already bound to another profile on wolta.se. Remove the other entry first, or link a different profile.",
       "control_system_name_required": "Enter the control system's name when you have chosen Other.",
       "link_is_read_link": "That is the plant's read link. Linking the integration needs the owner token – if you have lost it, link the plant to an account and create a new token there.",
-      "token_other_plant": "That token belongs to a different plant. Paste the token you created for this plant."
+      "token_other_plant": "That token belongs to a different plant. Paste the token you created for this plant.",
+      "override_required": "Tick the box to swap the roles anyway, or close the dialog."
     },
     "abort": {
       "already_configured": "Wolta is already configured",
       "reauth_successful": "Re-authentication was successful",
       "reconfigure_successful": "Sensors updated. The changed sensors' values are being replaced in your history in the background.",
-      "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again."
+      "view_only_no_reconfigure": "This plant is added in view-only mode and has no sensor selection to reconfigure. To start streaming from Home Assistant instead, remove this entry and link the profile again.",
+      "battery_swap_cancelled": "No sensors were changed. To swap charged and discharged in the stored data, use Configure → Battery direction.",
+      "battery_swap_period_unknown": "Wolta has not yet read which period it holds data for, so it cannot show what the swap would rebuild. Try again in a few minutes.",
+      "battery_swap_not_loaded": "Wolta is not running right now, so it cannot show what moving a sensor between charge and discharge would rebuild. Try again once the integration has started, or reload Wolta under Settings → Devices & services.",
+      "battery_swap_changed": "The battery sensors changed while this dialog was open. Nothing was saved; open Reconfigure again."
     }
   },
   "options": {
@@ -498,6 +525,7 @@
         "description": "Change the sensors via the integration's ⋮ menu → Reconfigure.",
         "menu_options": {
           "settings": "Settings",
+          "battery_direction": "Battery direction",
           "account_link": "Link to a wolta.se account",
           "zone_correction": "Correct the price zone"
         }
@@ -563,12 +591,42 @@
               "reduced_energy_tax": "Some municipalities in northern Sweden have a reduced energy tax: your grid operator deducts 9.6 öre/kWh excluding VAT on the bill. It applies in all municipalities in Norrbotten, Västerbotten and Jämtland, and in Sollefteå, Ånge, Örnsköldsvik, Ljusdal, Malung-Sälen, Mora, Orsa, Älvdalen and Torsby. Source: Skatteverket. Choose Yes if you live in one of them and No if you do not. Not set means you have not answered: in SE1–SE3 the purchase-price sensor has no price (its state is unknown) until you do."
             }
           }
-        },
+        }
+      },
+      "battery_direction": {
+        "title": "Battery direction",
+        "description": "Swaps charged and discharged in the data Wolta has stored, for the period you choose. Use it if the sensors report charging as discharging and the other way round. Data uploaded from now on follows the setting too. Every choice shows the period before anything changes.\n\nNow: {desired}\n\n{verdict}",
+        "menu_options": {
+          "direction_flip_all": "Swap for the whole history",
+          "direction_flip_from": "Swap from a date",
+          "direction_reset": "Store everything as the sensors report it"
+        }
+      },
+      "direction_flip_from": {
+        "title": "Swap from a date",
+        "description": "Charged and discharged swap places from the start of the day you choose (Home Assistant's time zone) onward. Where Wolta already swaps after that day, it stops swapping there. You see the period before anything changes.",
         "data": {
-          "invert_battery": "Battery charge/discharge reversed"
+          "start": "From"
+        }
+      },
+      "direction_confirm": {
+        "title": "Swap charged and discharged?",
+        "description": "Charged and discharged swap places in the stored data for {periods} ({days} days). Nothing is re-sent. You can undo it by choosing the opposite under Battery direction. Wolta keeps the replaced values for 90 days.{gate}",
+        "data": {
+          "direction_override": "Change anyway: I have checked which direction is right"
         },
         "data_description": {
-          "invert_battery": "Turn on if your grade looks inverted (a strongly negative score). Swaps battery charge and discharge for the whole history, so you don't have to change your Home Assistant sensors. Wolta corrects the data it already has; nothing is re-sent. Also shown as on when a repair flipped only part of the history. Turning it off restores the original direction everywhere."
+          "direction_override": "Tick only if you have checked which direction is right, for example that the state-of-charge sensor is wrong."
+        }
+      },
+      "direction_confirm_unstored": {
+        "title": "Swap charged and discharged?",
+        "description": "No stored data changes. Only data uploaded from now on follows the new setting. Nothing is re-sent. You can undo it by choosing the opposite under Battery direction.{gate}",
+        "data": {
+          "direction_override": "Change anyway: I have checked which direction is right"
+        },
+        "data_description": {
+          "direction_override": "Tick only if you have checked which direction is right, for example that the state-of-charge sensor is wrong."
         }
       },
       "account_link": {
@@ -596,11 +654,18 @@
       "purchase_date_after_stages": "The plant has stages on wolta.se. The purchase date is the first stage's and cannot be later or removed. Add later purchases as stages on wolta.se.",
       "server_rejected": "Wolta refused the change (reason in Swedish): {server_detail}",
       "cannot_connect": "Failed to connect to Wolta API – check your internet connection and try again.",
-      "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner."
+      "zone_rejected": "Wolta rejected the correction. A zone can only be corrected within the same currency, and only by the plant's owner.",
+      "override_required": "Tick the box to swap anyway, or close the dialog.",
+      "invalid_date": "Enter a valid date."
     },
     "abort": {
       "cannot_connect": "Could not reach wolta.se – profile editing needs a connection. Try again later.",
-      "reauth_required": "The profile no longer exists on wolta.se – re-authentication has been started, check your notifications."
+      "reauth_required": "The profile no longer exists on wolta.se – re-authentication has been started, check your notifications.",
+      "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and try again.",
+      "direction_changed": "The battery direction changed while this dialog was open. Open Battery direction again.",
+      "direction_period_changed": "The stored period changed while this dialog was open. Open Battery direction again.",
+      "results_not_loaded": "Wolta has not loaded your grade since Home Assistant started. Try again in a few minutes.",
+      "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes."
     }
   },
   "selector": {
