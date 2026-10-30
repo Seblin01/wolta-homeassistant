@@ -150,13 +150,22 @@ class WoltaReplacementGone(WoltaApiError):
 
 class WoltaReplacementConflict(WoltaApiError):
     """409 with a dict `detail` carrying an `error` code: `conflict`, `count_mismatch`,
-    `empty`, `no_rows_for_swap`, ... `code` is the server error code. A 409 with a
-    string detail (the stream-bound refusal) is not this: it arrives as a plain
-    WoltaApiError with status 409."""
+    `empty`, `no_rows_for_swap`, `direction_verified`, ... `code` is the server error
+    code and `detail` the whole server `detail` object (`{}` when raised without one),
+    e.g. the SoC verdict (`ok_days`, `reversed_days`, `as_of`) behind
+    `direction_verified`. A 409 with a string detail (the stream-bound refusal) is not
+    this: it arrives as a plain WoltaApiError with status 409."""
 
-    def __init__(self, code: str, message: str = "", status: int | None = 409) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str = "",
+        status: int | None = 409,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message or f"Replacement conflict: {code}", status=status)
         self.code = code
+        self.detail: dict[str, Any] = detail or {}
 
 
 class WoltaPlantClaimed(WoltaApiError):
@@ -248,9 +257,12 @@ class WoltaApiClient:
         kwargs["headers"] = {"User-Agent": ua, **(kwargs.get("headers") or {})}
         async with self._session.request(method, url, **kwargs) as resp:
             if _replacement_errors and resp.status in (404, 409, 410):
-                code = await self._error_code(resp)
+                detail = await self._error_detail(resp)
+                code = self._detail_code(detail)
                 if resp.status == 409 and code is not None:
-                    raise WoltaReplacementConflict(code, f"409 {code} from {url}")
+                    raise WoltaReplacementConflict(
+                        code, f"409 {code} from {url}", detail=detail
+                    )
                 if resp.status == 410 or (resp.status == 404 and code is not None):
                     raise WoltaReplacementGone(
                         f"{resp.status} from {url}", status=resp.status, code=code
@@ -288,16 +300,27 @@ class WoltaApiClient:
             except Exception:
                 return None
 
-    @staticmethod
-    async def _error_code(resp: aiohttp.ClientResponse) -> str | None:
+    @classmethod
+    async def _error_code(cls, resp: aiohttp.ClientResponse) -> str | None:
         """The `detail.error` code of an error response, or None for any other shape
         (a plain-string detail, a non-JSON body, an empty body)."""
+        return cls._detail_code(await cls._error_detail(resp))
+
+    @staticmethod
+    async def _error_detail(resp: aiohttp.ClientResponse) -> dict[str, Any]:
+        """The dict `detail` of an error response, or {} for any other shape (a
+        plain-string detail, a non-JSON body, an empty body)."""
         try:
             body = await resp.json(content_type=None)
-        except Exception:  # noqa: BLE001 - an unreadable body is simply "no code"
-            return None
+        except Exception:  # noqa: BLE001 - an unreadable body is simply "no detail"
+            return {}
         detail = body.get("detail") if isinstance(body, dict) else None
-        code = detail.get("error") if isinstance(detail, dict) else None
+        return detail if isinstance(detail, dict) else {}
+
+    @staticmethod
+    def _detail_code(detail: dict[str, Any]) -> str | None:
+        """The `error` code of a `detail` dict, or None when it has none."""
+        code = detail.get("error")
         return code if isinstance(code, str) and code else None
 
     @staticmethod
@@ -563,12 +586,17 @@ class WoltaApiClient:
         window_end: datetime,
         fields: list[str] | None,
         reason: str,
+        override: bool = False,
     ) -> dict:
         """Open (or re-open, idempotently) a replacement of stored flows.
 
         PUT /api/v1/profile/replacements/{rid} -> 201 (new) / 200 (same id and content).
         `fields` is required for kind "rows" and omitted for "swap_battery". The
         window is whole UTC hours; both ends must be timezone-aware.
+
+        `override` is the owner's explicit decision to swap the battery direction
+        against a current SoC verdict; without it the server refuses such a swap with
+        409 `direction_verified` (WoltaReplacementConflict). Sent only when true.
         """
         body: dict[str, Any] = {
             "kind": kind,
@@ -579,6 +607,8 @@ class WoltaApiClient:
         }
         if fields is not None:
             body["fields"] = fields
+        if override:
+            body["override"] = True
         return await self._replacement_request(
             "PUT", f"/profile/replacements/{rid}", json=body, headers=self._auth(token)
         )
