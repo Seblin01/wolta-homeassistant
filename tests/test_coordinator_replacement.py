@@ -3105,6 +3105,9 @@ async def test_origin_and_override_cleared_when_applied_reaches_desired(
     coordinator, _seen = await _direction_coordinator(
         hass, mock_entry, client, desired=[[FROM, None]], applied=[], bookmark=bookmark)
     _change(mock_entry, "manual", True)
+    from custom_components.wolta.const import CONF_DIRECTION_PREVIOUS_CHANGED_AT
+    mock_entry.data = {**mock_entry.data,
+                       CONF_DIRECTION_PREVIOUS_CHANGED_AT: "2026-10-01T08:00:00+00:00"}
 
     with _writes_entry(hass):
         await _cycle(coordinator, D_NOW)
@@ -3115,6 +3118,7 @@ async def test_origin_and_override_cleared_when_applied_reaches_desired(
     assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
     assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == CHANGED_AT
     assert mock_entry.data[CONF_INVERT_INTERVALS] == [[FROM, None]]
+    assert CONF_DIRECTION_PREVIOUS_CHANGED_AT not in mock_entry.data
 
 
 @pytest.mark.asyncio
@@ -3146,14 +3150,10 @@ async def test_direction_verified_resets_desired_and_raises_issue(
     assert mock_entry.data[CONF_INVERT_BATTERY] is False
     assert CONF_DIRECTION_ORIGIN not in mock_entry.data
     assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
-    # The stamp dated the refused change: gone, so the verdict behind the 409 counts as
-    # current and a second try by hand must be confirmed against it.
-    assert CONF_DIRECTION_CHANGED_AT not in mock_entry.data
-    verdict = read_verdict(
-        {"battery_direction": {"state": "verified", "checked_days": 10, "reversed_days": 0,
-                               "as_of": VERIFIED["as_of"]}},
-        mock_entry.data.get(CONF_DIRECTION_CHANGED_AT))
-    assert requires_override(verdict) is True
+    # A window was already swapped after the verdict was counted: the stored rows changed
+    # since, so the refused change's stamp stays and that verdict stays out of date.
+    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == CHANGED_AT
+    assert requires_override(_verdict(mock_entry)) is False
     assert upd.call_count == 1
     coordinator._store.async_save.assert_awaited()
     client.put_data.assert_awaited()  # never paused
@@ -3189,6 +3189,49 @@ async def test_direction_verified_without_detail_says_dash(hass: HomeAssistant, 
     assert mock_entry.data[CONF_INVERT_INTERVALS] == []
     assert _refused_issue(hass, mock_entry).translation_placeholders == {
         "ok_days": "-", "reversed_days": "-", "as_of": "-"}
+    # No verdict time, no earlier change, nothing swapped: the stamp goes, and every
+    # verdict counts as current.
+    assert CONF_DIRECTION_CHANGED_AT not in mock_entry.data
+
+
+def _verdict(mock_entry):
+    return read_verdict(
+        {"battery_direction": {"state": "verified", "checked_days": 10, "reversed_days": 0,
+                               "as_of": VERIFIED["as_of"]}},
+        mock_entry.data.get(CONF_DIRECTION_CHANGED_AT))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous, expected, gated", [
+    # Nothing earlier: the second before the refused verdict, which then counts as current
+    # and gates a second try by hand.
+    (None, "2026-10-13T04:45:09+00:00", True),
+    # An earlier change (a repair) that same morning, after the verdict was counted: the
+    # verdict still describes the direction before it and stays out of date.
+    ("2026-10-13T06:00:00+00:00", "2026-10-13T06:00:00+00:00", False),
+    # An earlier change from before the verdict: the verdict is the newer, and counts.
+    ("2026-10-12T06:00:00+00:00", "2026-10-13T04:45:09+00:00", True),
+], ids=["no_previous", "previous_after_verdict", "previous_before_verdict"])
+async def test_direction_verified_sets_the_change_stamp_back(
+    hass: HomeAssistant, mock_entry, previous, expected, gated
+):
+    from custom_components.wolta.const import CONF_DIRECTION_PREVIOUS_CHANGED_AT
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict(
+        "direction_verified", detail=dict(VERIFIED))
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[FROM, None]], applied=[])
+    _change(mock_entry, "manual", False)
+    if previous is not None:
+        mock_entry.data = {**mock_entry.data, CONF_DIRECTION_PREVIOUS_CHANGED_AT: previous}
+
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+
+    assert mock_entry.data[CONF_INVERT_INTERVALS] == []
+    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == expected
+    assert CONF_DIRECTION_PREVIOUS_CHANGED_AT not in mock_entry.data
+    assert requires_override(_verdict(mock_entry)) is gated
 
 
 def _verdict_betyg(state: str, as_of: str, **block) -> dict:
@@ -3317,8 +3360,9 @@ async def test_direction_effect_matches_direction_next(
 
 @pytest.mark.asyncio
 async def test_direction_effect_none_without_bookmark(hass: HomeAssistant, mock_entry):
-    """None while the bookmark or the server's data_since is unknown; [] when the server
-    holds no rows at all (nothing stored would change)."""
+    """None while the bookmark or the server's data_since is unknown, and when the server
+    said it holds no rows although this client has a bookmark (a value read before the
+    first upload went through)."""
     client = _direction_client()
     coordinator, _seen = await _direction_coordinator(
         hass, mock_entry, client, desired=[], applied=[])
@@ -3335,7 +3379,7 @@ async def test_direction_effect_none_without_bookmark(hass: HomeAssistant, mock_
     coordinator._state["last_uploaded_ts"] = D_BOOKMARK
     client.get_profile.return_value = {**BASE_PROFILE, "data_since": None}
     await coordinator.async_check_profile_sync()
-    assert coordinator.direction_effect(target) == []
+    assert coordinator.direction_effect(target) is None
 
     client.get_profile.return_value = dict(BASE_PROFILE)  # an older server: no data_since
     await coordinator.async_check_profile_sync()
@@ -3343,10 +3387,54 @@ async def test_direction_effect_none_without_bookmark(hass: HomeAssistant, mock_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("put_response", [{"data_since": D_SINCE}, {}, None],
+                         ids=["put_with_data_since", "put_without", "put_no_body"])
+async def test_first_upload_makes_no_rows_unknown_or_takes_the_put_data_since(
+    hass: HomeAssistant, mock_entry, put_response
+):
+    """A new entry: its first profile GET says the server holds no rows, then the first
+    upload goes through. "Nothing stored changes" is no longer true: the preview takes the
+    data_since of the PUT response, or is unknown (None / MISSING) until the next profile
+    GET brings it, so neither Battery direction nor a Reconfigure role swap goes ahead on
+    the old value."""
+    from custom_components.wolta import coverage
+    client = _direction_client(data_since=None)
+    client.put_data.return_value = put_response
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[], applied=[], bookmark=None)
+    target = [(None, None)]
+
+    await coordinator.async_check_profile_sync()
+    assert coordinator.has_uploaded() is False
+    assert coordinator.replacement_floor() is None  # nothing uploaded: nothing rebuilt
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+    client.put_data.assert_awaited()
+    assert coordinator.has_uploaded() is True
+
+    effect = coordinator.direction_effect(target)
+    if put_response and "data_since" in put_response:
+        floor = coordinator._replacement_floor(datetime.fromisoformat(D_SINCE))
+        assert coordinator.replacement_floor() == floor
+        assert effect and effect[0][0] == floor
+    else:
+        assert effect is None
+        assert coordinator.replacement_floor() is coverage.MISSING
+
+    # The next profile GET brings the real value.
+    client.get_profile.return_value = {**BASE_PROFILE, "data_since": D_SINCE}
+    await coordinator.async_check_profile_sync()
+    assert coordinator.direction_effect(target)
+    assert coordinator.replacement_floor() == coordinator._replacement_floor(
+        datetime.fromisoformat(D_SINCE))
+
+
+@pytest.mark.asyncio
 async def test_replacement_floor_known_only_with_data_since(hass: HomeAssistant, mock_entry):
     """The floor Reconfigure names before a role swap, as the entity job plans it
     (_plan_since): _replacement_floor of the latest profile's data_since; MISSING while that
-    is unknown, None when the server holds no rows (nothing is rebuilt)."""
+    is unknown, and when the server said it holds no rows although this client has uploaded;
+    None when it holds none and nothing is uploaded (nothing is rebuilt)."""
     from custom_components.wolta import coverage
     client = _direction_client()
     coordinator, _seen = await _direction_coordinator(
@@ -3359,7 +3447,10 @@ async def test_replacement_floor_known_only_with_data_since(hass: HomeAssistant,
 
     client.get_profile.return_value = {**BASE_PROFILE, "data_since": None}
     await coordinator.async_check_profile_sync()
+    assert coordinator.replacement_floor() is coverage.MISSING  # a bookmark is held
+    coordinator._state.pop("last_uploaded_ts")
     assert coordinator.replacement_floor() is None
+    coordinator._state["last_uploaded_ts"] = D_BOOKMARK
 
     client.get_profile.return_value = dict(BASE_PROFILE)  # an older server: no data_since
     await coordinator.async_check_profile_sync()

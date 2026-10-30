@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -27,12 +27,15 @@ from .const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_DIRECTION_ORIGIN,
     CONF_DIRECTION_OVERRIDE,
+    CONF_DIRECTION_PREVIOUS_CHANGED_AT,
     DOMAIN,
 )
 from .coordinator import (
     _ISSUE_BATTERY_DIRECTION,
     _ISSUE_BATTERY_DIRECTION_REFUSED,
+    day_count,
     direction_swap_intervals,
+    parse_utc,
     with_desired_intervals,
 )
 from .intervals import Interval
@@ -53,22 +56,6 @@ class Verdict:
     current: bool  # counted after the owner's last change of the direction
 
 
-def _parse_utc(value: Any) -> datetime | None:
-    """An ISO time as an aware UTC datetime. A naive time is taken as UTC; anything
-    unreadable is None."""
-    if not isinstance(value, str):
-        return None
-    parsed = dt_util.parse_datetime(value)
-    if parsed is None:
-        return None
-    return dt_util.as_utc(parsed) if parsed.tzinfo else parsed.replace(tzinfo=dt_util.UTC)
-
-
-def _count(value: Any) -> int:
-    # bool är en int i Python, men inget antal dygn.
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def read_verdict(betyg: dict | None, changed_at: str | None) -> Verdict | None:
     """The verdict in ``betyg``, current or not against ``changed_at``
     (CONF_DIRECTION_CHANGED_AT). None when no grade is loaded at all - not the same as a
@@ -84,12 +71,12 @@ def read_verdict(betyg: dict | None, changed_at: str | None) -> Verdict | None:
         return Verdict(state=None, checked_days=0, reversed_days=0, as_of=None,
                        fixable=False, current=False)
     state = block.get("state")
-    as_of = _parse_utc(block.get("as_of"))
-    changed = _parse_utc(changed_at)
+    as_of = parse_utc(block.get("as_of"))
+    changed = parse_utc(changed_at)
     return Verdict(
         state=state if isinstance(state, str) else None,
-        checked_days=_count(block.get("checked_days")),
-        reversed_days=_count(block.get("reversed_days")),
+        checked_days=day_count(block.get("checked_days")) or 0,
+        reversed_days=day_count(block.get("reversed_days")) or 0,
         as_of=as_of,
         fixable=bool(direction_swap_intervals(block)),
         current=changed is None or (as_of is not None and as_of > changed),
@@ -115,6 +102,13 @@ async def apply_direction_target(
     ignore flag cleared (the owner engaged with the direction)."""
     now = dt_util.utcnow().isoformat()
     new_data = with_desired_intervals(entry.data, target)
+    # The stamp this change replaces, for a refusal to fall back on (coordinator
+    # _stamp_after_refusal).
+    previous = entry.data.get(CONF_DIRECTION_CHANGED_AT)
+    if previous is not None:
+        new_data[CONF_DIRECTION_PREVIOUS_CHANGED_AT] = previous
+    else:
+        new_data.pop(CONF_DIRECTION_PREVIOUS_CHANGED_AT, None)
     new_data[CONF_DIRECTION_FLIPPED_AT] = now
     new_data[CONF_DIRECTION_CHANGED_AT] = now
     new_data[CONF_DIRECTION_ORIGIN] = origin

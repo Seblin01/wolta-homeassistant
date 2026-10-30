@@ -169,10 +169,14 @@ CONF_DIRECTION_ISSUE_IGNORED = "direction_issue_ignored"
 CONF_DIRECTION_FLIPPED_AT = "direction_flipped_at"
 # When the owner last changed the desired direction, from the repair or by hand (ISO UTC).
 # Unlike CONF_DIRECTION_FLIPPED_AT a healthy verdict never clears it (_clear_direction_flags):
-# a SoC verdict counted before it describes the old direction (direction.read_verdict). It is
-# dropped only when the server refuses the change it dates (409 direction_verified): nothing
-# changed, and the verdict behind the refusal must count as current. Client-only.
+# a SoC verdict counted before it describes the old direction (direction.read_verdict). When
+# the server refuses the change it dates (409 direction_verified) it is set back so that the
+# verdict behind the refusal counts as current, unless an earlier change or windows already
+# swapped are newer than that verdict (coordinator _direction_refused). Client-only.
 CONF_DIRECTION_CHANGED_AT = "direction_changed_at"
+# CONF_DIRECTION_CHANGED_AT as it was before the change in progress (ISO UTC), for the
+# refusal to fall back on. Dropped when the change is through or refused. Client-only.
+CONF_DIRECTION_PREVIOUS_CHANGED_AT = "direction_previous_changed_at"
 # Varifrån den senaste riktningsändringen kom: "repair" (reparationen) eller "manual"
 # (ägaren valde själv). Kopieras till riktningsjobbet; saknas den räknas den som "repair".
 # Klientlokal nyckel.
