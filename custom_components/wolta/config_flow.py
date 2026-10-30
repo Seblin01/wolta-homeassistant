@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import secrets
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -38,7 +38,7 @@ from homeassistant.helpers.selector import (
 
 from homeassistant.util import dt as dt_util
 
-from . import stats
+from . import intervals, stats
 from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-exported
     MAX_SOC_SENSORS,
     soc_error as _soc_error,
@@ -60,7 +60,8 @@ from .control_system_prefill import (
     control_system_name_selector,
     control_system_selector,
 )
-from .coordinator import desired_invert_intervals, with_desired_intervals
+from .coordinator import _ISSUE_BATTERY_DIRECTION, desired_invert_intervals
+from .direction import Verdict, apply_direction_target, read_verdict, requires_override
 from .const import (
     KEY_BATTERY_EVENTS,
     KEY_BATTERY_STATUS,
@@ -75,6 +76,7 @@ from .const import (
     BATTERY_STATUS_PENDING,
     CONF_BATT_IN,
     CONF_CREATED_BY_HA,
+    CONF_DIRECTION_CHANGED_AT,
     CONF_DIRECTION_FLIPPED_AT,
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_BATT_OUT,
@@ -558,6 +560,145 @@ def _web_summary(hass_language: str | None, server: dict[str, Any]) -> str:
     if not parts:
         return ""
     return " ".join([*parts, text["tail"]])
+
+
+# Batteriets riktning (options): the sentences that depend on the desired direction and the
+# server's SoC verdict, in the user's HA language (sv/en, else English), like _WEB_SUMMARY: a
+# step has one description, so what varies is passed in as a placeholder. Dates are local and
+# language-neutral. The verdict never shows a count of ok days.
+_DIRECTION_TEXT: dict[str, dict[str, str]] = {
+    "sv": {
+        "none": "Inget är omkastat, data lagras som sensorerna visar den.",
+        "all": "Laddat och urladdat är omkastade i hela historiken.",
+        "from": "Laddat och urladdat är omkastade från {start}.",
+        "periods": "Laddat och urladdat är omkastade för {periods}.",
+        "ok": ("Batteriets laddningsnivå säger att riktningen stämmer: kontrollerat "
+               "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
+        "reversed": ("Batteriets laddningsnivå säger att riktningen är omkastad: kontrollerat "
+                     "{checked_days} dygn, {reversed_days} omkastade, per {as_of}."),
+        "stale": " Kontrollen är från före din senaste ändring.",
+        "no_check": "Wolta har ingen kontroll mot laddningsnivån än.",
+        # The gate's lead, true for each state: a swap against ok/verified is refused by the
+        # server; with nothing stored to swap nothing is refused, but it still goes against
+        # the check; against reversed the owner confirms having checked the sensors.
+        "gate_swap": ("\n\n{verdict} Wolta nekar ett byte som går emot laddningsnivån om du inte "
+                      "kryssar i rutan nedan."),
+        "gate_unstored": ("\n\n{verdict} Ändringen går emot laddningsnivån; kryssa i rutan "
+                          "nedan för att göra den ändå."),
+        "gate_reversed": ("\n\n{verdict} Kryssa i rutan nedan för att bekräfta att du har "
+                          "kontrollerat sensorerna."),
+        "gate_repair": (" Reparationen under Inställningar → System → Reparationer byter exakt "
+                        "den period Wolta har sett."),
+    },
+    "en": {
+        "none": "Nothing is reversed; data is stored as the sensors report it.",
+        "all": "Charged and discharged are reversed for the whole history.",
+        "from": "Charged and discharged are reversed from {start}.",
+        "periods": "Charged and discharged are reversed for {periods}.",
+        "ok": ("The battery's state of charge says the direction is right: checked "
+               "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
+        "reversed": ("The battery's state of charge says the direction is reversed: checked "
+                     "{checked_days} days, {reversed_days} reversed, as of {as_of}."),
+        "stale": " The check predates your latest change.",
+        "no_check": "Wolta has no state-of-charge check yet.",
+        "gate_swap": ("\n\n{verdict} Wolta refuses a swap that goes against the state of "
+                      "charge unless you tick the box below."),
+        "gate_unstored": ("\n\n{verdict} The change goes against the state of charge; tick the "
+                          "box below to make it anyway."),
+        "gate_reversed": ("\n\n{verdict} Tick the box below to confirm that you have checked "
+                          "the sensors."),
+        "gate_repair": (" The repair under Settings → System → Repairs swaps exactly the period "
+                        "Wolta has seen."),
+    },
+}
+_DIRECTION_OVERRIDE = "direction_override"
+_DIRECTION_FLIP_FROM = "start"
+_TICK = timedelta(microseconds=1)  # an end is exclusive: its last instant is the one before
+
+
+def _direction_text(hass_language: str | None) -> dict[str, str]:
+    lang = (hass_language or "en").split("-")[0]
+    return _DIRECTION_TEXT.get(lang, _DIRECTION_TEXT["en"])
+
+
+def _at_midnight(value: datetime | None) -> bool:
+    """Open, or at local midnight."""
+    if value is None:
+        return True
+    local = dt_util.as_local(value)
+    return (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0)
+
+
+def _local_time(value: datetime) -> str:
+    """Date and time in local time. In the hour that occurs twice when summer time ends, with
+    the UTC offset: "2026-10-25 02:00+02:00" and "2026-10-25 02:00+01:00" are two instants."""
+    local = dt_util.as_local(value)
+    text = local.strftime("%Y-%m-%d %H:%M")
+    if local.replace(fold=1 - local.fold).utcoffset() != local.utcoffset():
+        text += local.isoformat(timespec="minutes")[-6:]
+    return text
+
+
+def _local_moment(value: datetime | None) -> str:
+    """An instant in local time: the date alone at midnight, else with the time; … if open."""
+    if value is None:
+        return "…"
+    if _at_midnight(value):
+        return dt_util.as_local(value).date().isoformat()
+    return _local_time(value)
+
+
+def _local_period(start: datetime | None, end: datetime | None) -> str:
+    """A half-open period in local time, the one format of the menu and the confirmation.
+
+    Two conventions, told apart by their separator so neither reads as off by one:
+    - Both bounds at local midnight (or open): dates, the END AS THE LAST DAY INCLUDED,
+      with "–": "2026-10-01 – 2026-10-02"; one day is one date; an open end is "…".
+    - A bound inside a day: date and time on both bounds, the END EXCLUSIVE, with "→":
+      "2026-10-11 00:00 → 2026-10-11 12:00" (see _local_time for the repeated hour)."""
+    if _at_midnight(start) and _at_midnight(end):
+        first = "…" if start is None else dt_util.as_local(start).date().isoformat()
+        last = "…" if end is None else dt_util.as_local(end - _TICK).date().isoformat()
+        return first if first == last and start is not None else f"{first} – {last}"
+
+    def _fmt(value: datetime | None) -> str:
+        return "…" if value is None else _local_time(value)
+
+    return f"{_fmt(start)} → {_fmt(end)}"
+
+
+def _desired_text(text: dict[str, str], desired: list[intervals.Interval]) -> str:
+    """What is reversed now: nothing, all of it, from a moment, or the periods."""
+    if not desired:
+        return text["none"]
+    if desired == [(None, None)]:
+        return text["all"]
+    if len(desired) == 1 and desired[0][1] is None:
+        return text["from"].format(start=_local_moment(desired[0][0]))
+    return text["periods"].format(
+        periods=", ".join(_local_period(start, end) for start, end in desired))
+
+
+def _verdict_text(text: dict[str, str], verdict: Verdict) -> str:
+    """The SoC verdict in one sentence. State unknown (too few days checked) is no verdict."""
+    if verdict.state not in ("ok", "verified", "reversed"):
+        return text["no_check"]
+    as_of = "-" if verdict.as_of is None else dt_util.as_local(verdict.as_of).date().isoformat()
+    sentence = text["reversed" if verdict.state == "reversed" else "ok"].format(
+        checked_days=verdict.checked_days, reversed_days=verdict.reversed_days, as_of=as_of)
+    return sentence if verdict.current else sentence + text["stale"]
+
+
+def _local_days(windows: list[tuple[datetime, datetime]]) -> int:
+    """The number of local calendar days the windows touch."""
+    days: set[date] = set()
+    for start, end in windows:
+        day = dt_util.as_local(start).date()
+        last = dt_util.as_local(end - _TICK).date()
+        while day <= last:
+            days.add(day)
+            day += timedelta(days=1)
+    return len(days)
 
 
 def _with_cleared_fields_empty(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -1798,6 +1939,9 @@ class WoltaOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         """Initialise the options flow."""
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
+        self._direction_target: list[intervals.Interval] | None = None  # the chosen change
+        # The desired direction the change was chosen from: another dialog may change it.
+        self._direction_from: list[intervals.Interval] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -1805,7 +1949,13 @@ class WoltaOptionsFlow(OptionsFlow):
         """Meny (beslut 2026-08-25): options växte från ETT formulär till flera
         åtgärder. Kostar ett klick för den som bara ska ändra ett värde, men ger
         varje ny åtgärd en plats utan att formuläret sväller."""
-        options = ["settings", "account_link"]
+        options = ["settings"]
+        # Batteriets riktning ändrar lagrad historik, så den har ett eget steg i stället
+        # för en ruta bland inställningarna. Inte i visningsläget: där mappar Woltas
+        # koppling fälten, och den här klienten laddar inte upp något.
+        if not self.config_entry.data.get(CONF_VIEW_ONLY):
+            options.append("battery_direction")
+        options.append("account_link")
         # Zonrättelsen visas bara när det FINNS något att byta till: ett land med en enda
         # zon (t.ex. FI) skulle annars få en meny-post som leder till ett formulär med ett
         # enda alternativ - det redan valda.
@@ -1917,6 +2067,169 @@ class WoltaOptionsFlow(OptionsFlow):
             errors=errors,
         )
 
+    # ------------------------------------------------------------------
+    # Batteriets riktning
+    # ------------------------------------------------------------------
+
+    def _direction_pending(self) -> bool:
+        """A direction change is still on its way to the stored rows (a direction job, or
+        desired ≠ applied). Another change now would be judged from a grade of the old
+        direction, so the step waits, like the repair."""
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        pending = getattr(coordinator, "direction_change_pending", None)
+        return bool(pending()) if callable(pending) else False
+
+    def _direction_verdict(self) -> Verdict | None:
+        """The SoC verdict of the grade the coordinator holds. None while no grade is loaded:
+        after a restart before the first fetch, or with the entry not loaded. A grade
+        without the block is a verdict with state None."""
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        results = getattr(getattr(coordinator, "data", None), "results", None)
+        if not isinstance(results, dict):
+            return None
+        betyg = results.get("betyg")
+        return read_verdict(betyg if isinstance(betyg, dict) else {},
+                            self.config_entry.data.get(CONF_DIRECTION_CHANGED_AT))
+
+    def _desired_direction(self) -> list[intervals.Interval]:
+        return intervals.normalize(desired_invert_intervals(self.config_entry.data))
+
+    async def async_step_battery_direction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Swap charged and discharged in the stored history, for a period the owner chooses
+        (it replaces the invert box in Settings). What is reversed now and the server's
+        SoC verdict are shown first; only the choices that change something are offered,
+        and each leads to a confirmation that names the period."""
+        if self._direction_pending():
+            return self.async_abort(reason="direction_pending")
+        verdict = self._direction_verdict()
+        if verdict is None:
+            return self.async_abort(reason="results_not_loaded")
+        desired = self._desired_direction()
+        options = []
+        if desired != [(None, None)]:
+            options.append("direction_flip_all")
+        options.append("direction_flip_from")
+        if desired:
+            options.append("direction_reset")
+        text = _direction_text(self.hass.config.language)
+        return self.async_show_menu(
+            step_id="battery_direction", menu_options=options,
+            description_placeholders={"desired": _desired_text(text, desired),
+                                      "verdict": _verdict_text(text, verdict)})
+
+    async def async_step_direction_flip_all(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        self._direction_from = self._desired_direction()
+        self._direction_target = [(None, None)]
+        return await self.async_step_direction_confirm()
+
+    async def async_step_direction_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        self._direction_from = self._desired_direction()
+        self._direction_target = []
+        return await self.async_step_direction_confirm()
+
+    async def async_step_direction_flip_from(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Swap from the start of a local day onward: what is reversed after it turns back,
+        the rest turns. Local midnight in HA's time zone, in UTC, on the whole hour (the
+        direction job swaps whole hours)."""
+        if user_input is not None:
+            day = dt_util.parse_date(str(user_input[_DIRECTION_FLIP_FROM]))
+            if day is not None:
+                start = dt_util.as_utc(dt_util.start_of_local_day(day)).replace(
+                    minute=0, second=0, microsecond=0)
+                self._direction_from = self._desired_direction()
+                self._direction_target = intervals.sym_diff(
+                    self._direction_from, [(start, None)])
+                return await self.async_step_direction_confirm()
+        return self.async_show_form(
+            step_id="direction_flip_from",
+            data_schema=vol.Schema(
+                {vol.Required(_DIRECTION_FLIP_FROM): DateSelector(DateSelectorConfig())}),
+        )
+
+    async def async_step_direction_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The specific confirmation every choice leads to: the stored period that changes
+        and how many days, never a confirmation without a period. Two texts, by what the
+        coordinator says about the effect (direction_effect):
+
+        - direction_confirm: the windows of stored rows that swap, as local periods;
+        - direction_confirm_unstored: nothing stored changes (the change lies outside what
+          the server holds from this client, or nothing has been uploaded yet), only the
+          rows still to come follow the new setting.
+
+        Rows are uploaded but the server's data_since is not known yet (the profile poll
+        brings it shortly): the period cannot be named, so the step aborts and asks to try
+        again. Against a current ok/verified/reversed verdict the server refuses the swap
+        without override, so the form then asks for it, unticked. All of it is checked
+        again on submit: two dialogs open at once must not stack two changes."""
+        entry = self.config_entry
+        if self._direction_from is None or self._direction_from != self._desired_direction():
+            return self.async_abort(reason="direction_changed")
+        if self._direction_pending():
+            return self.async_abort(reason="direction_pending")
+        verdict = self._direction_verdict()
+        target = self._direction_target
+        if verdict is None or target is None:
+            return self.async_abort(reason="results_not_loaded")
+        coordinator = entry.runtime_data
+        effect = coordinator.direction_effect(target)
+        if effect is None:
+            if coordinator.has_uploaded():
+                return self.async_abort(reason="direction_period_unknown")
+            effect = []  # nothing uploaded: the direction job has nothing stored to swap
+        gated = requires_override(verdict)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            # The field exists only when the gate was shown, so a tick means it was.
+            override = bool(user_input.get(_DIRECTION_OVERRIDE))
+            if gated and not override:
+                errors[_DIRECTION_OVERRIDE] = "override_required"
+            else:
+                await apply_direction_target(
+                    self.hass, entry, target, origin="manual", override=override)
+                # The options are not touched: the change lives in entry.data.
+                return self.async_create_entry(title="", data=dict(entry.options))
+
+        placeholders = {"periods": "", "days": "0", "gate": ""}
+        step_id = "direction_confirm" if effect else "direction_confirm_unstored"
+        if effect:
+            placeholders["periods"] = ", ".join(_local_period(s, e) for s, e in effect)
+            placeholders["days"] = str(_local_days(effect))
+        schema: dict[Any, Any] = {}
+        if gated:
+            text = _direction_text(self.hass.config.language)
+            if verdict.state == "reversed":
+                gate = text["gate_reversed"]
+                # Only while the repair is there to be opened: the registry, not the verdict,
+                # since the coordinator also keeps it down for some forms and while a flip
+                # is pending, and an ignored one is not shown.
+                issue = ir.async_get(self.hass).async_get_issue(
+                    DOMAIN, f"{_ISSUE_BATTERY_DIRECTION}_{entry.entry_id}")
+                if issue is not None and issue.is_fixable and issue.dismissed_version is None:
+                    gate += text["gate_repair"]
+            else:
+                gate = text["gate_swap" if effect else "gate_unstored"]
+            placeholders["gate"] = gate.format(verdict=_verdict_text(text, verdict))
+            schema[vol.Required(_DIRECTION_OVERRIDE, default=False)] = BooleanSelector(
+                BooleanSelectorConfig())
+        return self.async_show_form(
+            step_id=step_id, data_schema=vol.Schema(schema), errors=errors,
+            description_placeholders=placeholders)
+
+    async def async_step_direction_confirm_unstored(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self.async_step_direction_confirm(user_input)
+
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -2025,13 +2338,6 @@ class WoltaOptionsFlow(OptionsFlow):
                             patch_fields[key] = None
                     elif val != server_val:
                         patch_fields[key] = val
-
-            # Invert toggle (issue #1): a CLIENT-side upload transformation, not a backend
-            # field → not PATCHed. It means "the whole history": on → [[None, None]], off →
-            # []. It shows whether any interval is inverted, so only a flip of that writes;
-            # the coordinator's direction job then swaps the stored rows on the server.
-            invert_new = bool(user_input.get(CONF_INVERT_BATTERY, False))
-            invert_changed = invert_new != bool(desired_invert_intervals(entry.data))
 
             # A percentage of spot needs the fixed part of the grid fee (0 is an answer): the
             # server refuses the PATCH otherwise (422), so the form says it first and sends
@@ -2171,7 +2477,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 # föreslagit datumet igen och därmed återuppväckt ett datum användaren
                 # medvetet rensade.
                 prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
-                if patch_fields or invert_changed or prefill_offered:
+                if patch_fields or prefill_offered:
                     new_data = dict(entry.data)
                     for key, val in patch_fields.items():
                         if val is None:
@@ -2183,15 +2489,6 @@ class WoltaOptionsFlow(OptionsFlow):
                         # above): the fixed price leaving `fixed`, the markup going to it.
                         for key in dropped:
                             new_data.pop(key, None)
-                    if invert_changed:
-                        new_data = with_desired_intervals(
-                            new_data, [(None, None)] if invert_new else [])
-                        # Samma stämpel som när riktningsreparationen vänder: det gamla
-                        # betyget säger fortfarande "reversed" tills servern räknat om.
-                        new_data[CONF_DIRECTION_FLIPPED_AT] = dt_util.utcnow().isoformat()
-                        new_data.pop(CONF_DIRECTION_ISSUE_IGNORED, None)
-                        ir.async_delete_issue(
-                            self.hass, DOMAIN, f"battery_direction_{entry.entry_id}")
                     new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
 
@@ -2215,7 +2512,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 if patch_fields and coordinator is not None:
                     # Trigger recompute so grade + economy reflect the new values.
                     # PATCH cleared the server-side cooldown, so a 202 is expected;
-                    # swallow 429 gracefully anyway. (This refresh also self-heals invert.)
+                    # swallow 429 gracefully anyway.
                     try:
                         await coordinator.async_trigger_recompute()
                     except WoltaRateLimitError:
@@ -2234,15 +2531,6 @@ class WoltaOptionsFlow(OptionsFlow):
                             await coordinator.async_request_refresh()
                         except Exception:  # pylint: disable=broad-except
                             pass
-                elif invert_changed and coordinator is not None:
-                    # Only invert changed (no PATCH): trigger a refresh so the coordinator
-                    # starts the direction job.
-                    try:
-                        await coordinator.async_request_refresh()
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug(
-                            "Options flow: invert refresh failed; will retry.", exc_info=True
-                        )
 
                 return self.async_create_entry(title="", data={})
 
@@ -2399,10 +2687,6 @@ class WoltaOptionsFlow(OptionsFlow):
                 {"collapsed": not (errors.get("base") == "grid_fixed_required"
                                    or any(key in errors
                                           for key in _SECTION_FIELDS[_SEC_TARIFFS]))}),
-            vol.Required(
-                CONF_INVERT_BATTERY,
-                default=bool(desired_invert_intervals(entry.data)),
-            ): BooleanSelector(BooleanSelectorConfig()),
         })
         # Re-show after an error keeps what the user typed (suggested values, section by
         # section), so a refused save does not send them back to the stored values. A field

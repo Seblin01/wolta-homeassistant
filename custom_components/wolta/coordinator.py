@@ -1868,6 +1868,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             self._direction_remaining(target, []), since,
             datetime.fromisoformat(bookmark) + _QUARTER)
 
+    def has_uploaded(self) -> bool:
+        """Whether this client has uploaded rows (it holds a bookmark). Without one a change
+        of the direction swaps nothing stored (_direction_next): only the rows still to come
+        carry it. direction_effect cannot tell that from an unknown data_since."""
+        return bool(self._state.get("last_uploaded_ts"))
+
     async def _direction_committed(self, job: dict, rep: dict, result: dict) -> None:
         """After a committed swap: keep the server's data_since for the next segment, and
         apply the target right after the last one - unless rows were uploaded past its

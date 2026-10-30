@@ -995,3 +995,51 @@ def test_configure_menu_says_where_the_sensors_are_changed(path: Path) -> None:
     text = _load(path)["options"]["step"]["init"].get("description", "")
     needle = "konfigurera om" if path.name == "sv.json" else "Reconfigure"
     assert needle in text, path.name
+
+
+# --- battery direction (options) ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_direction_refusal_names_the_options_menu_entry(path: Path) -> None:
+    """The refusal sends the owner to Configure → Battery direction: the menu entry must be
+    called exactly that, and the invert box is gone from Settings."""
+    data = _load(path)
+    label = data["options"]["step"]["init"]["menu_options"]["battery_direction"]
+    assert f"→ {label}." in data["issues"]["battery_direction_refused"]["description"]
+    settings = data["options"]["step"]["settings"]
+    assert "invert_battery" not in json.dumps(settings)
+
+
+@pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
+def test_every_direction_confirmation_names_a_period_or_says_nothing_stored_changes(
+        path: Path) -> None:
+    steps = _load(path)["options"]["step"]
+    assert "{periods}" in steps["direction_confirm"]["description"]
+    assert "{days}" in steps["direction_confirm"]["description"]
+    assert "direction_confirm_open" not in steps  # no confirmation without a period
+    for key in ("direction_confirm", "direction_confirm_unstored"):
+        assert steps[key]["description"].endswith("{gate}"), (path.name, key)
+    assert _load(path)["options"]["abort"]["direction_changed"]
+    assert _load(path)["options"]["abort"]["direction_period_unknown"]
+
+
+def test_swedish_direction_confirmation_is_the_agreed_copy() -> None:
+    text = _at(_load(_TRANSLATIONS / "sv.json"),
+               ("options", "step", "direction_confirm", "description"))
+    assert text == (
+        "Laddat och urladdat byter plats i lagrad data {periods} ({days} dygn). Inget skickas "
+        "om. Du kan ångra genom att välja det motsatta under Batteriets riktning. Wolta sparar "
+        "de ersatta värdena i 90 dagar.{gate}")
+
+
+@pytest.mark.parametrize("path, text", [
+    (_TRANSLATIONS / "sv.json", "Kryssa bara om du har kontrollerat vilken riktning som är rätt, "
+                                "till exempel att sensorn för laddningsnivå är fel."),
+    (_TRANSLATIONS / "en.json", "Tick only if you have checked which direction is right, for "
+                                "example that the state-of-charge sensor is wrong."),
+], ids=lambda v: v.name if isinstance(v, Path) else "")
+def test_direction_override_help_fits_every_state(path: Path, text: str) -> None:
+    steps = _load(path)["options"]["step"]
+    for key in ("direction_confirm", "direction_confirm_unstored"):
+        assert steps[key]["data_description"]["direction_override"] == text, (path.name, key)

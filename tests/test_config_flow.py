@@ -1158,10 +1158,7 @@ def _opts(**flat):
     """Bygg sektions-nästlad options-input ur platta fältnycklar."""
     out: dict = {"battery": {}, "economy": {}, "tariffs": {}}
     for k, v in flat.items():
-        if k == CONF_INVERT_BATTERY:
-            out[CONF_INVERT_BATTERY] = v
-        else:
-            out[_OPT_SECTION_OF[k]][k] = v
+        out[_OPT_SECTION_OF[k]][k] = v
     return out
 
 
@@ -1872,51 +1869,6 @@ async def test_options_flow_reserve_pct_zero_is_sent(hass: HomeAssistant) -> Non
     assert updated.data[CONF_RESERVE_PCT] == 0.0
 
 
-async def test_options_flow_invert_toggle_updates_entry_no_patch(hass: HomeAssistant) -> None:
-    """Toggling battery-invert in options → entry.data is updated + coordinator refresh (it
-    starts the direction job), and NO patch_profile (client-side transform, not a backend field)."""
-    entry = _make_mock_entry(hass)
-
-    mock_client = MagicMock()
-    mock_client.patch_profile = AsyncMock()
-    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry))
-    mock_coordinator = MagicMock()
-    mock_coordinator.async_trigger_recompute = AsyncMock()
-    mock_coordinator.async_request_refresh = AsyncMock()
-    entry.runtime_data = mock_coordinator
-
-    with (
-        patch(
-            "custom_components.wolta.config_flow.WoltaApiClient",
-            return_value=mock_client,
-        ),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-    ):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "settings"})
-        assert result["type"] == FlowResultType.FORM
-
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input=_opts(**{
-                CONF_BATTERY_KWH: 22.0,   # unchanged plant values
-                CONF_BATTERY_KW: 5.0,
-                CONF_EFF: 0.9,
-                CONF_INVERT_BATTERY: True,  # turned on
-            }),
-        )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    # Invert is client-side → no backend PATCH
-    mock_client.patch_profile.assert_not_awaited()
-    # The flag is stored in entry.data
-    updated = hass.config_entries.async_get_entry(entry.entry_id)
-    assert updated.data[CONF_INVERT_BATTERY] is True
-    # The coordinator is refreshed → the direction job starts
-    mock_coordinator.async_request_refresh.assert_awaited()
-
-
 @pytest.mark.asyncio
 async def test_options_prefills_from_server_not_cache(hass: HomeAssistant) -> None:
     """entry.data säger 22 kWh men servern 25 → formuläret förifylls med serverns 25
@@ -1986,7 +1938,8 @@ async def test_options_flow_get_failure_aborts(hass: HomeAssistant) -> None:
 async def test_options_ar_en_meny(hass: HomeAssistant) -> None:
     """Options-flowen öppnar med en meny (beslut 2026-08-25): dagens formulär bakom
     "settings", kopplingskoden bakom "account_link", zonrättelsen bakom "zone_correction"
-    (v0.32.0 - posten visas bara när landet har mer än en zon, se _zone_group)."""
+    (v0.32.0 - posten visas bara när landet har mer än en zon, se _zone_group) och
+    batteriets riktning bakom "battery_direction"."""
     from pytest_homeassistant_custom_component.common import MockConfigEntry
 
     entry = MockConfigEntry(
@@ -2003,7 +1956,7 @@ async def test_options_ar_en_meny(hass: HomeAssistant) -> None:
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] == FlowResultType.MENU
         assert set(result["menu_options"]) == {
-            "settings", "account_link", "zone_correction"}
+            "settings", "battery_direction", "account_link", "zone_correction"}
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={"next_step_id": "settings"})
     assert result["type"] == FlowResultType.FORM
@@ -4645,42 +4598,6 @@ def _raise_direction_issue(hass: HomeAssistant, entry) -> str:
 
 
 @pytest.mark.asyncio
-async def test_options_invert_change_stamps_flip_and_clears_direction_repair(
-        hass: HomeAssistant) -> None:
-    from homeassistant.helpers import issue_registry as ir
-    from custom_components.wolta.const import (
-        CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ISSUE_IGNORED)
-    entry = _make_mock_entry(hass)
-    hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_DIRECTION_ISSUE_IGNORED: True})
-    issue_id = _raise_direction_issue(hass, entry)
-    mock_client = MagicMock()
-    mock_client.patch_profile = AsyncMock()
-    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry))
-    mock_coordinator = MagicMock()
-    mock_coordinator.async_trigger_recompute = AsyncMock()
-    mock_coordinator.async_request_refresh = AsyncMock()
-    entry.runtime_data = mock_coordinator
-    with (
-        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
-        patch("custom_components.wolta.config_flow.async_get_clientsession"),
-    ):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "settings"})
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input=_opts(**{CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
-                                CONF_INVERT_BATTERY: True}),
-        )
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    updated = hass.config_entries.async_get_entry(entry.entry_id)
-    assert updated.data[CONF_DIRECTION_FLIPPED_AT]
-    assert CONF_DIRECTION_ISSUE_IGNORED not in updated.data
-    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
-
-
-@pytest.mark.asyncio
 async def test_reconfigure_battery_sensor_swap_stamps_flip_and_clears_repair(
         hass: HomeAssistant) -> None:
     from homeassistant.helpers import issue_registry as ir
@@ -4763,20 +4680,16 @@ async def test_reconfigure_legacy_string_sensor_vs_same_list_does_not_stamp_flip
 
 
 # ---------------------------------------------------------------------------
-# The invert toggle means "the whole history" over the desired intervals
+# Options: the invert box is gone from Settings, Battery direction is its own step
 # ---------------------------------------------------------------------------
 
+_PARTIAL = [["2026-09-28T13:00:00+00:00", None]]
 
-async def _submit_invert(hass, entry, invert: bool):
-    """Open the options flow, return the settings form's invert default, and submit the
-    unchanged plant values with `invert`."""
-    mock_client = MagicMock()
-    mock_client.patch_profile = AsyncMock()
-    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry))
-    mock_coordinator = MagicMock()
-    mock_coordinator.async_trigger_recompute = AsyncMock()
-    mock_coordinator.async_request_refresh = AsyncMock()
-    entry.runtime_data = mock_coordinator
+
+@pytest.mark.asyncio
+async def test_settings_form_has_no_invert_field(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
     with (
         patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
         patch("custom_components.wolta.config_flow.async_get_clientsession"),
@@ -4784,59 +4697,516 @@ async def _submit_invert(hass, entry, invert: bool):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={"next_step_id": "settings"})
-        default = next(
-            k.default() for k in result["data_schema"].schema
-            if str(k) == CONF_INVERT_BATTERY)
-        with patch.object(hass.config_entries, "async_update_entry",
-                          wraps=hass.config_entries.async_update_entry) as upd:
-            result = await hass.config_entries.options.async_configure(
-                result["flow_id"],
-                user_input=_opts(**{CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0,
-                                    CONF_EFF: 0.9, CONF_INVERT_BATTERY: invert}),
-            )
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    return default, upd, mock_coordinator
+    assert result["step_id"] == "settings"
+    assert CONF_INVERT_BATTERY not in {str(k) for k in result["data_schema"].schema}
 
 
 @pytest.mark.asyncio
-async def test_options_invert_on_writes_the_whole_history(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize("stored", [
+    {"invert_intervals": _PARTIAL, CONF_INVERT_BATTERY: False},
+    {"invert_intervals": [[None, None]], CONF_INVERT_BATTERY: True},
+    {CONF_INVERT_BATTERY: True},  # before the coordinator's one-time migration
+], ids=["partial", "all", "legacy"])
+async def test_settings_save_never_changes_invert_intervals(
+        hass: HomeAssistant, stored: dict) -> None:
+    """A save of the settings (a PATCH included) leaves the direction alone: no intervals,
+    no mirror, no stamp, no direction refresh."""
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_CHANGED_AT, CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ORIGIN)
+    entry = _make_mock_entry(hass, stored)
+    issue_id = _raise_direction_issue(hass, entry)
+    mock_client, _ = _mock_options_env(entry)
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input=_opts(**{CONF_BATTERY_KWH: 22.0, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
+                                CONF_COST_SEK: 90000.0}),
+        )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_awaited_once()
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    for key, value in stored.items():
+        assert updated.data[key] == value
+    assert ("invert_intervals" in updated.data) == ("invert_intervals" in stored)
+    for key in (CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_CHANGED_AT, CONF_DIRECTION_ORIGIN):
+        assert key not in updated.data
+    from homeassistant.helpers import issue_registry as ir
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+def _direction_entry(hass: HomeAssistant, desired=None, **extra):
     from custom_components.wolta.const import CONF_INVERT_INTERVALS
-    entry = _make_mock_entry(hass, {CONF_INVERT_INTERVALS: [], CONF_INVERT_BATTERY: False})
-    default, upd, coordinator = await _submit_invert(hass, entry, True)
-    assert default is False
+    data = {CONF_INVERT_INTERVALS: [] if desired is None else desired,
+            CONF_INVERT_BATTERY: desired == [[None, None]], **extra}
+    return _make_mock_entry(hass, data)
+
+
+def _direction_coordinator(entry, *, block=None, results=True, pending=False,
+                           effect=None, uploaded=True):
+    """A runtime coordinator holding a grade with the SoC verdict `block` (none without),
+    `results=False` for no grade loaded yet."""
+    from types import SimpleNamespace
+
+    coordinator = MagicMock()
+    coordinator.direction_change_pending = MagicMock(return_value=pending)
+    betyg = {"total": 70} if block is None else {"total": 70, "battery_direction": block}
+    coordinator.data = SimpleNamespace(results={"betyg": betyg}) if results else None
+    coordinator.direction_effect = MagicMock(return_value=effect)
+    coordinator.has_uploaded = MagicMock(return_value=uploaded)
+    coordinator.async_request_refresh = AsyncMock()
+    entry.runtime_data = coordinator
+    return coordinator
+
+
+def _block(state: str, *, as_of="2026-10-29T04:45:00+00:00", **extra) -> dict:
+    return {"state": state, "form": "all", "checked_days": 30, "reversed_days": 2,
+            "ok_days": 28, "as_of": as_of, **extra}
+
+
+async def _open_direction(hass: HomeAssistant, entry):
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "battery_direction"})
+
+
+async def _direction_choice(hass: HomeAssistant, entry, choice: str):
+    result = await _open_direction(hass, entry)
+    assert result["type"] == FlowResultType.MENU, result
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": choice})
+
+
+def _override_marker(result):
+    return next((k for k in result["data_schema"].schema if str(k) == "direction_override"),
+                None)
+
+
+@pytest.mark.asyncio
+async def test_menu_offers_battery_direction(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.MENU
+    options = list(result["menu_options"])
+    assert options[options.index("settings") + 1] == "battery_direction"
+
+
+@pytest.mark.asyncio
+async def test_menu_hides_battery_direction_in_view_only(hass: HomeAssistant) -> None:
+    """Visningsläget laddar inte upp något: riktningen sätts av Woltas koppling. The rest of
+    the menu stays as it was."""
+    from custom_components.wolta.const import CONF_VIEW_ONLY
+    entry = _make_mock_entry(hass, {CONF_VIEW_ONLY: True})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["menu_options"] == ["settings", "account_link", "zone_correction"]
+
+
+@pytest.mark.asyncio
+async def test_direction_aborts_while_change_pending(hass: HomeAssistant) -> None:
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, block=_block("ok"), pending=True)
+    result = await _open_direction(hass, entry)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["not_fetched", "no_coordinator"])
+async def test_direction_aborts_without_results(hass: HomeAssistant, runtime: str) -> None:
+    """After a restart, before the first fetch, there is no verdict to judge the change
+    against: the step does not guess."""
+    entry = _direction_entry(hass)
+    if runtime == "not_fetched":
+        _direction_coordinator(entry, results=False)
+    result = await _open_direction(hass, entry)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "results_not_loaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("desired, needle", [
+    ([], "Nothing is reversed"),
+    ([[None, None]], "reversed for the whole history"),
+    ([["2026-09-30T22:00:00+00:00", None]], "reversed from 2026-10-01."),
+    # Bounds at local midnight: dates, the end as the last day included.
+    ([["2026-09-30T22:00:00+00:00", "2026-10-02T22:00:00+00:00"],
+      ["2026-10-09T22:00:00+00:00", "2026-10-10T22:00:00+00:00"]],
+     "reversed for 2026-10-01 – 2026-10-02, 2026-10-10."),
+    # A bound inside a day: date and time, the end exclusive.
+    ([["2026-09-28T13:00:00+00:00", "2026-10-02T22:00:00+00:00"]],
+     "reversed for 2026-09-28 15:00 → 2026-10-03 00:00."),
+], ids=["none", "all", "from", "periods_days", "periods_times"])
+async def test_direction_menu_describes_desired_and_verdict(
+        hass: HomeAssistant, desired, needle) -> None:
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    entry = _direction_entry(hass, desired)
+    _direction_coordinator(entry, block=_block("verified"))
+    result = await _open_direction(hass, entry)
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "battery_direction"
+    placeholders = result["description_placeholders"]
+    assert needle in placeholders["desired"]
+    verdict = placeholders["verdict"]
+    assert "checked 30 days, 2 reversed, as of 2026-10-29" in verdict
+    assert "28" not in verdict  # never the ok days
+    assert "predates" not in verdict
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block, changed_at, expected", [
+    (_block("ok"), "2026-10-29T12:00:00+00:00",
+     "The battery's state of charge says the direction is right: checked 30 days, "
+     "2 reversed, as of 2026-10-29. The check predates your latest change."),
+    (None, None, "Wolta has no state-of-charge check yet."),
+    (_block("unknown"), None, "Wolta has no state-of-charge check yet."),
+], ids=["stale", "no_block", "unknown"])
+async def test_direction_menu_says_a_stale_or_missing_verdict(
+        hass: HomeAssistant, block, changed_at, expected) -> None:
+    from custom_components.wolta.const import CONF_DIRECTION_CHANGED_AT
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    extra = {CONF_DIRECTION_CHANGED_AT: changed_at} if changed_at else {}
+    entry = _direction_entry(hass, **extra)
+    _direction_coordinator(entry, block=block)
+    result = await _open_direction(hass, entry)
+    assert result["description_placeholders"]["verdict"] == expected
+
+
+@pytest.mark.asyncio
+async def test_direction_menu_texts_follow_the_language(hass: HomeAssistant) -> None:
+    hass.config.language = "sv"
+    entry = _direction_entry(hass, [[None, None]])
+    _direction_coordinator(entry, block=_block("reversed"))
+    result = await _open_direction(hass, entry)
+    placeholders = result["description_placeholders"]
+    assert "hela historiken" in placeholders["desired"]
+    assert "kontrollerat 30 dygn, 2 omkastade" in placeholders["verdict"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("desired, options", [
+    ([], ["direction_flip_all", "direction_flip_from"]),
+    ([[None, None]], ["direction_flip_from", "direction_reset"]),
+    (_PARTIAL, ["direction_flip_all", "direction_flip_from", "direction_reset"]),
+], ids=["none", "all", "partial"])
+async def test_direction_menu_shows_only_meaningful_actions(
+        hass: HomeAssistant, desired, options) -> None:
+    entry = _direction_entry(hass, desired)
+    _direction_coordinator(entry, block=_block("ok"))
+    result = await _open_direction(hass, entry)
+    assert result["menu_options"] == options
+
+
+@pytest.mark.asyncio
+async def test_direction_confirm_lists_effect_dates_and_days(hass: HomeAssistant) -> None:
+    from datetime import datetime, timezone
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    utc = timezone.utc
+    effect = [
+        (datetime(2026, 9, 30, 22, tzinfo=utc), datetime(2026, 10, 2, 22, tzinfo=utc)),
+        (datetime(2026, 10, 10, 22, tzinfo=utc), datetime(2026, 10, 11, 10, tzinfo=utc)),
+    ]
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(entry, effect=effect)
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "direction_confirm"
+    coordinator.direction_effect.assert_called_with([(None, None)])
+    placeholders = result["description_placeholders"]
+    # The same format as the menu: whole days inclusive, a time-bounded window with →.
+    assert placeholders["periods"] == (
+        "2026-10-01 – 2026-10-02, 2026-10-11 00:00 → 2026-10-11 12:00")
+    assert placeholders["days"] == "3"
+    assert _override_marker(result) is None  # no verdict: no gate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effect, uploaded", [([], True), (None, False)],
+                         ids=["nothing_stored_changes", "nothing_uploaded_yet"])
+async def test_direction_effect_empty_says_so(hass: HomeAssistant, effect, uploaded) -> None:
+    """No stored row changes (the change lies outside the stored history, or nothing has
+    been uploaded): the confirmation says that instead of an empty period."""
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, effect=effect, uploaded=uploaded)
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert result["step_id"] == "direction_confirm_unstored"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[
+        CONF_INVERT_INTERVALS] == [[None, None]]
+
+
+async def _direction_action(hass: HomeAssistant, entry, choice: str):
+    """Choose an action; the date form of flip_from is filled in with 2026-10-01."""
+    result = await _direction_choice(hass, entry, choice)
+    if choice == "direction_flip_from":
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"start": "2026-10-01"})
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice, desired", [
+    ("direction_flip_all", []),
+    ("direction_reset", [[None, None]]),
+    ("direction_flip_from", []),
+], ids=["flip_all", "reset", "flip_from"])
+async def test_direction_effect_unknown_aborts(hass: HomeAssistant, choice, desired) -> None:
+    """Rows are uploaded but the server's data_since is not known yet: the stored period
+    cannot be named, and a confirmation without one is not given. The profile poll fills it
+    in shortly, so the owner is asked to try again."""
+    entry = _direction_entry(hass, desired)
+    _direction_coordinator(entry, effect=None, uploaded=True)
+    result = await _direction_action(hass, entry, choice)
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_period_unknown"
+
+
+@pytest.mark.asyncio
+async def test_direction_effect_unknown_on_submit_aborts(hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(entry, effect=[], uploaded=True)
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert result["type"] == FlowResultType.FORM
+    coordinator.direction_effect.return_value = None
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_period_unknown"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_INVERT_INTERVALS] == []
+
+
+@pytest.mark.asyncio
+async def test_direction_changed_in_another_dialog_aborts(hass: HomeAssistant) -> None:
+    """Two dialogs open at once: the desired direction this one chose from changed under it,
+    so its target (built from the old one) is not applied."""
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_INVERT_INTERVALS: _PARTIAL})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_changed"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[
+        CONF_INVERT_INTERVALS] == _PARTIAL
+
+
+_NO_REPAIR = "Tick the box below to confirm that you have checked the sensors."
+_WITH_REPAIR = (_NO_REPAIR + " The repair under Settings → System → Repairs swaps exactly the "
+                "period Wolta has seen.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block, effect, issue, expected, absent", [
+    (_block("verified"), "windows", None,
+     "Wolta refuses a swap that goes against the state of charge unless you tick the box "
+     "below.", "make it anyway"),
+    (_block("ok"), [], None,
+     "The change goes against the state of charge; tick the box below to make it anyway.",
+     "refuses"),
+    # The repair sentence follows the issue registry, not the verdict: the coordinator also
+    # keeps the repair down for other forms and while a flip is pending.
+    (_block("reversed"), [], "fixable", _WITH_REPAIR, "refuses"),
+    (_block("reversed"), [], None, _NO_REPAIR, "Repairs"),
+    (_block("reversed"), [], "dismissed", _NO_REPAIR, "Repairs"),
+    (_block("reversed", form="unclear"), "windows", "text_only", _NO_REPAIR, "Repairs"),
+], ids=["verified_swap", "ok_unstored", "reversed_repair_shown", "reversed_no_repair",
+        "reversed_repair_dismissed", "reversed_repair_not_fixable"])
+async def test_direction_gate_wording_is_true_for_the_state(
+        hass: HomeAssistant, block, effect, issue, expected, absent) -> None:
+    from datetime import datetime, timezone
+    from homeassistant.helpers import issue_registry as ir
+    if effect == "windows":
+        effect = [(datetime(2026, 9, 30, 22, tzinfo=timezone.utc),
+                   datetime(2026, 10, 2, 22, tzinfo=timezone.utc))]
+    entry = _direction_entry(hass)
+    if issue is not None:
+        issue_id = f"battery_direction_{entry.entry_id}"
+        ir.async_create_issue(hass, DOMAIN, issue_id, is_fixable=issue != "text_only",
+                              severity=ir.IssueSeverity.WARNING,
+                              translation_key="battery_direction_all",
+                              translation_placeholders={})
+        if issue == "dismissed":
+            ir.async_get(hass).async_ignore(DOMAIN, issue_id, True)
+    _direction_coordinator(entry, block=block, effect=effect)
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    gate = result["description_placeholders"]["gate"]
+    assert gate.endswith(expected), gate
+    assert absent not in gate
+
+
+@pytest.mark.asyncio
+async def test_direction_period_shows_the_offset_on_the_repeated_hour(
+        hass: HomeAssistant) -> None:
+    """The hour 02:00-03:00 occurs twice when summer time ends (2026-10-25 in Stockholm): a
+    bound there carries its UTC offset so the two bounds of a one-hour window differ."""
+    from datetime import datetime, timezone
+    from custom_components.wolta.config_flow import _local_period
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    utc = timezone.utc
+    assert _local_period(datetime(2026, 10, 25, 0, tzinfo=utc),
+                         datetime(2026, 10, 25, 1, tzinfo=utc)) == (
+        "2026-10-25 02:00+02:00 → 2026-10-25 02:00+01:00")
+    assert _local_period(datetime(2026, 10, 25, 1, tzinfo=utc),
+                         datetime(2026, 10, 25, 3, tzinfo=utc)) == (
+        "2026-10-25 02:00+01:00 → 2026-10-25 04:00")
+    assert _local_period(datetime(2026, 10, 24, 10, tzinfo=utc),
+                         datetime(2026, 10, 24, 11, tzinfo=utc)) == (
+        "2026-10-24 12:00 → 2026-10-24 13:00")
+
+
+@pytest.mark.asyncio
+async def test_direction_gate_wording_follows_the_language(hass: HomeAssistant) -> None:
+    hass.config.language = "sv"
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, block=_block("ok"), effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert result["description_placeholders"]["gate"].endswith(
+        "Ändringen går emot laddningsnivån; kryssa i rutan nedan för att göra den ändå.")
+
+
+@pytest.mark.asyncio
+async def test_direction_confirm_requires_override_on_verified(hass: HomeAssistant) -> None:
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_OVERRIDE, CONF_INVERT_INTERVALS)
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, block=_block("verified"), effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    marker = _override_marker(result)
+    assert marker is not None and isinstance(marker, vol.Required)
+    assert marker.default() is False
+    gate = result["description_placeholders"]["gate"]
+    assert "checked 30 days, 2 reversed, as of 2026-10-29" in gate
+    assert "28" not in gate
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"direction_override": False})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"direction_override": "override_required"}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_INVERT_INTERVALS] == []
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"direction_override": True})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = hass.config_entries.async_get_entry(entry.entry_id).data
+    assert data[CONF_INVERT_INTERVALS] == [[None, None]]
+    assert data[CONF_DIRECTION_OVERRIDE] is True
+
+
+@pytest.mark.asyncio
+async def test_direction_confirm_requires_override_on_reversed_not_fixable(
+        hass: HomeAssistant) -> None:
+    """A reversed verdict without intervals to flip has no repair to follow: the step is the
+    way, and it is gated like any current verdict."""
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, block=_block("reversed", form="unclear"), effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert _override_marker(result) is not None
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"direction_override": False})
+    assert result["errors"] == {"direction_override": "override_required"}
+
+
+@pytest.mark.asyncio
+async def test_direction_stale_verdict_needs_no_override(hass: HomeAssistant) -> None:
+    """Undo on the day of a change: the verdict was counted before it, describes the old
+    direction and must not gate undoing it."""
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_CHANGED_AT, CONF_DIRECTION_OVERRIDE, CONF_INVERT_INTERVALS)
+    entry = _direction_entry(hass, [[None, None]],
+                             **{CONF_DIRECTION_CHANGED_AT: "2026-10-29T12:00:00+00:00"})
+    _direction_coordinator(entry, block=_block("verified"), effect=[])
+    result = await _direction_choice(hass, entry, "direction_reset")
+    assert _override_marker(result) is None
+    assert result["description_placeholders"]["gate"] == ""
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    data = hass.config_entries.async_get_entry(entry.entry_id).data
+    assert data[CONF_INVERT_INTERVALS] == []
+    assert data[CONF_DIRECTION_OVERRIDE] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block", [None, _block("unknown", as_of=None)],
+                         ids=["no_block", "unknown"])
+async def test_direction_unknown_verdict_needs_no_override(hass: HomeAssistant, block) -> None:
+    entry = _direction_entry(hass)
+    _direction_coordinator(entry, block=block, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    assert _override_marker(result) is None
+
+
+@pytest.mark.asyncio
+async def test_direction_confirm_applies_manual_origin(hass: HomeAssistant) -> None:
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_CHANGED_AT, CONF_DIRECTION_FLIPPED_AT, CONF_DIRECTION_ORIGIN,
+        CONF_DIRECTION_OVERRIDE, CONF_INVERT_INTERVALS)
+    entry = _direction_entry(hass, _PARTIAL)
+    hass.config_entries.async_update_entry(entry, options={"kept": True})
+    issue_id = _raise_direction_issue(hass, entry)
+    coordinator = _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
     updated = hass.config_entries.async_get_entry(entry.entry_id)
     assert updated.data[CONF_INVERT_INTERVALS] == [[None, None]]
     assert updated.data[CONF_INVERT_BATTERY] is True
-    coordinator.async_request_refresh.assert_awaited()
+    assert updated.data[CONF_DIRECTION_ORIGIN] == "manual"
+    assert updated.data[CONF_DIRECTION_OVERRIDE] is False
+    assert updated.data[CONF_DIRECTION_CHANGED_AT] and updated.data[CONF_DIRECTION_FLIPPED_AT]
+    assert updated.options == {"kept": True}  # finishing the flow leaves the options alone
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+    coordinator.async_request_refresh.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_options_invert_off_clears_every_interval(hass: HomeAssistant) -> None:
-    """A partial flip (from a repair) shows as on; turning it off restores [] everywhere."""
+async def test_direction_confirm_rechecks_pending_on_submit(hass: HomeAssistant) -> None:
+    """Two dialogs open at once: the second confirmation must not stack a change on the
+    first one's."""
     from custom_components.wolta.const import CONF_INVERT_INTERVALS
-    entry = _make_mock_entry(hass, {
-        CONF_INVERT_INTERVALS: [["2026-09-28T13:00:00+00:00", None]],
-        CONF_INVERT_BATTERY: False})
-    default, _upd, _c = await _submit_invert(hass, entry, False)
-    assert default is True
-    updated = hass.config_entries.async_get_entry(entry.entry_id)
-    assert updated.data[CONF_INVERT_INTERVALS] == []
-    assert updated.data[CONF_INVERT_BATTERY] is False
+    entry = _direction_entry(hass)
+    coordinator = _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_all")
+    coordinator.direction_change_pending.return_value = True
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "direction_pending"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_INVERT_INTERVALS] == []
 
 
 @pytest.mark.asyncio
-async def test_options_invert_unchanged_writes_nothing(hass: HomeAssistant) -> None:
-    """Left on over a partial flip: no write, the partial intervals stay."""
-    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT, CONF_INVERT_INTERVALS
-    partial = [["2026-09-28T13:00:00+00:00", None]]
-    entry = _make_mock_entry(hass, {CONF_INVERT_INTERVALS: partial, CONF_INVERT_BATTERY: False})
-    _default, upd, coordinator = await _submit_invert(hass, entry, True)
-    # (Finishing an options flow writes the options; entry.data is not written.)
-    assert all("data" not in c.kwargs for c in upd.call_args_list)
-    updated = hass.config_entries.async_get_entry(entry.entry_id)
-    assert updated.data[CONF_INVERT_INTERVALS] == partial
-    assert CONF_DIRECTION_FLIPPED_AT not in updated.data
-    coordinator.async_request_refresh.assert_not_awaited()
+@pytest.mark.parametrize("desired, expected", [
+    ([], [["2026-09-30T22:00:00+00:00", None]]),
+    # Already reversed from 2026-09-28: the period after the date turns back.
+    (_PARTIAL, [["2026-09-28T13:00:00+00:00", "2026-09-30T22:00:00+00:00"]]),
+], ids=["from_none", "over_partial"])
+async def test_direction_flip_from_uses_local_midnight(
+        hass: HomeAssistant, desired, expected) -> None:
+    from custom_components.wolta.const import CONF_INVERT_INTERVALS
+    await hass.config.async_set_time_zone("Europe/Stockholm")
+    entry = _direction_entry(hass, desired)
+    coordinator = _direction_coordinator(entry, effect=[])
+    result = await _direction_choice(hass, entry, "direction_flip_from")
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "direction_flip_from"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"start": "2026-10-01"})
+    assert result["step_id"] == "direction_confirm_unstored"
+    from custom_components.wolta import intervals
+    assert intervals.dump(coordinator.direction_effect.call_args.args[0]) == expected
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[
+        CONF_INVERT_INTERVALS] == expected
 
 
 # ---------------------------------------------------------------------------
