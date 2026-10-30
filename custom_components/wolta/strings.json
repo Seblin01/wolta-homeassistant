@@ -663,6 +663,7 @@
       "reauth_required": "The profile no longer exists on wolta.se – re-authentication has been started, check your notifications.",
       "direction_pending": "The battery direction is already being changed in the data Wolta stores. Wait until that is done and try again.",
       "direction_changed": "The battery direction changed while this dialog was open. Open Battery direction again.",
+      "direction_period_changed": "The stored period changed while this dialog was open. Open Battery direction again.",
       "results_not_loaded": "Wolta has not loaded your grade since Home Assistant started. Try again in a few minutes.",
       "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes."
     }

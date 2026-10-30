@@ -17,7 +17,6 @@ from custom_components.wolta.const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_DIRECTION_ORIGIN,
     CONF_DIRECTION_OVERRIDE,
-    CONF_DIRECTION_PREVIOUS_CHANGED_AT,
     CONF_INVERT_BATTERY,
     CONF_INVERT_INTERVALS,
     DOMAIN,
@@ -213,24 +212,6 @@ async def test_clear_direction_flags_keeps_changed_at_origin_override(hass: Home
     assert new_data[CONF_DIRECTION_CHANGED_AT] == "2026-10-12T10:00:00+00:00"
     assert new_data[CONF_DIRECTION_ORIGIN] == "manual"
     assert new_data[CONF_DIRECTION_OVERRIDE] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("before, expected", [
-    ({CONF_DIRECTION_CHANGED_AT: "2026-10-12T10:00:00+00:00"}, "2026-10-12T10:00:00+00:00"),
-    ({}, None),
-    # A leftover from an earlier change never stands in for a missing stamp.
-    ({CONF_DIRECTION_PREVIOUS_CHANGED_AT: "2026-09-01T10:00:00+00:00"}, None),
-], ids=["earlier_change", "first_change", "leftover"])
-async def test_apply_target_keeps_the_stamp_it_replaces(hass: HomeAssistant, before, expected):
-    """The refusal of this change falls back on the stamp before it (coordinator
-    _stamp_after_refusal)."""
-    entry, _c = _entry({CONF_INVERT_INTERVALS: [], CONF_INVERT_BATTERY: False, **before})
-    hass.config_entries.async_update_entry = MagicMock()
-    await apply_direction_target(hass, entry, [(None, None)], origin="manual")
-    new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
-    assert new_data.get(CONF_DIRECTION_PREVIOUS_CHANGED_AT) == expected
-    assert new_data[CONF_DIRECTION_CHANGED_AT] != expected
 
 
 @pytest.mark.parametrize("value, expected", [

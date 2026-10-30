@@ -52,7 +52,6 @@ from .const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_DIRECTION_ORIGIN,
     CONF_DIRECTION_OVERRIDE,
-    CONF_DIRECTION_PREVIOUS_CHANGED_AT,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EFFICIENCY_ISSUE_IGNORED,
@@ -1943,15 +1942,13 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             self._clear_direction_origin()
 
     def _clear_direction_origin(self) -> None:
-        """Drop the origin, override and previous stamp of a direction change from
-        entry.data (the change stamp stays: it dates the change for the SoC verdict,
-        direction.read_verdict)."""
+        """Drop the origin and override of a direction change from entry.data (the change
+        stamp stays: it dates the change for the SoC verdict, direction.read_verdict)."""
         data = self.config_entry.data
-        keys = (CONF_DIRECTION_ORIGIN, CONF_DIRECTION_OVERRIDE,
-                CONF_DIRECTION_PREVIOUS_CHANGED_AT)
-        if not any(key in data for key in keys):
+        if CONF_DIRECTION_ORIGIN not in data and CONF_DIRECTION_OVERRIDE not in data:
             return
-        new_data = {k: v for k, v in data.items() if k not in keys}
+        new_data = {k: v for k, v in data.items()
+                    if k not in (CONF_DIRECTION_ORIGIN, CONF_DIRECTION_OVERRIDE)}
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
     async def _direction_refused(self, job: dict, detail: dict) -> None:
@@ -1962,18 +1959,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         becomes the applied one - in one entry write that also drops origin and override,
         so the next cycle queues nothing - and the owner is told.
 
-        The same write sets CONF_DIRECTION_CHANGED_AT back (_stamp_after_refusal): it dates
-        the refused change, and kept it would make the very verdict the server refused with
-        (counted earlier that night) look stale (direction.read_verdict), so a second try by
-        hand would go out without override and be refused again until the next recount.
+        The same write sets CONF_DIRECTION_CHANGED_AT to the second before the refused
+        verdict's as_of. The stamp dated the refused change, and kept it would make the very
+        verdict the server refused with (counted earlier that night) look stale
+        (direction.read_verdict), so a second try by hand would go out without override and
+        be refused again until the next recount. The 409 shows the server holds that verdict
+        current, whatever changed before it (an earlier change, or windows this job already
+        swapped), and any later verdict is newer than the stamp anyway. Without an as_of the
+        stamp is dropped: every verdict then counts as current, the conservative side.
 
         CONF_DIRECTION_FLIPPED_AT is left as it is: the earlier value it replaced is gone,
         and an earlier flip whose recount is still due may lie behind it. Kept, it holds
         the fixable repair down until the next nightly recount at most; dropped, a grade of
         the direction before that flip could raise it again and invite flipping it back."""
         as_of = parse_utc(detail.get("as_of"))
-        swapped = bool(job.get("done_windows"))
-        if swapped:
+        if job.get("done_windows"):
             self._set_applied_intervals(intervals.sym_diff(
                 self._applied_intervals(), intervals.parse(job["done_windows"])))
         job["replacement"] = None
@@ -1983,12 +1983,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         new_data = with_desired_intervals(entry.data, self._applied_intervals())
         new_data.pop(CONF_DIRECTION_ORIGIN, None)
         new_data.pop(CONF_DIRECTION_OVERRIDE, None)
-        new_data.pop(CONF_DIRECTION_PREVIOUS_CHANGED_AT, None)
-        stamp = self._stamp_after_refusal(entry.data, as_of, swapped=swapped)
-        if stamp is None:
+        if as_of is None:
             new_data.pop(CONF_DIRECTION_CHANGED_AT, None)
         else:
-            new_data[CONF_DIRECTION_CHANGED_AT] = stamp.isoformat()
+            new_data[CONF_DIRECTION_CHANGED_AT] = (as_of - timedelta(seconds=1)).isoformat()
         if new_data != dict(entry.data):
             self.hass.config_entries.async_update_entry(entry, data=new_data)
         await self._store.async_save(self._state)
@@ -2017,31 +2015,6 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         _LOGGER.warning(
             "Wolta refused to swap the battery direction: its state-of-charge data says the "
             "stored direction is right; the change was set back")
-
-    @staticmethod
-    def _stamp_after_refusal(
-        data, as_of: datetime | None, *, swapped: bool
-    ) -> datetime | None:
-        """CONF_DIRECTION_CHANGED_AT after a refusal: the latest of
-        - the second before the refused verdict's as_of, so that verdict counts as current
-          and a second try by hand is gated against it;
-        - the stamp before the refused change (CONF_DIRECTION_PREVIOUS_CHANGED_AT), when an
-          earlier change (a repair, or one by hand) came after the verdict was counted:
-          that verdict still describes the direction before it;
-        - the refused change's own stamp when the job had already swapped windows: the
-          stored rows changed after the verdict too.
-        None (the stamp is dropped) when none of them is known: every verdict then counts as
-        current, the conservative side."""
-        candidates: list[datetime] = []
-        if as_of is not None:
-            candidates.append(as_of - timedelta(seconds=1))
-        previous = parse_utc(data.get(CONF_DIRECTION_PREVIOUS_CHANGED_AT))
-        if previous is not None:
-            candidates.append(previous)
-        own = parse_utc(data.get(CONF_DIRECTION_CHANGED_AT))
-        if swapped and own is not None:
-            candidates.append(own)
-        return max(candidates, default=None)
 
     # ------------------------------------------------------------------
     # Entity job: replace the fields of changed sensors in stored rows

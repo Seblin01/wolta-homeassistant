@@ -3105,9 +3105,6 @@ async def test_origin_and_override_cleared_when_applied_reaches_desired(
     coordinator, _seen = await _direction_coordinator(
         hass, mock_entry, client, desired=[[FROM, None]], applied=[], bookmark=bookmark)
     _change(mock_entry, "manual", True)
-    from custom_components.wolta.const import CONF_DIRECTION_PREVIOUS_CHANGED_AT
-    mock_entry.data = {**mock_entry.data,
-                       CONF_DIRECTION_PREVIOUS_CHANGED_AT: "2026-10-01T08:00:00+00:00"}
 
     with _writes_entry(hass):
         await _cycle(coordinator, D_NOW)
@@ -3118,7 +3115,6 @@ async def test_origin_and_override_cleared_when_applied_reaches_desired(
     assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
     assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == CHANGED_AT
     assert mock_entry.data[CONF_INVERT_INTERVALS] == [[FROM, None]]
-    assert CONF_DIRECTION_PREVIOUS_CHANGED_AT not in mock_entry.data
 
 
 @pytest.mark.asyncio
@@ -3150,10 +3146,11 @@ async def test_direction_verified_resets_desired_and_raises_issue(
     assert mock_entry.data[CONF_INVERT_BATTERY] is False
     assert CONF_DIRECTION_ORIGIN not in mock_entry.data
     assert CONF_DIRECTION_OVERRIDE not in mock_entry.data
-    # A window was already swapped after the verdict was counted: the stored rows changed
-    # since, so the refused change's stamp stays and that verdict stays out of date.
-    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == CHANGED_AT
-    assert requires_override(_verdict(mock_entry)) is False
+    # The stamp is set to the second before the refused verdict, also with a window
+    # already swapped: the 409 shows the server holds that verdict current, so a second try
+    # by hand must be confirmed against it.
+    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == "2026-10-13T04:45:09+00:00"
+    assert requires_override(_verdict(mock_entry)) is True
     assert upd.call_count == 1
     coordinator._store.async_save.assert_awaited()
     client.put_data.assert_awaited()  # never paused
@@ -3202,36 +3199,74 @@ def _verdict(mock_entry):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("previous, expected, gated", [
-    # Nothing earlier: the second before the refused verdict, which then counts as current
-    # and gates a second try by hand.
-    (None, "2026-10-13T04:45:09+00:00", True),
-    # An earlier change (a repair) that same morning, after the verdict was counted: the
-    # verdict still describes the direction before it and stays out of date.
-    ("2026-10-13T06:00:00+00:00", "2026-10-13T06:00:00+00:00", False),
-    # An earlier change from before the verdict: the verdict is the newer, and counts.
-    ("2026-10-12T06:00:00+00:00", "2026-10-13T04:45:09+00:00", True),
-], ids=["no_previous", "previous_after_verdict", "previous_before_verdict"])
+@pytest.mark.parametrize("changed_at", [
+    # The refused change, made after the verdict was counted.
+    CHANGED_AT,
+    # A change from before the verdict.
+    "2026-10-12T06:00:00+00:00",
+], ids=["changed_after_verdict", "changed_before_verdict"])
 async def test_direction_verified_sets_the_change_stamp_back(
-    hass: HomeAssistant, mock_entry, previous, expected, gated
+    hass: HomeAssistant, mock_entry, changed_at
 ):
-    from custom_components.wolta.const import CONF_DIRECTION_PREVIOUS_CHANGED_AT
+    """The stamp becomes the second before the refused verdict, whatever it was: the 409
+    shows the server holds that verdict current, and a later verdict is newer anyway."""
     client = _direction_client()
     client.open_replacement.side_effect = WoltaReplacementConflict(
         "direction_verified", detail=dict(VERIFIED))
     coordinator, _seen = await _direction_coordinator(
         hass, mock_entry, client, desired=[[FROM, None]], applied=[])
     _change(mock_entry, "manual", False)
-    if previous is not None:
-        mock_entry.data = {**mock_entry.data, CONF_DIRECTION_PREVIOUS_CHANGED_AT: previous}
+    mock_entry.data = {**mock_entry.data, CONF_DIRECTION_CHANGED_AT: changed_at}
 
     with _writes_entry(hass):
         await _cycle(coordinator, D_NOW)
 
     assert mock_entry.data[CONF_INVERT_INTERVALS] == []
-    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == expected
-    assert CONF_DIRECTION_PREVIOUS_CHANGED_AT not in mock_entry.data
-    assert requires_override(_verdict(mock_entry)) is gated
+    assert mock_entry.data[CONF_DIRECTION_CHANGED_AT] == "2026-10-13T04:45:09+00:00"
+    assert requires_override(_verdict(mock_entry)) is True
+
+
+@pytest.mark.asyncio
+async def test_refusal_after_swapped_windows_gates_the_next_confirmation(
+    hass: HomeAssistant, mock_entry
+):
+    """A change made the same morning after the verdict was counted, refused after one
+    window was already swapped: the next confirmation under Battery direction shows the
+    override box, so the owner can do what the refusal issue says."""
+    from types import SimpleNamespace
+    from homeassistant.data_entry_flow import FlowResultType
+    from tests.test_config_flow import _make_mock_entry
+
+    client = _direction_client()
+    client.open_replacement.side_effect = WoltaReplacementConflict(
+        "direction_verified", detail=dict(VERIFIED))
+    job = {"type": "direction", "target": [[None, None]], "replacement": None,
+           "done_windows": [[A, B]], "retry_at": None, "origin": "manual",
+           "override": False}
+    coordinator, _seen = await _direction_coordinator(
+        hass, mock_entry, client, desired=[[None, None]], applied=[], job=job)
+    _change(mock_entry, "manual", False)  # 08:00, after the verdict's 04:45
+    with _writes_entry(hass):
+        await _cycle(coordinator, D_NOW)
+    assert _refused_issue(hass, mock_entry) is not None
+    assert coordinator.direction_change_pending() is False
+
+    entry = _make_mock_entry(hass, dict(mock_entry.data))
+    coordinator.data = SimpleNamespace(results={"betyg": {"battery_direction": {
+        "state": "verified", "form": "all", "checked_days": 10, "reversed_days": 0,
+        "as_of": VERIFIED["as_of"]}}})
+    entry.runtime_data = coordinator
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "battery_direction"})
+    assert result["type"] == FlowResultType.MENU, result
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "direction_flip_all"})
+    assert result["type"] == FlowResultType.FORM, result
+    assert result["step_id"] == "direction_confirm"
+    assert any(str(k) == "direction_override" for k in result["data_schema"].schema)
+    assert result["description_placeholders"]["gate"]
 
 
 def _verdict_betyg(state: str, as_of: str, **block) -> dict:

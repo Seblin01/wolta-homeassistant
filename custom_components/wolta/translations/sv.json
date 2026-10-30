@@ -604,7 +604,7 @@
       },
       "direction_flip_from": {
         "title": "Byt från ett datum",
-        "description": "Laddat och urladdat byter plats från början av dagen du väljer (Home Assistants tidszon) och framåt. Byter Wolta redan efter den dagen, slutar den byta där. Du ser perioden innan något ändras.",
+        "description": "Laddat och urladdat byter plats från början av dagen du väljer (Home Assistants tidszon) och framåt. Byter Wolta redan efter den dagen, slutar Wolta byta där. Du ser perioden innan något ändras.",
         "data": {
           "start": "Från"
         }
@@ -663,6 +663,7 @@
       "reauth_required": "Profilen finns inte längre på wolta.se – återautentisering har startats, se dina aviseringar.",
       "direction_pending": "Batteriets riktning håller redan på att ändras i den data Wolta har sparad. Vänta tills det är klart och försök igen.",
       "direction_changed": "Batteriets riktning ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
+      "direction_period_changed": "Den lagrade perioden ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
       "results_not_loaded": "Wolta har inte hämtat ditt betyg sedan Home Assistant startade. Försök igen om några minuter.",
       "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter."
     }

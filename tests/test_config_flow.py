@@ -5575,7 +5575,7 @@ async def test_direction_confirm_aborts_when_the_effect_changed_kind(
     coordinator.direction_effect.return_value = windows if now == "windows" else now
     result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={})
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "direction_changed"
+    assert result["reason"] == "direction_period_changed"
     assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_INVERT_INTERVALS] == []
 
 

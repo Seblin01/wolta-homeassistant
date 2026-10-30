@@ -2321,7 +2321,7 @@ class WoltaOptionsFlow(OptionsFlow):
                 and bool(effect) != self._direction_shown_stored):
             # The form said stored rows change and now none would, or the other way round:
             # what was confirmed is not what would happen.
-            return self.async_abort(reason="direction_changed")
+            return self.async_abort(reason="direction_period_changed")
         gated = requires_override(verdict)
         errors: dict[str, str] = {}
         if user_input is not None:

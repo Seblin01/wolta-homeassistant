@@ -1022,6 +1022,7 @@ def test_every_direction_confirmation_names_a_period_or_says_nothing_stored_chan
         assert steps[key]["description"].endswith("{gate}"), (path.name, key)
     assert _load(path)["options"]["abort"]["direction_changed"]
     assert _load(path)["options"]["abort"]["direction_period_unknown"]
+    assert _load(path)["options"]["abort"]["direction_period_changed"]
 
 
 def test_swedish_direction_confirmation_is_the_agreed_copy() -> None:

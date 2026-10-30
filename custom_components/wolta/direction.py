@@ -27,7 +27,6 @@ from .const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_DIRECTION_ORIGIN,
     CONF_DIRECTION_OVERRIDE,
-    CONF_DIRECTION_PREVIOUS_CHANGED_AT,
     DOMAIN,
 )
 from .coordinator import (
@@ -102,13 +101,6 @@ async def apply_direction_target(
     ignore flag cleared (the owner engaged with the direction)."""
     now = dt_util.utcnow().isoformat()
     new_data = with_desired_intervals(entry.data, target)
-    # The stamp this change replaces, for a refusal to fall back on (coordinator
-    # _stamp_after_refusal).
-    previous = entry.data.get(CONF_DIRECTION_CHANGED_AT)
-    if previous is not None:
-        new_data[CONF_DIRECTION_PREVIOUS_CHANGED_AT] = previous
-    else:
-        new_data.pop(CONF_DIRECTION_PREVIOUS_CHANGED_AT, None)
     new_data[CONF_DIRECTION_FLIPPED_AT] = now
     new_data[CONF_DIRECTION_CHANGED_AT] = now
     new_data[CONF_DIRECTION_ORIGIN] = origin
