@@ -716,6 +716,8 @@ async def test_fix_flow_dispatch_no_longer_knows_soc_missing(hass: HomeAssistant
 
 from custom_components.wolta.const import (  # noqa: E402
     CONF_DIRECTION_ISSUE_IGNORED,
+    CONF_DIRECTION_ORIGIN,
+    CONF_DIRECTION_OVERRIDE,
     CONF_INVERT_BATTERY,
 )
 from custom_components.wolta.repairs import BatteryDirectionRepairFlow  # noqa: E402
@@ -751,9 +753,13 @@ async def test_direction_flip_toggles_invert_and_refreshes(hass: HomeAssistant, 
     assert form["type"] == "form"
     result = await flow.async_step_flip({})
     assert result["type"] == "create_entry"
+    hass.config_entries.async_update_entry.assert_called_once()
     new_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
     assert new_data[CONF_INVERT_BATTERY] is after
     assert CONF_DIRECTION_ISSUE_IGNORED not in new_data
+    # Reparationen är aldrig en manuell vändning och går aldrig förbi serverns spärr.
+    assert new_data[CONF_DIRECTION_ORIGIN] == "repair"
+    assert not new_data.get(CONF_DIRECTION_OVERRIDE)
     coordinator.async_request_refresh.assert_awaited()
 
 
@@ -831,10 +837,12 @@ async def test_create_fix_flow_dispatches_direction(hass: HomeAssistant):
 
 @pytest.mark.asyncio
 async def test_direction_flip_stamps_flipped_at(hass: HomeAssistant):
-    """Stämpeln håller reparationen nere tills serverns riktningsdata är nyare."""
+    """Stämpeln håller reparationen nere tills serverns riktningsdata är nyare. The change
+    stamp is written with it: it decides whether a later verdict is current."""
     from datetime import datetime, timedelta, timezone
     from homeassistant.util import dt as dt_util
-    from custom_components.wolta.const import CONF_DIRECTION_FLIPPED_AT
+    from custom_components.wolta.const import (
+        CONF_DIRECTION_CHANGED_AT, CONF_DIRECTION_FLIPPED_AT)
     entry, _c = _direction_entry(False)
     hass.config_entries.async_update_entry = MagicMock()
     flow = _direction_flow(hass, entry)
@@ -843,6 +851,9 @@ async def test_direction_flip_stamps_flipped_at(hass: HomeAssistant):
     stamp = dt_util.parse_datetime(new_data[CONF_DIRECTION_FLIPPED_AT])
     assert stamp is not None and stamp.tzinfo is not None
     assert abs(datetime.now(timezone.utc) - stamp) < timedelta(minutes=1)
+    assert new_data[CONF_DIRECTION_CHANGED_AT] == new_data[CONF_DIRECTION_FLIPPED_AT]
+    assert new_data[CONF_DIRECTION_ORIGIN] == "repair"
+    assert not new_data.get(CONF_DIRECTION_OVERRIDE)
 
 
 # ---------------------------------------------------------------------------
