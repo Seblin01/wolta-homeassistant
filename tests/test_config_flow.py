@@ -8217,6 +8217,31 @@ async def test_settings_vat_prefill_incl_mode(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_settings_vat_prefill_retail_fixed_incl_mode(hass: HomeAssistant) -> None:
+    """The fixed retail price is a purchase-side price: shown incl. VAT, max 625."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(hass, entry, vat=1.25, retail_fixed_ore=80)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_RETAIL_FIXED_ORE]) == 100.0
+    cfg = _tariff_selector(result, CONF_RETAIL_FIXED_ORE).config
+    assert cfg["max"] == 625
+    assert cfg["step"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_sale_fields_unchanged_in_form(hass: HomeAssistant) -> None:
+    """The sale-side export extra is never converted: stored value, min -200, max 500, step 0.1."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(hass, entry, vat=1.25, export_extra_ore=-3.5)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_EXPORT_EXTRA_ORE]) == -3.5
+    cfg = _tariff_selector(result, CONF_EXPORT_EXTRA_ORE).config
+    assert (cfg["min"], cfg["max"], cfg["step"]) == (-200.0, 500.0, 0.1)
+
+
+@pytest.mark.asyncio
 async def test_settings_vat_prefill_excl_mode_unchanged(hass: HomeAssistant) -> None:
     """Saved mode excl. VAT: the stored values are shown as they are."""
     entry = _make_mock_entry(hass)
