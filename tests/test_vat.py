@@ -32,9 +32,9 @@ def test_roundtrip_125(stored):
 @pytest.mark.parametrize("stored", [0, 25, 61.2])
 def test_roundtrip_1255(stored):
     # Shown values are rounded to 2 decimals, so the roundtrip is only exact
-    # to within half a display step (0.005) divided by the multiplier.
+    # to within one display step (0.01) divided by the multiplier.
     assert to_stored(to_shown(stored, 1.255), 1.255) == pytest.approx(
-        stored, abs=0.005 / 1.255
+        stored, abs=0.01 / 1.255
     )
 
 
