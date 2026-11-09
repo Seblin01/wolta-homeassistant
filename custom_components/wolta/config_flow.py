@@ -1977,8 +1977,9 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 _SEC_BATTERY = "battery"
 _SEC_ECONOMY = "economy"
 _SEC_TARIFFS = "tariffs"
-# The price fields that can be entered including VAT (the per-kWh øre/ct ones).
-_VAT_PRICE_FIELDS = (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE)
+# The purchase-side price fields that can be entered including VAT. The sale side
+# (export extra, grid benefit) is never converted.
+_VAT_PRICE_FIELDS = (CONF_GRID_VAR_ORE, CONF_RETAIL_FIXED_ORE, CONF_SURCHARGE_ORE)
 _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     _SEC_BATTERY: (
         CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW, CONF_NAMEPLATE_KW,
@@ -2778,7 +2779,9 @@ class WoltaOptionsFlow(OptionsFlow):
         price_step = 0.01 if vat is not None else 0.1
         ore_selector = _number_selector(min_val=0.0, max_val=price_max, step=price_step, unit="öre/ct per kWh")
         # The fixed price exists in SE1-SE4 only, where the unit is öre.
-        se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
+        se_ore_selector = _number_selector(
+            min_val=0.0, max_val=500.0 if vat is None else price_max,
+            step=0.1 if vat is None else price_step, unit="öre per kWh")
 
         def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
                         mode: SelectSelectorMode, *, not_stated: bool = False) -> tuple[Any, Any]:
@@ -2827,8 +2830,7 @@ class WoltaOptionsFlow(OptionsFlow):
             tariff_rows.append(_opt(CONF_GRID_BENEFIT_ORE, _number_selector(
                 min_val=_BENEFIT_MIN_ORE, max_val=_BENEFIT_MAX_ORE, step=0.1, unit="öre per kWh")))
         tariff_rows += [
-            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(
-                min_val=-200.0, max_val=price_max, step=price_step, unit="öre/ct per kWh")),
+            _opt(CONF_EXPORT_EXTRA_ORE, _number_selector(min_val=-200.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")),
             _opt(CONF_EXPORT_EXTRA_PCT, _number_selector(min_val=-100.0, max_val=100.0, step=0.01, unit="% of spot")),
         ]
         if self._tax_asked():

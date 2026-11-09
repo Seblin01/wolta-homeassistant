@@ -8197,7 +8197,7 @@ async def test_settings_vat_checkbox_shown_with_vat(hass: HomeAssistant) -> None
     markers = _tariff_markers(result)
     assert list(markers)[0] == CONF_PRICES_INCL_VAT
     assert markers[CONF_PRICES_INCL_VAT].default() is False
-    for key in (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE):
+    for key in (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_RETAIL_FIXED_ORE):
         cfg = _tariff_selector(result, key).config
         assert cfg["max"] == 625
         assert cfg["step"] == 0.01
