@@ -51,6 +51,7 @@ from custom_components.wolta.const import (
     CONF_SOC_ABSENT,
     CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
+    CONF_PRICES_INCL_VAT,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
@@ -8133,3 +8134,107 @@ def test_create_profile_takes_no_removed_field_and_no_list() -> None:
     assert not params & set(_REMOVED_NAMES)
     assert not params & set(_WEB_ONLY_FIELDS)
     assert {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE} <= params
+
+
+# --- VAT choice in the tariff section (form display and prefill) ---
+
+async def _open_settings_form(hass: HomeAssistant, entry: Any, **profile_overrides: Any) -> Any:
+    """Open the options flow to the settings form with a server profile override."""
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, **profile_overrides))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+
+
+def _tariff_markers(result: Any) -> dict[str, Any]:
+    """Map field key -> schema marker of the tariffs section."""
+    for sec_marker, sec in result["data_schema"].schema.items():
+        if str(sec_marker) == "tariffs":
+            return {str(m): m for m in sec.schema.schema}
+    raise AssertionError("no tariffs section")
+
+
+def _tariff_selector(result: Any, key: str) -> Any:
+    for sec_marker, sec in result["data_schema"].schema.items():
+        if str(sec_marker) == "tariffs":
+            return sec.schema.schema[_tariff_markers(result)[key]]
+    raise AssertionError("no tariffs section")
+
+
+def _suggested(marker: Any) -> Any:
+    return (marker.description or {}).get("suggested_value")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", [{}, {"vat": 0}])
+async def test_settings_vat_checkbox_hidden_without_vat(
+    hass: HomeAssistant, profile: dict
+) -> None:
+    """No usable vat in the profile: no checkbox, today's max 500 and step 0.1."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(hass, entry, **profile)
+
+    assert result["type"] == FlowResultType.FORM
+    assert CONF_PRICES_INCL_VAT not in _tariff_markers(result)
+    cfg = _tariff_selector(result, CONF_GRID_VAR_ORE).config
+    assert cfg["max"] == 500.0
+    assert cfg["step"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_checkbox_shown_with_vat(hass: HomeAssistant) -> None:
+    """A profile with vat 1.25: the checkbox leads the section, default off; the
+    price fields get max 625 and step 0.01."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(hass, entry, vat=1.25)
+
+    markers = _tariff_markers(result)
+    assert list(markers)[0] == CONF_PRICES_INCL_VAT
+    assert markers[CONF_PRICES_INCL_VAT].default() is False
+    for key in (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_EXPORT_EXTRA_ORE):
+        cfg = _tariff_selector(result, key).config
+        assert cfg["max"] == 625
+        assert cfg["step"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_incl_mode(hass: HomeAssistant) -> None:
+    """Saved mode incl. VAT: the stored values are shown times vat, at two decimals."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=4)
+
+    markers = _tariff_markers(result)
+    assert markers[CONF_PRICES_INCL_VAT].default() is True
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 12.34
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) == 5.0
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_excl_mode_unchanged(hass: HomeAssistant) -> None:
+    """Saved mode excl. VAT: the stored values are shown as they are."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=4)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 9.872
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) == 4
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_keeps_empty_fields_empty(hass: HomeAssistant) -> None:
+    """An empty field on the server stays empty in incl. mode."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=None)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 12.34
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) is None
