@@ -2810,8 +2810,7 @@ class WoltaOptionsFlow(OptionsFlow):
         ore_selector = _number_selector(min_val=0.0, max_val=price_max, step=price_step, unit="öre/ct per kWh")
         # The fixed price exists in SE1-SE4 only, where the unit is öre.
         se_ore_selector = _number_selector(
-            min_val=0.0, max_val=500.0 if vat is None else price_max,
-            step=0.1 if vat is None else price_step, unit="öre per kWh")
+            min_val=0.0, max_val=price_max, step=price_step, unit="öre per kWh")
 
         def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
                         mode: SelectSelectorMode, *, not_stated: bool = False) -> tuple[Any, Any]:
