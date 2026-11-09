@@ -108,6 +108,9 @@ CONF_VIEW_ONLY = "view_only"
 # servern vid skapandet – det är inte nödvändigtvis ett inköpsdatum. Sparas här och visas
 # som suggested_value i options → Economy, där användaren bekräftar det.
 CONF_PREFILL_PURCHASE_DATE = "prefill_purchase_date"
+# Whether the tariff fields are entered and shown including VAT (a local choice, kept in
+# entry.data; the server always stores the prices excluding VAT).
+CONF_PRICES_INCL_VAT = "prices_incl_vat"
 # Serverns battery_status (profil-GET, spec 2026-09-14 §4). Bara stämpeln renderas; regeln
 # pending→needs_input bor i backend.
 # Serverns batteristämpel i profil-GET:en (spec 2026-09-14 §4) – EN nyckel för alla lässiten.

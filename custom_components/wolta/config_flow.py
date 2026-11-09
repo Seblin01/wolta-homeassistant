@@ -61,6 +61,7 @@ from .control_system_prefill import (
     control_system_selector,
 )
 from .coordinator import _ISSUE_BATTERY_DIRECTION, desired_invert_intervals
+from .vat import is_untouched, max_shown, to_shown, to_stored, vat_from
 from .direction import Verdict, apply_direction_target, read_verdict, requires_override
 from .const import (
     KEY_BATTERY_EVENTS,
@@ -100,6 +101,7 @@ from .const import (
     CONF_NAMEPLATE_KWH,
     CONF_PLANT_ID,
     CONF_PREFILL_PURCHASE_DATE,
+    CONF_PRICES_INCL_VAT,
     CONF_PURCHASE_DATE,
     CONF_REDUCED_ENERGY_TAX,
     CONF_RESERVE_PCT,
@@ -1975,6 +1977,10 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
 _SEC_BATTERY = "battery"
 _SEC_ECONOMY = "economy"
 _SEC_TARIFFS = "tariffs"
+# The purchase-side price fields that can be entered including VAT. The sale side
+# (export extra, grid benefit) is never converted.
+_VAT_PRICE_FIELDS = (CONF_GRID_VAR_ORE, CONF_RETAIL_FIXED_ORE, CONF_SURCHARGE_ORE)
+_PRICE_MAX_ORE = 500.0  # the server's ceiling for the stored (ex-VAT) price fields
 _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     _SEC_BATTERY: (
         CONF_BATTERY_KWH, CONF_NAMEPLATE_KWH, CONF_BATTERY_KW, CONF_NAMEPLATE_KW,
@@ -2059,6 +2065,13 @@ class WoltaOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         """Initialise the options flow."""
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
+        # VAT choice in the tariff section: the server's multiplier, read once with the
+        # profile, and what the form first showed (mode, prefilled values, max). Computed at the
+        # first display and kept, so a re-show after an error neither recomputes nor drifts.
+        self._vat: float | None = None
+        self._vat_mode: bool = False
+        self._vat_prefill: dict[str, float | None] | None = None
+        self._vat_max: float | None = None
         self._direction_target: list[intervals.Interval] | None = None  # the chosen change
         # The desired direction the change was chosen from: another dialog may change it.
         self._direction_from: list[intervals.Interval] | None = None
@@ -2389,6 +2402,7 @@ class WoltaOptionsFlow(OptionsFlow):
             except WoltaApiError:
                 # A PATCH would fail too – profile editing needs the server.
                 return self.async_abort(reason="cannot_connect")
+            self._vat = vat_from(self._server)
 
         if user_input is not None:
             # Un-nest the section structure to flat {field: value}.
@@ -2402,12 +2416,38 @@ class WoltaOptionsFlow(OptionsFlow):
                             value = _choice_to_tax(value)
                         flat[key] = value
 
+            # The VAT choice (spec 2026-11-08): prices entered incl. VAT are converted to the
+            # stored ex-VAT value here, and every check below reads `converted`. A field the
+            # owner did not touch maps back to the server's own value (the roundtrip is not
+            # exact for non-integer rates), so the diff sees no change. `user_input` stays as
+            # typed for the error re-show.
+            incl_now = False
+            converted = dict(flat)
+            if self._vat is not None:
+                tariffs_in = user_input.get(_SEC_TARIFFS) or {}
+                incl_now = bool(tariffs_in.get(CONF_PRICES_INCL_VAT))
+                prefill = self._vat_prefill or {}
+                for key in _VAT_PRICE_FIELDS:
+                    if key == CONF_RETAIL_FIXED_ORE and not self._benefit_asked():
+                        continue  # not in the form
+                    entered = flat.get(key)
+                    if entered == "":
+                        entered = None
+                    if is_untouched(entered, prefill.get(key)):
+                        converted[key] = self._server.get(key)
+                    elif entered is not None and incl_now:
+                        converted[key] = to_stored(entered, self._vat)
+                    else:
+                        converted[key] = entered
+                    if (converted[key] is not None and converted[key] > _PRICE_MAX_ORE):
+                        errors[key] = errors["base"] = "price_out_of_range"
+
             # Kapacitet och effekt är BÅDA eller INGEN. På en väntande rad är de Optional
             # (se battery_pending nedan), så ett ensamt värde är submitbart – och ett halvt
             # par här blir ett halvt par i cachen, som reauth sedan bara kan deklarera bort
             # (backend avvisar ett halvt par). Felet sätts på det SAKNADE fältet.
-            kwh_in = flat.get(CONF_BATTERY_KWH)
-            kw_in = flat.get(CONF_BATTERY_KW)
+            kwh_in = converted.get(CONF_BATTERY_KWH)
+            kw_in = converted.get(CONF_BATTERY_KW)
             if (kwh_in is None) != (kw_in is None):
                 errors[CONF_BATTERY_KWH if kwh_in is None else CONF_BATTERY_KW] = (
                     "battery_pair_incomplete"
@@ -2447,7 +2487,7 @@ class WoltaOptionsFlow(OptionsFlow):
                         continue
                     if key in (CONF_GRID_BENEFIT_ORE, *_CONTRACT_KEYS) and not benefit_asked:
                         continue
-                    val = flat.get(key)
+                    val = converted.get(key)
                     server_val = self._server.get(key)
                     if key == CONF_RETAIL_PRICE_MODEL and val == _RETAIL_NOT_STATED:
                         # Only offered while today's contract has no type: nothing to send.
@@ -2483,8 +2523,8 @@ class WoltaOptionsFlow(OptionsFlow):
             # save an unrelated change (the grid_fixed_missing repair asks for the fixed part).
             if (
                 (CONF_GRID_VAR_ORE in patch_fields or CONF_GRID_VAR_PCT in patch_fields)
-                and flat.get(CONF_GRID_VAR_PCT) is not None
-                and flat.get(CONF_GRID_VAR_ORE) is None
+                and converted.get(CONF_GRID_VAR_PCT) is not None
+                and converted.get(CONF_GRID_VAR_ORE) is None
             ):
                 errors["base"] = "grid_fixed_required"
 
@@ -2496,8 +2536,8 @@ class WoltaOptionsFlow(OptionsFlow):
             # sale history on the server the unchanged half equals today's entry and adds no
             # entry (tariff.apply_sale_scalar_change); the changed half adds one dated today.
             if CONF_GRID_BENEFIT_ORE in patch_fields or CONF_EXPORT_EXTRA_ORE in patch_fields:
-                benefit_in = flat.get(CONF_GRID_BENEFIT_ORE) if benefit_asked else None
-                terms_in = flat.get(CONF_EXPORT_EXTRA_ORE)
+                benefit_in = converted.get(CONF_GRID_BENEFIT_ORE) if benefit_asked else None
+                terms_in = converted.get(CONF_EXPORT_EXTRA_ORE)
                 if benefit_in is not None:
                     patch_fields[CONF_GRID_BENEFIT_ORE] = benefit_in
                     patch_fields[CONF_EXPORT_EXTRA_ORE] = 0.0 if terms_in is None else terms_in
@@ -2514,8 +2554,8 @@ class WoltaOptionsFlow(OptionsFlow):
             # may not render field errors for, and a form that refuses to save without saying
             # why is the worst outcome. The texts name the field and the section.
             if benefit_asked:
-                benefit_after = flat.get(CONF_GRID_BENEFIT_ORE)
-                pct_after = flat.get(CONF_EXPORT_EXTRA_PCT)
+                benefit_after = converted.get(CONF_GRID_BENEFIT_ORE)
+                pct_after = converted.get(CONF_EXPORT_EXTRA_PCT)
                 if (
                     {CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_PCT} & patch_fields.keys()
                     and pct_after not in (None, 0) and benefit_after is None
@@ -2562,7 +2602,7 @@ class WoltaOptionsFlow(OptionsFlow):
             # save that touches one of the contract's fields is checked, like the server.
             dropped: set[str] = set()
             if benefit_asked:
-                model_after = flat.get(CONF_RETAIL_PRICE_MODEL)
+                model_after = converted.get(CONF_RETAIL_PRICE_MODEL)
                 if model_after in (None, "", _RETAIL_NOT_STATED):
                     # Not stated is priced as a quarter-hour price, by the server too.
                     model_after = DEFAULT_RETAIL_PRICE_MODEL
@@ -2576,7 +2616,7 @@ class WoltaOptionsFlow(OptionsFlow):
                         del patch_fields[key]
                 if {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE,
                         CONF_SURCHARGE_ORE} & patch_fields.keys():
-                    if model_after == "fixed" and flat.get(CONF_RETAIL_FIXED_ORE) is None:
+                    if model_after == "fixed" and converted.get(CONF_RETAIL_FIXED_ORE) is None:
                         errors[CONF_RETAIL_FIXED_ORE] = errors["base"] = "retail_fixed_invalid"
                     # The other direction: a value typed for a contract it does not belong to. An
                     # unchanged stale value is not in the PATCH and passes; surcharge_ore is never
@@ -2614,8 +2654,11 @@ class WoltaOptionsFlow(OptionsFlow):
                 # föreslagit datumet igen och därmed återuppväckt ett datum användaren
                 # medvetet rensade.
                 prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
-                if patch_fields or prefill_offered:
+                choice_changed = self._vat is not None and incl_now != self._vat_mode
+                if patch_fields or prefill_offered or choice_changed:
                     new_data = dict(entry.data)
+                    if self._vat is not None:
+                        new_data[CONF_PRICES_INCL_VAT] = incl_now
                     for key, val in patch_fields.items():
                         if val is None:
                             new_data.pop(key, None)
@@ -2673,11 +2716,25 @@ class WoltaOptionsFlow(OptionsFlow):
 
         srv = self._server
 
+        # The VAT choice (spec 2026-11-08): with a vat multiplier on the profile the three
+        # price fields can be shown including VAT. Mode, prefill and max are fixed at the first
+        # display; the save path compares the entered values against _vat_prefill.
+        vat = self._vat
+        if vat is not None and self._vat_prefill is None:
+            self._vat_mode = bool(entry.data.get(CONF_PRICES_INCL_VAT, False))
+            self._vat_max = max_shown(vat)
+            self._vat_prefill = {
+                key: (to_shown(srv.get(key), vat) if self._vat_mode else srv.get(key))
+                for key in _VAT_PRICE_FIELDS
+            }
+
         def _opt(key: str, selector: Any) -> tuple[Any, Any]:
             """vol.Optional med suggested_value (INTE default) för rensningsbara fält –
             en default reinjiceras av voluptuous när fältet töms och rensningen skulle
             aldrig gå att skilja från orört (v0.3.0-buggen)."""
             cur = srv.get(key)
+            if self._vat_prefill is not None and key in self._vat_prefill:
+                cur = self._vat_prefill[key]
             marker = vol.Optional(
                 key,
                 description={"suggested_value": cur} if cur is not None else None,
@@ -2746,9 +2803,14 @@ class WoltaOptionsFlow(OptionsFlow):
              else [_opt(CONF_COST_SEK, _number_selector(min_val=0.0, max_val=10_000_000.0, step=100.0, unit="kr"))])
             + [date_row]
         ))
-        ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre/ct per kWh")
+        # With a vat multiplier the price fields take the shown (incl. VAT) range and two
+        # decimals in both modes: a prefilled incl. value has two decimals.
+        price_max = self._vat_max if vat is not None else 500.0
+        price_step = 0.01 if vat is not None else 0.1
+        ore_selector = _number_selector(min_val=0.0, max_val=price_max, step=price_step, unit="öre/ct per kWh")
         # The fixed price exists in SE1-SE4 only, where the unit is öre.
-        se_ore_selector = _number_selector(min_val=0.0, max_val=500.0, step=0.1, unit="öre per kWh")
+        se_ore_selector = _number_selector(
+            min_val=0.0, max_val=price_max, step=price_step, unit="öre per kWh")
 
         def _select_row(key: str, known: tuple[str, ...], default: str, translation_key: str,
                         mode: SelectSelectorMode, *, not_stated: bool = False) -> tuple[Any, Any]:
@@ -2810,6 +2872,11 @@ class WoltaOptionsFlow(OptionsFlow):
                     options=list(_TAX_CHOICES),
                     mode=SelectSelectorMode.LIST,
                     translation_key=CONF_REDUCED_ENERGY_TAX)),
+            ))
+        if vat is not None:
+            tariff_rows.insert(0, (
+                vol.Optional(CONF_PRICES_INCL_VAT, default=self._vat_mode),
+                BooleanSelector(BooleanSelectorConfig()),
             ))
         tariffs_schema = vol.Schema(dict(tariff_rows))
 

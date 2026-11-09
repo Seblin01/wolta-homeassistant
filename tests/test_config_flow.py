@@ -51,6 +51,7 @@ from custom_components.wolta.const import (
     CONF_SOC_ABSENT,
     CONF_SOC_ISSUE_IGNORED,
     CONF_SOLAR,
+    CONF_PRICES_INCL_VAT,
     CONF_SURCHARGE_ORE,
     CONF_TOKEN,
     CONF_ZONE,
@@ -1151,6 +1152,7 @@ _OPT_SECTION_OF = {
     CONF_GRID_VAR_PCT: "tariffs", CONF_EXPORT_EXTRA_PCT: "tariffs",
     CONF_REDUCED_ENERGY_TAX: "tariffs",
     CONF_RETAIL_PRICE_MODEL: "tariffs", CONF_RETAIL_FIXED_ORE: "tariffs",
+    CONF_PRICES_INCL_VAT: "tariffs",
 }
 
 
@@ -8133,3 +8135,348 @@ def test_create_profile_takes_no_removed_field_and_no_list() -> None:
     assert not params & set(_REMOVED_NAMES)
     assert not params & set(_WEB_ONLY_FIELDS)
     assert {CONF_RETAIL_PRICE_MODEL, CONF_RETAIL_FIXED_ORE} <= params
+
+
+# --- VAT choice in the tariff section (form display and prefill) ---
+
+async def _open_settings_form(hass: HomeAssistant, entry: Any, **profile_overrides: Any) -> Any:
+    """Open the options flow to the settings form with a server profile override."""
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, **profile_overrides))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+
+
+def _tariff_markers(result: Any) -> dict[str, Any]:
+    """Map field key -> schema marker of the tariffs section."""
+    for sec_marker, sec in result["data_schema"].schema.items():
+        if str(sec_marker) == "tariffs":
+            return {str(m): m for m in sec.schema.schema}
+    raise AssertionError("no tariffs section")
+
+
+def _tariff_selector(result: Any, key: str) -> Any:
+    for sec_marker, sec in result["data_schema"].schema.items():
+        if str(sec_marker) == "tariffs":
+            return sec.schema.schema[_tariff_markers(result)[key]]
+    raise AssertionError("no tariffs section")
+
+
+def _suggested(marker: Any) -> Any:
+    return (marker.description or {}).get("suggested_value")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", [{}, {"vat": 0}])
+async def test_settings_vat_checkbox_hidden_without_vat(
+    hass: HomeAssistant, profile: dict
+) -> None:
+    """No usable vat in the profile: no checkbox, today's max 500 and step 0.1."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(hass, entry, **profile)
+
+    assert result["type"] == FlowResultType.FORM
+    assert CONF_PRICES_INCL_VAT not in _tariff_markers(result)
+    cfg = _tariff_selector(result, CONF_GRID_VAR_ORE).config
+    assert cfg["max"] == 500.0
+    assert cfg["step"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_checkbox_shown_with_vat(hass: HomeAssistant) -> None:
+    """A profile with vat 1.25: the checkbox leads the section, default off; the
+    price fields get max 625 and step 0.01."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(hass, entry, vat=1.25)
+
+    markers = _tariff_markers(result)
+    assert list(markers)[0] == CONF_PRICES_INCL_VAT
+    assert markers[CONF_PRICES_INCL_VAT].default() is False
+    for key in (CONF_GRID_VAR_ORE, CONF_SURCHARGE_ORE, CONF_RETAIL_FIXED_ORE):
+        cfg = _tariff_selector(result, key).config
+        assert cfg["max"] == 625
+        assert cfg["step"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_incl_mode(hass: HomeAssistant) -> None:
+    """Saved mode incl. VAT: the stored values are shown times vat, at two decimals."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=4)
+
+    markers = _tariff_markers(result)
+    assert markers[CONF_PRICES_INCL_VAT].default() is True
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 12.34
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) == 5.0
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_retail_fixed_incl_mode(hass: HomeAssistant) -> None:
+    """The fixed retail price is a purchase-side price: shown incl. VAT, max 625."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(hass, entry, vat=1.25, retail_fixed_ore=80)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_RETAIL_FIXED_ORE]) == 100.0
+    cfg = _tariff_selector(result, CONF_RETAIL_FIXED_ORE).config
+    assert cfg["max"] == 625
+    assert cfg["step"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_sale_fields_unchanged_in_form(hass: HomeAssistant) -> None:
+    """The sale-side export extra is never converted: stored value, min -200, max 500, step 0.1."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(hass, entry, vat=1.25, export_extra_ore=-3.5)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_EXPORT_EXTRA_ORE]) == -3.5
+    cfg = _tariff_selector(result, CONF_EXPORT_EXTRA_ORE).config
+    assert (cfg["min"], cfg["max"], cfg["step"]) == (-200.0, 500.0, 0.1)
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_excl_mode_unchanged(hass: HomeAssistant) -> None:
+    """Saved mode excl. VAT: the stored values are shown as they are."""
+    entry = _make_mock_entry(hass)
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=4)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 9.872
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) == 4
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_prefill_keeps_empty_fields_empty(hass: HomeAssistant) -> None:
+    """An empty field on the server stays empty in incl. mode."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result = await _open_settings_form(
+        hass, entry, vat=1.25, grid_var_ore=9.872, surcharge_ore=None)
+
+    markers = _tariff_markers(result)
+    assert _suggested(markers[CONF_GRID_VAR_ORE]) == 12.34
+    assert _suggested(markers[CONF_SURCHARGE_ORE]) is None
+
+
+# --- VAT choice in the tariff section (save path) ---
+
+async def _vat_save(
+    hass: HomeAssistant,
+    entry: Any,
+    profile: dict[str, Any],
+    sends: list[dict[str, Any]],
+) -> tuple[Any, Any, Any]:
+    """Open the form with a server profile, submit each dict in `sends` in turn.
+
+    Returns (last result, client mock, coordinator mock).
+    """
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(entry, **profile))
+    result = None
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        for fields in sends:
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], user_input=_opts(**_core(**fields)))
+    return result, mock_client, mock_coordinator
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_untouched_save_sends_nothing(hass: HomeAssistant) -> None:
+    """Incl. mode, nothing edited: the shown 12.34 is not 9.872 on the server, but
+    nothing is sent."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.34}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_incl_value_is_converted(hass: HomeAssistant) -> None:
+    """Incl. mode: 50 entered becomes 40.0 ex VAT, sent and cached."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 50.0}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_awaited_once()
+    assert client.patch_profile.call_args.kwargs == {"grid_var_ore": 40.0}
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_GRID_VAR_ORE] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_toggle_only_saves_choice(hass: HomeAssistant) -> None:
+    """Ticking the box and nothing else stores the choice, sends nothing and does
+    not refresh the prices."""
+    entry = _make_mock_entry(hass)
+    result, client, coord = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 9.872}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is True
+    coord.prices.async_forget_purchase.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_toggle_and_edit(hass: HomeAssistant) -> None:
+    """Tick the box and type the fixed price 62.5: only that field is sent, as 50.0."""
+    entry = _make_mock_entry(hass)
+    result, client, _ = await _vat_save(
+        hass, entry,
+        {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872, CONF_RETAIL_PRICE_MODEL: "fixed",
+         CONF_RETAIL_FIXED_ORE: 40.0},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 9.872,
+          CONF_RETAIL_PRICE_MODEL: "fixed", CONF_RETAIL_FIXED_ORE: 62.5}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"retail_fixed_ore": 50.0}
+    data = hass.config_entries.async_get_entry(entry.entry_id).data
+    assert data[CONF_PRICES_INCL_VAT] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_untick_untouched_then_edit(hass: HomeAssistant) -> None:
+    """Unticking an incl. form without edits sends nothing and stores False. With an
+    edit the number is read as ex VAT."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872},
+        [{CONF_PRICES_INCL_VAT: False, CONF_GRID_VAR_ORE: 12.34}])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is False
+
+    entry2 = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry2, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872},
+        [{CONF_PRICES_INCL_VAT: False, CONF_GRID_VAR_ORE: 30.0}])
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"grid_var_ore": 30.0}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_cleared_field_sends_null(hass: HomeAssistant) -> None:
+    """A cleared markup in incl. mode is sent as null."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872, CONF_SURCHARGE_ORE: 4.0},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.34}])  # surcharge omitted
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"surcharge_ore": None}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_sale_fields_unaffected(hass: HomeAssistant) -> None:
+    """The sale side and the percentage are sent as typed in incl. mode."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872, CONF_EXPORT_EXTRA_ORE: 2.0},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.34,
+          CONF_EXPORT_EXTRA_ORE: 3.5, CONF_GRID_VAR_PCT: 5.0}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {
+        "export_extra_ore": 3.5, "grid_var_pct": 5.0}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_nl_rate(hass: HomeAssistant) -> None:
+    """vat 1.21: 12.1 entered becomes 10.0."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.21},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.1}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"grid_var_ore": 10.0}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_excl_over_500_is_field_error(hass: HomeAssistant) -> None:
+    """Excl. mode with vat: the form allows 625, but a stored value over 500 is a
+    field error and nothing is sent."""
+    entry = _make_mock_entry(hass)
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25},
+        [{CONF_PRICES_INCL_VAT: False, CONF_GRID_VAR_ORE: 600.0}])
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"][CONF_GRID_VAR_ORE] == "price_out_of_range"
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_hidden_fixed_price_untouched(hass: HomeAssistant) -> None:
+    """Outside SE1-SE4 the fixed retail price is not in the form and is not sent."""
+    entry = _make_mock_entry(
+        hass, extra_data={CONF_PRICES_INCL_VAT: True, CONF_ZONE: "NL"})
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, vat=1.21, zone="NL", retail_fixed_ore=80.0, grid_var_ore=10.0))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        assert CONF_RETAIL_FIXED_ORE not in _tariff_markers(result)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.1})))
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_reshown_form_compares_against_open_values(
+    hass: HomeAssistant,
+) -> None:
+    """After an error the next save still compares against the values shown when the form
+    was opened: untouched fields are not sent, changed ones are converted."""
+    entry = _make_mock_entry(hass, extra_data={CONF_PRICES_INCL_VAT: True})
+    result, client, _ = await _vat_save(
+        hass, entry, {"vat": 1.25, CONF_GRID_VAR_ORE: 9.872, CONF_SURCHARGE_ORE: 4.0},
+        [
+            # grid fee cleared with a percentage: grid_fixed_required
+            {CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_PCT: 5.6, CONF_SURCHARGE_ORE: 5.0},
+            {CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 50.0, CONF_GRID_VAR_PCT: 5.6,
+             CONF_SURCHARGE_ORE: 5.0},
+        ])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_awaited_once()
+    assert client.patch_profile.call_args.kwargs == {
+        "grid_var_ore": 40.0, "grid_var_pct": 5.6}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_mode_flip_across_reshow(hass: HomeAssistant) -> None:
+    """Open in excl mode, tick the box and trigger grid_fixed_required. After the
+    re-show, a changed grid fee is read in incl mode (50 -> 40.0) and the markup left
+    at its open-time prefill is not sent. The choice is stored."""
+    entry = _make_mock_entry(hass)
+    result, client, _ = await _vat_save(
+        hass, entry,
+        {"vat": 1.25, CONF_GRID_VAR_ORE: 30.0, CONF_SURCHARGE_ORE: 4.0},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_PCT: 5.6, CONF_SURCHARGE_ORE: 4.0},
+         {CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_PCT: 5.6, CONF_GRID_VAR_ORE: 50.0,
+          CONF_SURCHARGE_ORE: 4.0}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_awaited_once()
+    kwargs = client.patch_profile.call_args.kwargs
+    assert kwargs[CONF_GRID_VAR_ORE] == 40.0
+    assert CONF_SURCHARGE_ORE not in kwargs
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is True
