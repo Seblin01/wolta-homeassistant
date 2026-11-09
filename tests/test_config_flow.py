@@ -8459,3 +8459,24 @@ async def test_settings_vat_reshown_form_compares_against_open_values(
     client.patch_profile.assert_awaited_once()
     assert client.patch_profile.call_args.kwargs == {
         "grid_var_ore": 40.0, "grid_var_pct": 5.6}
+
+
+@pytest.mark.asyncio
+async def test_settings_vat_mode_flip_across_reshow(hass: HomeAssistant) -> None:
+    """Open in excl mode, tick the box and trigger grid_fixed_required. After the
+    re-show, a changed grid fee is read in incl mode (50 -> 40.0) and the markup left
+    at its open-time prefill is not sent. The choice is stored."""
+    entry = _make_mock_entry(hass)
+    result, client, _ = await _vat_save(
+        hass, entry,
+        {"vat": 1.25, CONF_GRID_VAR_ORE: 30.0, CONF_SURCHARGE_ORE: 4.0},
+        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_PCT: 5.6, CONF_SURCHARGE_ORE: 4.0},
+         {CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_PCT: 5.6, CONF_GRID_VAR_ORE: 50.0,
+          CONF_SURCHARGE_ORE: 4.0}])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_awaited_once()
+    kwargs = client.patch_profile.call_args.kwargs
+    assert kwargs[CONF_GRID_VAR_ORE] == 40.0
+    assert CONF_SURCHARGE_ORE not in kwargs
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is True

@@ -1083,13 +1083,18 @@ def test_direction_step_keeps_reversed_for_the_verdict(path: Path) -> None:
 
 _VAT_COPY = {
     "sv.json": ("Priserna anges inklusive moms",
-                "Kryssa i om du skriver priserna som på fakturan, med moms. Wolta räknar om och lagrar dem utan moms. Energiskatten ingår aldrig i nätavgiften.",
+                "Kryssa i om du skriver priserna som på fakturan, med moms. Wolta räknar om och lagrar dem utan moms. Energiskatten ingår aldrig i nätavgiften. Fält du ändrar läses i det läge rutan har när du sparar. Övriga behåller sina värden och visas i det nya läget nästa gång.",
                 "utan moms, eller med moms om du kryssat i Priserna anges inklusive moms"),
     "en.json": ("Prices include VAT",
-                "Tick if you enter prices as they appear on your bill, including VAT. Wolta converts and stores them excluding VAT. Energy tax is never part of the grid fee.",
+                "Tick if you enter prices as they appear on your bill, including VAT. Wolta converts and stores them excluding VAT. Energy tax is never part of the grid fee. Fields you change are read in the mode the box has when you save. Other fields keep their values and show in the new mode next time.",
                 "excluding VAT, or including VAT if you ticked Prices include VAT"),
 }
 _VAT_COPY["strings.json"] = _VAT_COPY["en.json"]
+_VAT_RANGE_ERR = {
+    "sv.json": "Priset blir mer än 500 öre/ct per kWh utan moms. Kontrollera talet och om rutan Priserna anges inklusive moms ska vara ikryssad.",
+    "en.json": "The price comes to more than 500 öre/ct per kWh excluding VAT. Check the number and whether Prices include VAT should be ticked.",
+}
+_VAT_RANGE_ERR["strings.json"] = _VAT_RANGE_ERR["en.json"]
 
 
 @pytest.mark.parametrize("path", _ALL_COPY, ids=lambda p: p.name)
@@ -1102,5 +1107,11 @@ def test_translations_have_prices_incl_vat(path: Path) -> None:
         assert field_help in tariffs["data_description"][field], field
     for text in (label, help_text, field_help):
         assert "\u2014" not in text and "\u2013" not in text
+    fixed = tariffs["data_description"]["retail_fixed_ore"]
+    assert ("Högst 500 utan moms" if path.name == "sv.json" else "At most 500 excluding VAT") in fixed
+    assert "Mellan 0 och 500" not in fixed and "Between 0 and 500" not in fixed
+    err = json.loads(path.read_text(encoding="utf-8"))["options"]["error"]["price_out_of_range"]
+    assert err == _VAT_RANGE_ERR[path.name]
+    assert "\u2014" not in err and "\u2013" not in err
     for text in (tariffs["data"]["prices_incl_vat"], tariffs["data_description"]["prices_incl_vat"]):
         assert "\u2014" not in text and "\u2013" not in text
