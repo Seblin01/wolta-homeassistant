@@ -647,6 +647,7 @@
       "grid_benefit_fixed_required": "En nätnytta som anges som andel av spot behöver också sin fasta del. Fyll i ”Nätnytta” i sektionen Tariffer (0 om du bara har procent).",
       "grid_benefit_zone": "Nätnytta kan bara anges i elområde SE1–SE4, så den kan inte sparas för anläggningens elområde.",
       "periods_require_base": "Din tariff har tidsperioder med eget pris (anges på wolta.se), och tiden utanför dem behöver ett baspris. Fyll i ”Nätavgift (överföring)” eller ”Nätnytta” i sektionen Tariffer igen (0 är ett giltigt svar), eller ta bort tidsperioderna på wolta.se.",
+      "price_out_of_range": "Priset blir över 500 öre per kWh exklusive moms, vilket är gränsen. Sänk värdet i sektionen Tariffer.",
       "retail_fixed_invalid": "Avtalet Fastpris kräver ett fast pris, och ett fast pris kan bara anges med det avtalet. Kontrollera ”Fastpris” och ”Elhandelsavtal” i sektionen Tariffer.",
       "retail_fixed_surcharge": "Ett fastpris är elhandlarens hela pris och har inget påslag. Töm ”Elhandlarens påslag” i sektionen Tariffer, eller välj ett annat avtal.",
       "tariff_zone_se_only": "Tidsperioderna, helgdagsreglerna och elhandelsavtalet kan bara anges i elområde SE1–SE4, så de kan inte sparas för anläggningens elområde.",

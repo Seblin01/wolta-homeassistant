@@ -647,6 +647,7 @@
       "grid_benefit_fixed_required": "A grid benefit given as a percentage of spot needs its fixed part too. Fill in \"Grid benefit\" in the Tariffs section (0 if you only have a percentage).",
       "grid_benefit_zone": "The grid benefit can only be given in price zones SE1–SE4, so it cannot be saved for this plant's zone.",
       "periods_require_base": "Your tariff has time periods with a price of their own (set on wolta.se), and the time outside them needs a base price. Fill in \"Grid fee (transfer)\" or \"Grid benefit\" in the Tariffs section again (0 is a valid answer), or remove the time periods on wolta.se.",
+      "price_out_of_range": "The price comes to more than 500 per kWh excluding VAT, which is the limit. Lower the value in the Tariffs section.",
       "retail_fixed_invalid": "The Fixed price contract needs a fixed price, and a fixed price can only be given with that contract. Check \"Fixed price\" and \"Electricity contract\" in the Tariffs section.",
       "retail_fixed_surcharge": "A fixed price is the retailer's whole price and carries no markup. Clear \"Electricity supplier markup\" in the Tariffs section, or choose another contract.",
       "tariff_zone_se_only": "Time periods, holiday rules and the electricity contract can only be given in price zones SE1–SE4, so they cannot be saved for this plant's zone.",
