@@ -8425,17 +8425,18 @@ async def test_settings_vat_hidden_fixed_price_untouched(hass: HomeAssistant) ->
     """Outside SE1-SE4 the fixed retail price is not in the form and is not sent."""
     entry = _make_mock_entry(
         hass, extra_data={CONF_PRICES_INCL_VAT: True, CONF_ZONE: "NL"})
-    result, client, _ = await _vat_save(
-        hass, entry, {"vat": 1.21, CONF_ZONE: "NL", CONF_RETAIL_FIXED_ORE: 80.0,
-                      CONF_GRID_VAR_ORE: 10.0},
-        [{CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.1}])
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, vat=1.21, zone="NL", retail_fixed_ore=80.0, grid_var_ore=10.0))
+    with _options_patched(mock_client):
+        result = await _settings_session(hass, entry)
+        assert CONF_RETAIL_FIXED_ORE not in _tariff_markers(result)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=_opts(**_core(**{
+                CONF_PRICES_INCL_VAT: True, CONF_GRID_VAR_ORE: 12.1})))
 
-    assert CONF_RETAIL_FIXED_ORE not in _tariff_markers(
-        await _open_settings_form(
-            hass, _make_mock_entry(hass, extra_data={CONF_ZONE: "NL"}),
-            vat=1.21, zone="NL"))
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    client.patch_profile.assert_not_awaited()
+    mock_client.patch_profile.assert_not_awaited()
 
 
 @pytest.mark.asyncio
