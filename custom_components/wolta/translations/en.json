@@ -702,10 +702,35 @@
         }
       },
       "optimeringsbetyg": {
-        "name": "Optimisation grade"
+        "name": "Optimisation grade",
+        "state_attributes": {
+          "basis": {
+            "name": "Grade basis"
+          },
+          "on_own_values": {
+            "name": "Uses your own values"
+          },
+          "in_comparison": {
+            "name": "In the comparison"
+          },
+          "comparison_reasons": {
+            "name": "Reasons"
+          },
+          "measured_score": {
+            "name": "Grade on Wolta's measured values"
+          }
+        }
       },
       "jamforelsebetyg": {
-        "name": "Comparison grade"
+        "name": "Comparison grade",
+        "state_attributes": {
+          "in_comparison": {
+            "name": "In the comparison"
+          },
+          "comparison_reasons": {
+            "name": "Reasons"
+          }
+        }
       },
       "batterivarde_ar": {
         "name": "Battery value per year"

@@ -702,10 +702,35 @@
         }
       },
       "optimeringsbetyg": {
-        "name": "Optimeringsbetyg"
+        "name": "Optimeringsbetyg",
+        "state_attributes": {
+          "basis": {
+            "name": "Betygets grund"
+          },
+          "on_own_values": {
+            "name": "Räknat på egna värden"
+          },
+          "in_comparison": {
+            "name": "Ingår i jämförelsen"
+          },
+          "comparison_reasons": {
+            "name": "Skäl"
+          },
+          "measured_score": {
+            "name": "Betyg med Woltas uppmätta värden"
+          }
+        }
       },
       "jamforelsebetyg": {
-        "name": "Jämförelsebetyg"
+        "name": "Jämförelsebetyg",
+        "state_attributes": {
+          "in_comparison": {
+            "name": "Ingår i jämförelsen"
+          },
+          "comparison_reasons": {
+            "name": "Skäl"
+          }
+        }
       },
       "batterivarde_ar": {
         "name": "Batterivärde per år"

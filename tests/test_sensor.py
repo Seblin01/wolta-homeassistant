@@ -172,7 +172,7 @@ RESULTS_NO_HISTORY = {
 }
 
 
-def _make_coordinator(results: dict) -> WoltaCoordinator:
+def _make_coordinator(results: dict, battery_params: dict | None = None) -> WoltaCoordinator:
     """Return a mocked WoltaCoordinator with given results."""
     coord = MagicMock(spec=WoltaCoordinator)
     coord.last_update_success = True
@@ -181,6 +181,7 @@ def _make_coordinator(results: dict) -> WoltaCoordinator:
         last_uploaded=datetime(2025, 5, 31, 0, 0, 0, tzinfo=timezone.utc),
         n_days=results["period"]["n_days"],
         pending=results.get("status") in ("pending", "running"),
+        battery_params=battery_params,
     )
     return coord
 
@@ -199,9 +200,9 @@ def _make_entry(entry_id: str = ENTRY_ID) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-def _sensor(key: str, results: dict) -> WoltaSensor:
+def _sensor(key: str, results: dict, battery_params: dict | None = None) -> WoltaSensor:
     """Build a WoltaSensor for the given key with given results fixture."""
-    coord = _make_coordinator(results)
+    coord = _make_coordinator(results, battery_params)
     entry = _make_entry()
     entry.runtime_data = coord
 
@@ -1517,3 +1518,142 @@ def test_comparison_sensor_carries_all_comparison_attributes_without_window():
     attrs = _sensor("jamforelsebetyg", results).extra_state_attributes
     _assert_comparison_attrs(attrs)
     assert "basis" not in attrs
+
+
+# ---------------------------------------------------------------------------
+# Egna batterivärden: betygets företräde (spec 2026-11-11 §4.4) och jämförbarhet (§4.5)
+# ---------------------------------------------------------------------------
+
+_ACTIVE = {"active": True}
+_OWN_GRADE = {
+    "score": 0.81,
+    "measured_score": 0.64,
+    "own_quantities": ["capacity", "eff"],
+    "preliminary": False,
+    "n_days": 120,
+    "period_start": "2025-02-01",
+    "period_end": "2025-05-31",
+}
+
+
+def _with_betyg(**blocks) -> dict:
+    return {**RESULTS_FULL, "betyg": {**RESULTS_FULL["betyg"], **blocks}}
+
+
+def _no_holistic(**blocks) -> dict:
+    betyg = {k: v for k, v in RESULTS_FULL["betyg"].items() if k != "holistic"}
+    return {**RESULTS_FULL, "betyg": {**betyg, **blocks}}
+
+
+def test_own_grade_when_active():
+    s = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE), _ACTIVE)
+    assert s.native_value == 81.0
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "own"
+    assert attrs["measured_score"] == 64.0
+    assert attrs["on_own_values"] is True
+    assert attrs["own_quantities"] == ["capacity", "eff"]
+    assert attrs["period_start"] == "2025-02-01"
+    assert attrs["n_days"] == 120
+    assert attrs["preliminary"] is False
+
+
+def test_window_wins_over_own_grade():
+    window = {**_WINDOW, "score_on": 0.70}
+    s = _sensor("optimeringsbetyg", _with_betyg(window=window, own_grade=_OWN_GRADE), _ACTIVE)
+    assert s.native_value == 70.0
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "window"
+    assert "measured_score" not in attrs
+
+
+def test_own_grade_ignored_when_inactive():
+    s = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE), {"active": False})
+    assert s.native_value == pytest.approx(82.0)
+    assert s.extra_state_attributes["basis"] == "comparison"
+
+
+def test_own_grade_ignored_without_battery_params():
+    s = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE), None)
+    assert s.native_value == pytest.approx(82.0)
+    assert s.extra_state_attributes["basis"] == "comparison"
+
+
+def test_only_own_grade():
+    results = _no_holistic(own_grade={**_OWN_GRADE, "score": 0.72})
+    s = _sensor("optimeringsbetyg", results, _ACTIVE)
+    assert s.available is True
+    assert s.native_value == 72.0
+    assert _sensor("jamforelsebetyg", results, _ACTIVE).available is False
+
+
+def test_own_grade_score_none_falls_back():
+    s = _sensor("optimeringsbetyg", _with_betyg(own_grade={**_OWN_GRADE, "score": None}), _ACTIVE)
+    assert s.native_value == pytest.approx(82.0)
+    assert s.extra_state_attributes["basis"] == "comparison"
+
+
+def test_on_own_values():
+    attrs = _sensor("optimeringsbetyg", _with_window(), None).extra_state_attributes
+    assert attrs["on_own_values"] is False
+    assert "own_quantities" not in attrs
+    window = {**_WINDOW, "own_quantities": ["capacity", "eff"]}
+    attrs = _sensor("optimeringsbetyg", _with_window(window), None).extra_state_attributes
+    assert attrs["on_own_values"] is True
+    assert attrs["own_quantities"] == ["capacity", "eff"]
+    attrs = _sensor("optimeringsbetyg", RESULTS_FULL, None).extra_state_attributes
+    assert attrs["on_own_values"] is False
+
+
+def test_no_benchmark_no_comparison_attrs():
+    for key in ("optimeringsbetyg", "jamforelsebetyg"):
+        attrs = _sensor(key, RESULTS_FULL, _ACTIVE).extra_state_attributes
+        assert "in_comparison" not in attrs
+        assert "comparison_reasons" not in attrs
+
+
+def test_benchmark_not_comparable():
+    block = {"method": "data", "comparable": False, "reasons": ["soc_gate:count", "reserve_floor_high"]}
+    for key in ("optimeringsbetyg", "jamforelsebetyg"):
+        attrs = _sensor(key, _with_betyg(benchmark=block), _ACTIVE).extra_state_attributes
+        assert attrs["in_comparison"] is False
+        assert attrs["comparison_reasons"] == ["soc_gate:count", "reserve_floor_high"]
+        assert attrs["benchmark"] == block
+
+
+def test_benchmark_comparable():
+    block = {"method": "data", "comparable": True, "reasons": []}
+    for key in ("optimeringsbetyg", "jamforelsebetyg"):
+        attrs = _sensor(key, _with_betyg(benchmark=block), _ACTIVE).extra_state_attributes
+        assert attrs["in_comparison"] is True
+        assert "comparison_reasons" not in attrs
+
+
+_OBSERVED = {
+    "observed_capacity": {"kwh": 19.8, "plateau_days": 12, "n_days": 150},
+    "observed_capacity_status": "ok",
+    "observed_power": {"kw": 5.0},
+    "observed_eff": {"eff": 0.9},
+}
+
+
+def test_inactive_keeps_v057_attrs():
+    results = _with_betyg(**_OBSERVED)
+    for bp in (None, {"active": False}):
+        s = _sensor("optimeringsbetyg", results, bp)
+        assert s.native_value == pytest.approx(82.0)
+        attrs = s.extra_state_attributes
+        assert attrs["basis"] == "comparison"
+        assert attrs["measured_capacity_kwh"] == 19.8
+        assert attrs["measured_capacity_status"] == "ok"
+        assert attrs["measured_power_kw"] == 5.0
+        assert attrs["measured_efficiency"] == 0.9
+        assert attrs["peer_percentile"] == 68
+
+
+def test_measured_params_attr_gone_when_active():
+    results = _with_betyg(**_OBSERVED)
+    attrs = _sensor("optimeringsbetyg", results, _ACTIVE).extra_state_attributes
+    for key in ("measured_capacity_kwh", "measured_capacity_status", "measured_power_kw", "measured_efficiency"):
+        assert key not in attrs, key
+    assert attrs["basis"] == "comparison"
