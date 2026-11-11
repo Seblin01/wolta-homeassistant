@@ -343,6 +343,27 @@
     "battery_direction_refused": {
       "title": "Wolta: laddning och urladdning vändes inte",
       "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Det som redan hunnit bytas ligger kvar. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
+    },
+    "nameplate_power": {
+      "title": "Wolta behöver ditt batteris märkeffekt",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Batteriets märkeffekt",
+            "description": "Wolta saknar batteriets märkeffekt, den högsta laddnings- och urladdningseffekt som står på typskylten. Ange den i kW.",
+            "data": {
+              "nameplate_kw": "Märkeffekt (kW)"
+            },
+            "data_description": {
+              "nameplate_kw": "Effekten som tillverkaren anger för batteriet eller dess växelriktare."
+            }
+          }
+        },
+        "abort": {
+          "failed": "Svaret kunde inte sparas hos Wolta just nu. Försök igen senare.",
+          "entry_not_found": "Wolta-integrationen som den här reparationen hörde till har tagits bort."
+        }
+      }
     }
   },
   "config": {

@@ -1325,3 +1325,24 @@ async def test_cs_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
     release.set()
     await hass.async_block_till_done()
     assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_nameplate_power_repair_patches(hass: HomeAssistant):
+    """Fix-flödet PATCHar märkeffekten och raderar ärendet."""
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import DOMAIN
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    ir.async_create_issue(
+        hass, DOMAIN, "nameplate_power_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="nameplate_power")
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(
+        hass, "nameplate_power_e1", {"entry_id": "e1"})
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] == "form"
+    result = await flow.async_step_init({"nameplate_kw": 5.0})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", nameplate_kw=5.0)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "nameplate_power_e1") is None

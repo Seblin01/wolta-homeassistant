@@ -741,6 +741,7 @@ _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
 _ISSUE_POWER = "measured_power"
 _ISSUE_EFFICIENCY = "measured_efficiency"
+_ISSUE_NAMEPLATE_POWER = "nameplate_power"
 # Backend gave up measuring the declared battery (spec 2026-09-14 §7.2): ask for the
 # nameplate pair instead. Unlike the three adopt repairs above this is not a nudge to
 # improve a value - without a capacity there is no grade at all.
@@ -4134,6 +4135,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # under tre kontrollerade dygn), på samma sätt som energibalansen vilar på sitt golv.
         self._evaluate_battery_direction_issue(betyg)
         self._evaluate_energy_balance_issue(betyg)
+        if battery_params_active(self._battery_params):
+            # Regel 3 (egna värden): Woltas uppmätta värden är underlag, inte ett förslag att
+            # anta. Adopt-förslaget skickar dessutom reserve_pct=None, vilket vore fel här.
+            for key in (_ISSUE_CAPACITY, _ISSUE_POWER, _ISSUE_EFFICIENCY):
+                ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.config_entry.entry_id}")
+            self._evaluate_nameplate_power_issue()
+            return
+        self._set_measured_issue(
+            _ISSUE_NAMEPLATE_POWER, fire=False, translation_key=_ISSUE_NAMEPLATE_POWER,
+            placeholders={}, data={})
         if self._direction_reversed(betyg):
             # Adopt-förslagen är rekonstruerade ur samma felvända flöden. Före den
             # preliminära returen nedan: ett preliminärt men omkastat betyg kan ha kvar
@@ -4149,6 +4160,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
+
+    def _evaluate_nameplate_power_issue(self) -> None:
+        """Under regel 3 saknas märkeffekten (nameplate_kw) hos servern: be om den."""
+        self._set_measured_issue(
+            _ISSUE_NAMEPLATE_POWER,
+            fire=self._nameplate_kw is None,
+            translation_key=_ISSUE_NAMEPLATE_POWER,
+            placeholders={}, data={})
 
     def _evaluate_soc_required_issue(self, results: dict) -> None:
         """Require a state-of-charge sensor, or the "no SoC sensor" answer (spec 4.2).

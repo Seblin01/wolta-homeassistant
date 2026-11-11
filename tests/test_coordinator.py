@@ -7345,3 +7345,75 @@ async def test_reload_when_active_flips_on_in_main_cycle(hass: HomeAssistant, mo
             hass.config_entries, "async_schedule_reload") as reload:
         await _sync_refresh(hass, mock_entry, client, built=False)
     reload.assert_called_once_with(mock_entry.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# Regel 3: inga adopt-reparationer, märkeffekt efterfrågas
+# ---------------------------------------------------------------------------
+
+_NP_ISSUE_ID = "nameplate_power_test_entry_id"
+
+
+def _rule3(c, *, active, nameplate_kw=5.0):
+    c._battery_params = {"active": active}
+    c._nameplate_kw = nameplate_kw
+
+
+@pytest.mark.asyncio
+async def test_inactive_keeps_adopt_repairs(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 25.0})
+    _rule3(c, active=False)
+    c._evaluate_measured_params(_oc_results(18.0))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_active_deletes_adopt_issues(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 25.0, _CBKW: 10.0, "eff": 0.9})
+    _rule3(c, active=False)
+    c._evaluate_measured_params({"betyg": {
+        **_oc_results(18.0)["betyg"], **_op_results(3.6)["betyg"], **_oe_results(0.7)["betyg"]}})
+    reg = ir.async_get(hass)
+    for iid in (_CAP_ISSUE_ID, _POWER_ISSUE_ID, _EFF_ISSUE_ID):
+        assert reg.async_get_issue(DOMAIN, iid) is not None
+    _rule3(c, active=True)
+    c._evaluate_measured_params({"betyg": {}})
+    for iid in (_CAP_ISSUE_ID, _POWER_ISSUE_ID, _EFF_ISSUE_ID):
+        assert reg.async_get_issue(DOMAIN, iid) is None
+
+
+@pytest.mark.asyncio
+async def test_active_no_adopt_on_gap(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CBK: 25.0})
+    _rule3(c, active=True)
+    c._evaluate_measured_params(_oc_results(18.0))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _CAP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_active_keeps_direction_repair(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    _rule3(c, active=True)
+    c._evaluate_measured_params(_dir_results("all"))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _DIR_ISSUE_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_nameplate_power_issue_when_missing(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    _rule3(c, active=True, nameplate_kw=None)
+    c._evaluate_measured_params({"betyg": {}})
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID)
+    assert issue is not None and issue.is_fixable
+    assert issue.data["entry_id"] == "test_entry_id"
+    _rule3(c, active=True, nameplate_kw=5.0)
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_no_nameplate_issue_when_inactive(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    _rule3(c, active=False, nameplate_kw=None)
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is None
