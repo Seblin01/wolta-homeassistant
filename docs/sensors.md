@@ -6,8 +6,8 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 
 | Entity | Unit | Description |
 |--------|------|-------------|
-| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100): the share of the battery's theoretically perfect total value your actual operation captured. Appears as a **preliminary** score after about 7 days of data (server v0.43.0+) and matures at 30 days — the attributes `preliminary` and `n_days` tell you which; a preliminary score can swing from day to day. If you have set a grade window on wolta.se, the sensor shows the grade for that window instead of the comparison grade. The attribute `basis` says which one (`window` or `comparison`), and `period_start` and `period_end` are the dates of the grade shown. Details that describe the comparison grade (`peer_percentile`, `peer_n`, `benchmark`, `annual_basis`, `measured_period_sek`, `measured_wear_sek`, `price_skill`, `components`, `external_control`) are on this sensor only while it shows the comparison grade; with a window set they are on `sensor.wolta_comparison_grade`. The attribute `benchmark` (`method`, `comparable`, `reasons`) says whether the comparison grade is compared with other installations or is a grade of your own, and why (for example `no_soc`: no state-of-charge sensor; see [State of charge (SoC) monitoring](configuration.md#state-of-charge-soc-monitoring)). It is present once the server computes grades against the data-driven benchmark. All price zones. |
-| `sensor.wolta_comparison_grade` | % | The grade over the last 12 full months, the one that is compared with other installations, always the same grade whether or not you have set a grade window. Attributes `peer_percentile` and `peer_n` give your percentile among comparable installations and how many there are; `period_start` and `period_end` are the dates it covers; `benchmark` says whether the grade is compared at all (and why not), next to `annual_basis`, `measured_period_sek`, `measured_wear_sek`, `price_skill`, `components` and `external_control`. |
+| `sensor.wolta_optimisation_grade` | % | Holistic optimisation score (0–100): the share of the battery's theoretically perfect total value your actual operation captured. Appears as a **preliminary** score after about 7 days of data (server v0.43.0+) and matures at 30 days — the attributes `preliminary` and `n_days` tell you which; a preliminary score can swing from day to day. If you have set a grade window on wolta.se, the sensor shows the grade for that window instead of the comparison grade. Once Wolta runs its own-values rule (v0.58.0+, see [Battery values](#battery-values-v0580)), a grade of your own sits between the two: the sensor shows the window grade if you set a window, otherwise your own grade, otherwise the comparison grade. The attribute `basis` says which one (`window`, `own` or `comparison`), and `period_start` and `period_end` are the dates of the grade shown. `on_own_values` says whether the grade shown is calculated on values you entered yourself, and `own_quantities` lists which ones (for example `capacity`, `eff`). With `basis: own`, `measured_score` is the same grade calculated on Wolta's measured values instead of yours. Details that describe the comparison grade (`peer_percentile`, `peer_n`, `benchmark`, `annual_basis`, `measured_period_sek`, `measured_wear_sek`, `price_skill`, `components`, `external_control`) are on this sensor only while it shows the comparison grade; with a window set they are on `sensor.wolta_comparison_grade`. The attribute `benchmark` (`method`, `comparable`, `reasons`) says whether the comparison grade is compared with other installations or is a grade of your own, and why (for example `no_soc`: no state-of-charge sensor; see [State of charge (SoC) monitoring](configuration.md#state-of-charge-soc-monitoring)). It is present once the server computes grades against the data-driven benchmark. From v0.58.0 the plain attributes `in_comparison` (true or false) and, when it is false, `comparison_reasons` (a list of reason codes) carry the same answer; they describe your plant, so they are on this sensor and on `sensor.wolta_comparison_grade` whichever grade is shown. Without a battery-values rule on the server the sensor behaves as before. All price zones. |
+| `sensor.wolta_comparison_grade` | % | The grade over the last 12 full months, the one that is compared with other installations, always the same grade whether or not you have set a grade window. Attributes `peer_percentile` and `peer_n` give your percentile among comparable installations and how many there are; `period_start` and `period_end` are the dates it covers; `benchmark` says whether the grade is compared at all (and why not; from v0.58.0 also as `in_comparison` and `comparison_reasons`), next to `annual_basis`, `measured_period_sek`, `measured_wear_sek`, `price_skill`, `components` and `external_control`. |
 | `sensor.wolta_battery_value_per_year` | SEK / EUR | The battery's **own** annual value — the incremental saving vs. the same plant without a battery. Measured from your actual flows once the window is **180 days** old (server v0.71.1+); before that it falls back to the modelled battery share — a short window multiplied up to a year is not an honest measured figure (a 32-day summer window has read 55 % high). Attribute `source` tells you which (`measured`/`modelled`); `plant_total_sek` carries the plant total. It is the same measured figure Wolta's economics (payback, IRR) are anchored on. Once the grade is computed against the data-driven benchmark, the grade can cover a different period than the economics, so this figure can differ from what wolta.se shows as "You captured" next to the grade. All price zones. Solar's value is **not** included — it belongs to the solar investment. |
 | `sensor.wolta_plant_savings_per_year` | SEK / EUR | Total annual saving of the whole plant (solar + battery), i.e. what a combined solar-plus-battery investment earns. Attributes `battery_sek`/`solar_sek` give the split. SE zones only. |
 | `sensor.wolta_internal_rate_of_return_irr` | % | IRR of the **battery investment**: the battery-only savings stream against what you paid for the battery (incremental cash-flow principle). Can be negative — that means the battery alone does not carry its cost. SE zones only. |
@@ -19,6 +19,44 @@ Entity names are translated (English and Swedish bundled; other languages fall b
 A **Recompute** button lets you trigger an immediate recompute outside the automatic schedule.
 
 Economy sensors that require the decision engine (plant savings, IRR, payback, actual savings) are only available for Swedish price zones (SE1–SE4). The grade and the measured battery value work for all supported zones.
+
+### Battery values (v0.58.0+)
+
+Wolta shows three grades, and they are not the same number. The comparison grade is calculated on Wolta's measured values and can be compared with other installations. Your grade is calculated on your own values. The window grade is calculated over the period you chose yourself. The grade sensor shows one of them and says which in `basis`.
+
+When Wolta uses the own-values rule, the integration adds four diagnostic sensors. They are created on their own when the server switches rule (the integration reloads itself). If the server switches back they are no longer updated and stay in the entity registry as unavailable. They show the battery values Wolta calculates with:
+
+| Entity | Unit | Value | Enabled by default |
+|--------|------|-------|--------------------|
+| `sensor.wolta_battery_capacity` | kWh | Usable capacity, after the reserve | yes |
+| `sensor.wolta_battery_power` | kW | Charge and discharge power | no |
+| `sensor.wolta_round_trip_efficiency` | % | Round-trip efficiency, one decimal | yes |
+| `sensor.wolta_reserve` | % | The reserve in use, yours or Wolta's | no |
+
+Attributes on all four: `state` (where the value comes from: your own value, a measured one, a datasheet value or an assumed one), `source`, `period_start` and `period_end`. When `state` is `owner`, the attributes `measured_value`, `measured_state` and `measured_source` give what Wolta measures for the same quantity (efficiency in %). On the capacity sensor `measured_value` is the usable capacity, and `measured_gross_kwh` is the measured capacity before the reserve, when Wolta reports it that way. If a value is missing, the sensor shows `unknown` and keeps its attributes; it is `unavailable` only when the server sent no battery values at all.
+
+Your own values are set in **Configure → Settings** (see [Your own values](configuration.md#your-own-values-v0580)). A value you enter that equals Wolta's own value is not stored by the server, so the field is empty the next time you open the form.
+
+Reason codes in `comparison_reasons`, with the sentences wolta.se shows for them. The full explanation, with the numbers behind it, is on the *My battery* card on wolta.se; the integration shows the codes as they are, and an unknown code is passed through unchanged.
+
+| Code | Meaning |
+|------|---------|
+| `no_soc` | The plant has no state-of-charge (SoC) sensor to build the comparison on. |
+| `soc_gate:window` | The scale of the state of charge is not known, so it cannot be converted to kWh. |
+| `soc_gate:count` | The SoC data has too few discharges to measure the capacity reliably. |
+| `soc_gate:spread` | The SoC data does not show an even capacity from one discharge to the next. |
+| `soc_gate:roundtrip` | The SoC data gives a round-trip efficiency outside the plausible range, or has no charging or discharging to calculate on. |
+| `soc_gate:method_b` | The capacity from the SoC data could not be confirmed by a second method. |
+| `soc_gate:coverage` | The SoC data is not enough to measure capacity and efficiency for every battery and level in the period. |
+| `power_unknown` | The battery's power is known neither from the catalogue nor from operation. |
+| `data_untrustworthy` | The flows from the plant failed the data check, for example swapped charge fields or an energy balance that does not add up. The grade is not compared until this is corrected. |
+| `owner_window` | You have set a grade window of your own. |
+| `reservation` | The battery is reserved for ancillary services. |
+| `reserve_high` | The reserve in use is above 20 %. |
+| `period_short` | The comparison period is too short. |
+| `flex_share` | Too large a share of the time the battery was controlled externally. |
+| `no_benchmark` | No benchmark could be built for the plant, so it is not compared. |
+| `no_measured_capacity` | Wolta cannot measure the battery's capacity from the data, so the grade is calculated on the values you entered. |
 
 ### Why battery value ≠ plant savings
 
