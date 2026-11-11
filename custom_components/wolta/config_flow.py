@@ -2567,9 +2567,10 @@ class WoltaOptionsFlow(OptionsFlow):
 
             # Egna värden (bara med regel 3): jämförs mot ögonblicksbilden formuläret fylldes ur.
             # `own` är ett eget PATCH-fält och skrivs aldrig till entry.data (se cachen nedan).
-            if active:
+            # Saknas hela sektionen i input rörs inga egna värden (inte samma sak som tömda fält).
+            if active and SECTION_OWN_VALUES in user_input:
                 own_changes = _own_diff(
-                    self._server["battery_params"], user_input.get(SECTION_OWN_VALUES) or {})
+                    self._server["battery_params"], user_input[SECTION_OWN_VALUES] or {})
                 if own_changes:
                     patch_fields["own"] = own_changes
 

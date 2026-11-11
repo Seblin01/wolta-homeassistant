@@ -8674,3 +8674,25 @@ async def test_own_not_written_to_entry_data(hass: HomeAssistant) -> None:
         _opts_active({"own_capacity_kwh": 16.0}, nameplate_kw=8.0))
     assert "own" not in entry.data
     assert entry.data.get("nameplate_kw") == 8.0
+
+
+@pytest.mark.asyncio
+async def test_missing_own_values_section_sends_no_own(hass: HomeAssistant) -> None:
+    """Saknas hela own_values-sektionen i input är det inte "alla fält tömda"."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_active_bp(capacity=20.0)))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        flow = hass.config_entries.options._progress[result["flow_id"]]
+        # Förbi schemavalideringen: anropa steget direkt utan own_values-nyckeln.
+        result = await flow.async_step_settings(
+            {"battery": {}, "economy": {}, "tariffs": {}})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
