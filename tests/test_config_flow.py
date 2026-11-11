@@ -8696,3 +8696,125 @@ async def test_missing_own_values_section_sends_no_own(hass: HomeAssistant) -> N
             {"battery": {}, "economy": {}, "tariffs": {}})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     mock_client.patch_profile.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Bekräftelse när ett fält med daterade rader töms (spec 2026-11-11 §4.10).
+# ---------------------------------------------------------------------------
+
+def _bp_with_timeline(rows, **own):
+    bp = _active_bp(**own)
+    bp["reserve"]["measured"] = {"state": "ok", "source": "soc", "value": 5.0}
+    bp["own_timeline"] = {"reserve": rows}
+    return bp
+
+
+_DATED = [{"valid_from": "2026-06-01", "value": 10.0}]
+_UNDATED = [{"valid_from": None, "value": 10.0}]
+
+
+@pytest.mark.asyncio
+async def test_clear_undated_sends_null_directly(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_UNDATED, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active({}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": None}}
+
+
+@pytest.mark.asyncio
+async def test_clear_dated_shows_confirm(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active({}))
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_clear"
+    rows = result["description_placeholders"]["rows"]
+    assert "reserve" in rows and "the measured value" in rows
+    client.patch_profile.assert_not_awaited()
+
+
+async def _to_confirm(hass, entry, bp, user_input, client):
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input)
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_sends_whole_save(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}, nameplate_kw=8.0), client)
+    assert result["step_id"] == "confirm_clear"
+    client.patch_profile.assert_not_awaited()
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.await_count == 1
+    assert client.patch_profile.call_args.kwargs == {
+        "nameplate_kw": 8.0, "own": {"reserve_pct": None}}
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_closed_sends_nothing(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}, nameplate_kw=8.0), client)
+    assert result["step_id"] == "confirm_clear"
+    hass.config_entries.options.async_abort(result["flow_id"])
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_dated_value_no_confirm(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    result, client = await _save_active(
+        hass, entry, bp, _opts_active({"own_reserve_pct": 15.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 15.0}}
+
+
+def test_clear_rows_two_quantities_en() -> None:
+    from custom_components.wolta.config_flow import _clear_rows
+    bp = _bp_with_timeline(_DATED)
+    bp["capacity"]["measured"] = {"state": "datasheet", "source": "datasheet", "value": 10.0}
+    text = _clear_rows("en", ["capacity", "reserve"], bp)
+    rows = text.split("\n\n")
+    assert len(rows) == 2
+    assert "the datasheet value" in rows[0] and "capacity" in rows[0]
+    assert "the measured value" in rows[1] and "reserve" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_patch_error(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}), client)
+    client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_clear"
+    assert result["errors"]["base"]

@@ -656,6 +656,10 @@
         "data": {
           "zone": "Elområde"
         }
+      },
+      "confirm_clear": {
+        "title": "Ta bort dina egna värden?",
+        "description": "{rows}"
       }
     },
     "error": {

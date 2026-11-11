@@ -44,7 +44,12 @@ from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-expo
     soc_error as _soc_error,
     soc_requirement_error,
 )
-from .battery_params import is_active as _bp_active, own_value as _bp_own_value
+from .battery_params import (
+    has_dated_own_rows,
+    is_active as _bp_active,
+    own_value as _bp_own_value,
+    wolta_value_kind,
+)
 from .api import (
     WoltaApiClient,
     WoltaApiError,
@@ -643,6 +648,35 @@ _TICK = timedelta(microseconds=1)  # an end is exclusive: its last instant is th
 def _direction_text(hass_language: str | None) -> dict[str, str]:
     lang = (hass_language or "en").split("-")[0]
     return _DIRECTION_TEXT.get(lang, _DIRECTION_TEXT["en"])
+
+
+_CLEAR_QUANTITY = {
+    "sv": {"capacity": "kapacitet", "power": "effekt", "eff": "verkningsgrad", "reserve": "reserv"},
+    "en": {"capacity": "capacity", "power": "power", "eff": "round-trip efficiency",
+           "reserve": "reserve"},
+}
+_CLEAR_VALUE_WORDS = {
+    "sv": {"measured": "det uppmätta värdet", "datasheet": "databladets värde",
+           "assumed": "ett antaget värde", None: "inget värde"},
+    "en": {"measured": "the measured value", "datasheet": "the datasheet value",
+           "assumed": "an assumed value", None: "no value"},
+}
+
+
+def _clear_rows(language: str | None, quantities: list[str], bp: dict | None) -> str:
+    """Bekräftelsetexten: en rad per storhet, samma innebörd som wolta.se (clearOwnNote)."""
+    lang = "sv" if (language or "").lower().startswith("sv") else "en"
+    rows = []
+    for q in quantities:
+        name = _CLEAR_QUANTITY[lang][q]
+        word = _CLEAR_VALUE_WORDS[lang][wolta_value_kind(bp, q)]
+        if lang == "sv":
+            rows.append(f"Dina värden för {name} tas bort, också de som gäller tidigare "
+                        f"etapper. Wolta räknar då med {word}.")
+        else:
+            rows.append(f"Your values for {name} are removed, including those for earlier "
+                        f"stages. Wolta then uses {word}.")
+    return "\n\n".join(rows)
 
 
 def _at_midnight(value: datetime | None) -> bool:
@@ -2111,6 +2145,8 @@ class WoltaOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         """Initialise the options flow."""
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
+        self._pending_save: dict[str, Any] | None = None  # väntar på confirm_clear
+        self._pending_clear: list[str] = []
         # VAT choice in the tariff section: the server's multiplier, read once with the
         # profile, and what the form first showed (mode, prefilled values, max). Computed at the
         # first display and kept, so a re-show after an error neither recomputes nor drifts.
@@ -2426,6 +2462,140 @@ class WoltaOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         return await self.async_step_direction_confirm(user_input)
 
+    async def _finish_save(
+        self,
+        client: WoltaApiClient,
+        token: str,
+        patch_fields: dict[str, Any],
+        *,
+        incl_now: bool,
+        dropped: set[str],
+    ) -> tuple[ConfigFlowResult | None, dict[str, str], str]:
+        """PATCH:en och efterarbetet för en sparning som klarat förkontrollerna. Ger
+        (resultat, {}, "") när allt gick, annars (None, errors, server_detail)."""
+        entry = self.config_entry
+        errors: dict[str, str] = {}
+        server_detail = ""   # the server's words for a refusal without a rule here
+
+        if patch_fields and not errors:
+            try:
+                await client.patch_profile(token, **patch_fields)
+            except WoltaApiError as err:
+                _LOGGER.error("Failed to patch Wolta profile: %s", err)
+                # The same refusal from the server (a cache that is out of step with it)
+                # reads as the same fault, not as a connection problem.
+                benefit_err = _grid_benefit_error(err)
+                rule_err = _server_rule_error(err)
+                if benefit_err is not None:
+                    # Field AND base, as for the prechecks above. A zone refusal can come
+                    # while the field is hidden (a cache out of step), where base is the
+                    # only place the owner can read it.
+                    errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
+                elif rule_err is not None:
+                    errors[_server_rule_field(rule_err, patch_fields)] = rule_err
+                    errors["base"] = rule_err
+                elif _is_grid_fixed_error(err):
+                    errors["base"] = "grid_fixed_required"
+                else:
+                    server_detail = _refusal(err, errors)
+
+        if not errors:
+            # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
+            # nu visat det, så nyckeln tas bort. Utan det hade varje senare sparning
+            # föreslagit datumet igen och därmed återuppväckt ett datum användaren
+            # medvetet rensade.
+            prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
+            choice_changed = self._vat is not None and incl_now != self._vat_mode
+            if patch_fields or prefill_offered or choice_changed:
+                new_data = dict(entry.data)
+                if self._vat is not None:
+                    new_data[CONF_PRICES_INCL_VAT] = incl_now
+                for key, val in patch_fields.items():
+                    if key == "own":
+                        continue  # egna värden bor på servern, inte i cachen
+                    if val is None:
+                        new_data.pop(key, None)
+                    else:
+                        new_data[key] = val
+                if CONF_RETAIL_PRICE_MODEL in patch_fields:
+                    # What the server drops with a change of contract type (see `dropped`
+                    # above): the fixed price leaving `fixed`, the markup going to it.
+                    for key in dropped:
+                        new_data.pop(key, None)
+                new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
+                self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+            coordinator = getattr(entry, "runtime_data", None)
+            prices = getattr(coordinator, "prices", None)
+            if prices is not None and _TARIFF_PRICE_KEYS & patch_fields.keys():
+                # The purchase-price sensor shows what THIS tariff costs: refresh it now
+                # instead of at the next 15-minute poll. A request on top of the poll, and
+                # only if the owner changed the tariff; it fetches /profile/prices only when
+                # that sensor is enabled. A price problem never fails the save (see
+                # _refresh_prices).
+                # Scheduled, not awaited: the fetch can take up to the lookup timeout and
+                # the dialog must not wait for it. A background task, so Home Assistant
+                # does not wait for it at startup.
+                # The entry owns the task, so unloading it cancels the refresh. The kept
+                # answer was priced with the old tariff: forget it first, so a failing
+                # refresh cannot show it.
+                prices.async_forget_purchase()
+                entry.async_create_background_task(
+                    self.hass, _refresh_prices(prices), "wolta_options_price_refresh")
+            if patch_fields and coordinator is not None:
+                # Trigger recompute so grade + economy reflect the new values.
+                # PATCH cleared the server-side cooldown, so a 202 is expected;
+                # swallow 429 gracefully anyway.
+                try:
+                    await coordinator.async_trigger_recompute()
+                except WoltaRateLimitError:
+                    _LOGGER.debug(
+                        "Options flow: recompute rate-limited (cooldown); "
+                        "sensors will update on the next results fetch or "
+                        "the nightly rewarm."
+                    )
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.debug(
+                        "Options flow: recompute failed; will retry.", exc_info=True
+                    )
+                else:
+                    # Refresh coordinator data so sensors update immediately
+                    try:
+                        await coordinator.async_request_refresh()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+
+            return self.async_create_entry(title="", data={}), {}, ""
+
+        return None, errors, server_detail
+
+    async def async_step_confirm_clear(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Bekräftelse innan ett tömt fält med daterade rader tas bort (spec §4.10). Bekräftas
+        den går hela sparningen ut som en PATCH; stängs dialogen skickas inget."""
+        pending = self._pending_save
+        if pending is None:
+            return self.async_abort(reason="cannot_connect")
+        errors: dict[str, str] = {}
+        server_detail = ""
+        if user_input is not None:
+            result, errors, server_detail = await self._finish_save(**pending)
+            if result is not None:
+                self._pending_save = None
+                return result
+        return self.async_show_form(
+            step_id="confirm_clear",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={
+                "rows": _clear_rows(
+                    self.hass.config.language, self._pending_clear,
+                    self._server.get("battery_params") if self._server else None),
+                "server_detail": server_detail,
+            },
+        )
+
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -2684,95 +2854,25 @@ class WoltaOptionsFlow(OptionsFlow):
                     if model_after == "fixed" and patch_fields.get(CONF_SURCHARGE_ORE) is not None:
                         errors[CONF_SURCHARGE_ORE] = errors["base"] = "retail_fixed_surcharge"
 
-            if patch_fields and not errors:
-                try:
-                    await client.patch_profile(token, **patch_fields)
-                except WoltaApiError as err:
-                    _LOGGER.error("Failed to patch Wolta profile: %s", err)
-                    # The same refusal from the server (a cache that is out of step with it)
-                    # reads as the same fault, not as a connection problem.
-                    benefit_err = _grid_benefit_error(err)
-                    rule_err = _server_rule_error(err)
-                    if benefit_err is not None:
-                        # Field AND base, as for the prechecks above. A zone refusal can come
-                        # while the field is hidden (a cache out of step), where base is the
-                        # only place the owner can read it.
-                        errors[CONF_GRID_BENEFIT_ORE] = errors["base"] = benefit_err
-                    elif rule_err is not None:
-                        errors[_server_rule_field(rule_err, patch_fields)] = rule_err
-                        errors["base"] = rule_err
-                    elif _is_grid_fixed_error(err):
-                        errors["base"] = "grid_fixed_required"
-                    else:
-                        server_detail = _refusal(err, errors)
-
             if not errors:
-                # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
-                # nu visat det, så nyckeln tas bort. Utan det hade varje senare sparning
-                # föreslagit datumet igen och därmed återuppväckt ett datum användaren
-                # medvetet rensade.
-                prefill_offered = CONF_PREFILL_PURCHASE_DATE in entry.data
-                choice_changed = self._vat is not None and incl_now != self._vat_mode
-                if patch_fields or prefill_offered or choice_changed:
-                    new_data = dict(entry.data)
-                    if self._vat is not None:
-                        new_data[CONF_PRICES_INCL_VAT] = incl_now
-                    for key, val in patch_fields.items():
-                        if key == "own":
-                            continue  # egna värden bor på servern, inte i cachen
-                        if val is None:
-                            new_data.pop(key, None)
-                        else:
-                            new_data[key] = val
-                    if CONF_RETAIL_PRICE_MODEL in patch_fields:
-                        # What the server drops with a change of contract type (see `dropped`
-                        # above): the fixed price leaving `fixed`, the markup going to it.
-                        for key in dropped:
-                            new_data.pop(key, None)
-                    new_data.pop(CONF_PREFILL_PURCHASE_DATE, None)
-                    self.hass.config_entries.async_update_entry(entry, data=new_data)
-
-                coordinator = getattr(entry, "runtime_data", None)
-                prices = getattr(coordinator, "prices", None)
-                if prices is not None and _TARIFF_PRICE_KEYS & patch_fields.keys():
-                    # The purchase-price sensor shows what THIS tariff costs: refresh it now
-                    # instead of at the next 15-minute poll. A request on top of the poll, and
-                    # only if the owner changed the tariff; it fetches /profile/prices only when
-                    # that sensor is enabled. A price problem never fails the save (see
-                    # _refresh_prices).
-                    # Scheduled, not awaited: the fetch can take up to the lookup timeout and
-                    # the dialog must not wait for it. A background task, so Home Assistant
-                    # does not wait for it at startup.
-                    # The entry owns the task, so unloading it cancels the refresh. The kept
-                    # answer was priced with the old tariff: forget it first, so a failing
-                    # refresh cannot show it.
-                    prices.async_forget_purchase()
-                    entry.async_create_background_task(
-                        self.hass, _refresh_prices(prices), "wolta_options_price_refresh")
-                if patch_fields and coordinator is not None:
-                    # Trigger recompute so grade + economy reflect the new values.
-                    # PATCH cleared the server-side cooldown, so a 202 is expected;
-                    # swallow 429 gracefully anyway.
-                    try:
-                        await coordinator.async_trigger_recompute()
-                    except WoltaRateLimitError:
-                        _LOGGER.debug(
-                            "Options flow: recompute rate-limited (cooldown); "
-                            "sensors will update on the next results fetch or "
-                            "the nightly rewarm."
-                        )
-                    except Exception:  # pylint: disable=broad-except
-                        _LOGGER.debug(
-                            "Options flow: recompute failed; will retry.", exc_info=True
-                        )
-                    else:
-                        # Refresh coordinator data so sensors update immediately
-                        try:
-                            await coordinator.async_request_refresh()
-                        except Exception:  # pylint: disable=broad-except
-                            pass
-
-                return self.async_create_entry(title="", data={})
+                quantities = [
+                    q for field, (q, key) in _OWN_FIELDS.items()
+                    if key in patch_fields.get("own", {}) and patch_fields["own"][key] is None
+                    and has_dated_own_rows(self._server["battery_params"], q)
+                ]
+                kwargs = {"incl_now": incl_now, "dropped": dropped}
+                if quantities:
+                    # Daterade rader tas bort tillsammans med värdet: som på wolta.se frågar vi
+                    # först, och inget går ut förrän ägaren bekräftat.
+                    self._pending_save = {
+                        "client": client, "token": token,
+                        "patch_fields": patch_fields, **kwargs}
+                    self._pending_clear = quantities
+                    return await self.async_step_confirm_clear()
+                result, errors, server_detail = await self._finish_save(
+                    client, token, patch_fields, **kwargs)
+                if result is not None:
+                    return result
 
         srv = self._server
 

@@ -656,6 +656,10 @@
         "data": {
           "zone": "Electricity price zone"
         }
+      },
+      "confirm_clear": {
+        "title": "Remove your own values?",
+        "description": "{rows}"
       }
     },
     "error": {
