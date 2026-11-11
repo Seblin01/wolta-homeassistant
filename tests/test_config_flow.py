@@ -8480,3 +8480,197 @@ async def test_settings_vat_mode_flip_across_reshow(hass: HomeAssistant) -> None
     assert kwargs[CONF_GRID_VAR_ORE] == 40.0
     assert CONF_SURCHARGE_ORE not in kwargs
     assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is True
+
+
+# ---------------------------------------------------------------------------
+# Egna batterivärden (spec 2026-11-11 §4.1-4.3): märkdata + valfria egna värden när
+# servern kör regel 3 (battery_params.active).
+# ---------------------------------------------------------------------------
+
+_OWN_KEYS = ("own_capacity_kwh", "own_power_kw", "own_eff_pct", "own_reserve_pct")
+
+
+def _active_bp(**own):
+    """battery_params-block med active och ev. egna värden (capacity/power/eff/reserve)."""
+    bp = {"active": True}
+    for q in ("capacity", "power", "eff", "reserve"):
+        bp[q] = {"value": 1.0, "own": own.get(q)}
+    bp["own_timeline"] = {}
+    return bp
+
+
+def _opts_active(own=None, **battery):
+    return {"battery": dict(battery), "own_values": dict(own or {}),
+            "economy": {}, "tariffs": {}}
+
+
+async def _open_settings(hass, entry, client):
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+
+
+async def _save_active(hass, entry, bp, user_input, *, coordinator_bp=None):
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=bp))
+    if coordinator_bp is not None:
+        mock_coordinator.data = {"battery_params": coordinator_bp}
+        mock_coordinator.battery_params = coordinator_bp
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input)
+    return result, mock_client
+
+
+def _sections(result):
+    return {k.schema: v for k, v in result["data_schema"].schema.items()}
+
+
+def _fields(sec):
+    return {k.schema: k for k in sec.schema.schema}
+
+
+@pytest.mark.asyncio
+async def test_inactive_keeps_old_form(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    result = await _open_settings(hass, entry, mock_client)
+    secs = _sections(result)
+    assert "own_values" not in secs
+    fields = _fields(secs["battery"])
+    assert set(fields) == {CONF_BATTERY_KWH, "nameplate_kwh", CONF_BATTERY_KW,
+                           "nameplate_kw", CONF_EFF, CONF_RESERVE_PCT}
+    assert isinstance(fields[CONF_BATTERY_KWH], vol.Required)
+    # active uttryckligen falskt: samma form
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params={"active": False}))
+    result = await _open_settings(hass, entry, mock_client)
+    assert "own_values" not in _sections(result)
+
+
+@pytest.mark.asyncio
+async def test_active_battery_section_nameplate_only(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_active_bp()))
+    result = await _open_settings(hass, entry, mock_client)
+    secs = _sections(result)
+    assert set(_fields(secs["battery"])) == {"nameplate_kwh", "nameplate_kw"}
+    assert list(secs).index("own_values") == list(secs).index("battery") + 1
+
+
+@pytest.mark.asyncio
+async def test_own_values_section_empty_collapsed(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_active_bp()))
+    result = await _open_settings(hass, entry, mock_client)
+    sec = _sections(result)["own_values"]
+    fields = _fields(sec)
+    assert set(fields) == set(_OWN_KEYS)
+    for key in _OWN_KEYS:
+        assert isinstance(fields[key], vol.Optional)
+        assert not (fields[key].description or {}).get("suggested_value")
+        assert fields[key].default is vol.UNDEFINED
+    assert sec.options["collapsed"] is True
+
+
+@pytest.mark.asyncio
+async def test_own_values_prefilled(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_active_bp(capacity=18.0, eff=0.9)))
+    result = await _open_settings(hass, entry, mock_client)
+    sec = _sections(result)["own_values"]
+    fields = _fields(sec)
+    assert fields["own_capacity_kwh"].description["suggested_value"] == 18.0
+    assert fields["own_eff_pct"].description["suggested_value"] == pytest.approx(90.0)
+    assert not (fields["own_power_kw"].description or {}).get("suggested_value")
+    assert sec.options["collapsed"] is False
+
+
+@pytest.mark.asyncio
+async def test_save_unchanged_sends_no_own(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _active_bp(capacity=20.0, eff=0.9, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active(
+        {"own_capacity_kwh": 20.0, "own_eff_pct": 90.0, "own_reserve_pct": 10.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_eff_percent_roundtrip(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _active_bp(eff=0.9)
+    result, client = await _save_active(
+        hass, entry, bp, _opts_active({"own_eff_pct": 92.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"eff": 0.92}}
+    entry2 = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry2, bp, _opts_active({"own_eff_pct": 90.0}))
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_own_capacity(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(), _opts_active({"own_capacity_kwh": 16.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"capacity_kwh": 16.0}}
+
+
+@pytest.mark.asyncio
+async def test_clear_own_value_sends_null(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(power=5.0), _opts_active({}))
+    assert client.patch_profile.call_args.kwargs == {"own": {"power_kw": None}}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_not_coordinator(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(capacity=20.0),
+        _opts_active({"own_capacity_kwh": 20.0}),
+        coordinator_bp=_active_bp(capacity=22.0))
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_legacy_battery_fields_with_own(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(),
+        _opts_active({"own_capacity_kwh": 16.0}, nameplate_kw=8.0))
+    body = client.patch_profile.call_args.kwargs
+    assert body == {"nameplate_kw": 8.0, "own": {"capacity_kwh": 16.0}}
+    for legacy in ("battery_kwh", "battery_kw", "eff", "reserve_pct"):
+        assert legacy not in body
+
+
+@pytest.mark.asyncio
+async def test_own_not_written_to_entry_data(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(),
+        _opts_active({"own_capacity_kwh": 16.0}, nameplate_kw=8.0))
+    assert "own" not in entry.data
+    assert entry.data.get("nameplate_kw") == 8.0

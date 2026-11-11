@@ -553,6 +553,21 @@
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
             }
           },
+          "own_values": {
+            "name": "Egna värden (valfritt)",
+            "data": {
+              "own_capacity_kwh": "Egen kapacitet (kWh)",
+              "own_power_kw": "Egen effekt (kW)",
+              "own_eff_pct": "Egen verkningsgrad (%)",
+              "own_reserve_pct": "Egen reserv (%)"
+            },
+            "data_description": {
+              "own_capacity_kwh": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen. Ange kapaciteten efter reserven, alltså det batteriet faktiskt kan använda.",
+              "own_power_kw": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen.",
+              "own_eff_pct": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen.",
+              "own_reserve_pct": "Lämna tomt så använder Wolta den uppmätta reserven. Din reserv gäller både ditt betyg och jämförelsen."
+            }
+          },
           "economy": {
             "name": "Ekonomi",
             "description": "Angav du ett samlat pris för hela anläggningen (sol + batteri) på wolta.se? Då hanteras inköpspriset där, och prisfältet döljs här.",

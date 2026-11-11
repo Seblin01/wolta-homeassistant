@@ -553,6 +553,21 @@
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
             }
           },
+          "own_values": {
+            "name": "Your own values (optional)",
+            "data": {
+              "own_capacity_kwh": "Your capacity (kWh)",
+              "own_power_kw": "Your power (kW)",
+              "own_eff_pct": "Your round-trip efficiency (%)",
+              "own_reserve_pct": "Your reserve (%)"
+            },
+            "data_description": {
+              "own_capacity_kwh": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison. Enter the capacity after the reserve, that is, what the battery can actually use.",
+              "own_power_kw": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison.",
+              "own_eff_pct": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison.",
+              "own_reserve_pct": "Leave empty and Wolta uses the measured reserve. Your reserve applies to both your grade and the comparison."
+            }
+          },
           "economy": {
             "name": "Economy",
             "description": "Entered a combined price for the whole plant (solar + battery) on wolta.se? Then the purchase price is managed there, and the price field is hidden here.",

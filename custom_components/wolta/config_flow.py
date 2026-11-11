@@ -44,6 +44,7 @@ from .soc_picker import (  # noqa: F401 - MAX_SOC_SENSORS and _soc_error re-expo
     soc_error as _soc_error,
     soc_requirement_error,
 )
+from .battery_params import is_active as _bp_active, own_value as _bp_own_value
 from .api import (
     WoltaApiClient,
     WoltaApiError,
@@ -99,6 +100,11 @@ from .const import (
     CONF_INVERT_BATTERY,
     CONF_NAMEPLATE_KW,
     CONF_NAMEPLATE_KWH,
+    CONF_OWN_CAPACITY_KWH,
+    CONF_OWN_EFF_PCT,
+    CONF_OWN_POWER_KW,
+    CONF_OWN_RESERVE_PCT,
+    SECTION_OWN_VALUES,
     CONF_PLANT_ID,
     CONF_PREFILL_PURCHASE_DATE,
     CONF_PRICES_INCL_VAT,
@@ -1992,6 +1998,46 @@ _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
                    CONF_GRID_BENEFIT_ORE, CONF_EXPORT_EXTRA_ORE, CONF_EXPORT_EXTRA_PCT,
                    CONF_REDUCED_ENERGY_TAX),
 }
+
+
+def _section_fields(active: bool) -> dict[str, tuple[str, ...]]:
+    """Fälten per avsnitt. När servern kör regel 3 (battery_params.active) frågar batteriavsnittet
+    bara efter märkdatan; kapacitet, effekt, verkningsgrad och reserv sätts som egna värden."""
+    if not active:
+        return _SECTION_FIELDS
+    return {**_SECTION_FIELDS, _SEC_BATTERY: (CONF_NAMEPLATE_KWH, CONF_NAMEPLATE_KW)}
+
+
+# Formulärfält för egna värden → (storhet, nyckel i PATCH:ens `own`).
+_OWN_FIELDS: dict[str, tuple[str, str]] = {
+    CONF_OWN_CAPACITY_KWH: ("capacity", "capacity_kwh"),
+    CONF_OWN_POWER_KW: ("power", "power_kw"),
+    CONF_OWN_EFF_PCT: ("eff", "eff"),
+    CONF_OWN_RESERVE_PCT: ("reserve", "reserve_pct"),
+}
+
+
+def _own_diff(bp: dict, section_input: dict) -> dict[str, float | None]:
+    """Egna värden som ändrats mot ögonblicksbilden `bp` (aldrig koordinatorns). Ett tomt fält
+    med ett eget värde på servern blir None (ta bort); ett skilt värde skickas; lika utelämnas.
+    Verkningsgraden jämförs i procent (0,05 procentenheter) och skickas som bråkdel."""
+    diff: dict[str, float | None] = {}
+    for field, (quantity, key) in _OWN_FIELDS.items():
+        typed = section_input.get(field)
+        current = _bp_own_value(bp, quantity)
+        if typed in (None, ""):
+            if current is not None:
+                diff[key] = None
+            continue
+        typed = float(typed)
+        if quantity == "eff":
+            if current is None or abs(typed - current * 100) > 0.05:
+                diff[key] = round(typed / 100, 4)
+        elif current is None or abs(typed - current) > 0.005:
+            diff[key] = typed
+    return diff
+
+
 # The energy-tax answer is tri-state on the server (null / false / true) and a boolean selector
 # can only give true/false, so the form uses a list select whose values map to those three.
 _TAX_NOT_SET = "not_set"
@@ -2405,9 +2451,12 @@ class WoltaOptionsFlow(OptionsFlow):
             self._vat = vat_from(self._server)
 
         if user_input is not None:
+            # Servern kör regel 3: batteriavsnittet är märkdata, egna värden i eget avsnitt.
+            active = _bp_active(self._server.get("battery_params"))
+            section_fields = _section_fields(active)
             # Un-nest the section structure to flat {field: value}.
             flat: dict[str, Any] = {}
-            for sec, fields in _SECTION_FIELDS.items():
+            for sec, fields in section_fields.items():
                 sec_input = user_input.get(sec) or {}
                 for key in fields:
                     if key in sec_input:
@@ -2448,7 +2497,7 @@ class WoltaOptionsFlow(OptionsFlow):
             # (backend avvisar ett halvt par). Felet sätts på det SAKNADE fältet.
             kwh_in = converted.get(CONF_BATTERY_KWH)
             kw_in = converted.get(CONF_BATTERY_KW)
-            if (kwh_in is None) != (kw_in is None):
+            if not active and (kwh_in is None) != (kw_in is None):
                 errors[CONF_BATTERY_KWH if kwh_in is None else CONF_BATTERY_KW] = (
                     "battery_pair_incomplete"
                 )
@@ -2479,7 +2528,7 @@ class WoltaOptionsFlow(OptionsFlow):
 
             # Diff against the SERVER snapshot – only changed fields are PATCHed.
             patch_fields: dict[str, Any] = {}
-            for sec, fields in _SECTION_FIELDS.items():
+            for sec, fields in section_fields.items():
                 for key in fields:
                     if key == CONF_COST_SEK and plant_scoped_cost:
                         continue
@@ -2515,6 +2564,14 @@ class WoltaOptionsFlow(OptionsFlow):
                             patch_fields[key] = None
                     elif val != server_val:
                         patch_fields[key] = val
+
+            # Egna värden (bara med regel 3): jämförs mot ögonblicksbilden formuläret fylldes ur.
+            # `own` är ett eget PATCH-fält och skrivs aldrig till entry.data (se cachen nedan).
+            if active:
+                own_changes = _own_diff(
+                    self._server["battery_params"], user_input.get(SECTION_OWN_VALUES) or {})
+                if own_changes:
+                    patch_fields["own"] = own_changes
 
             # A percentage of spot needs the fixed part of the grid fee (0 is an answer): the
             # server refuses the PATCH otherwise (422), so the form says it first and sends
@@ -2660,6 +2717,8 @@ class WoltaOptionsFlow(OptionsFlow):
                     if self._vat is not None:
                         new_data[CONF_PRICES_INCL_VAT] = incl_now
                     for key, val in patch_fields.items():
+                        if key == "own":
+                            continue  # egna värden bor på servern, inte i cachen
                         if val is None:
                             new_data.pop(key, None)
                         else:
@@ -2776,14 +2835,47 @@ class WoltaOptionsFlow(OptionsFlow):
             kw_row = (vol.Required(CONF_BATTERY_KW,
                                    default=srv.get(CONF_BATTERY_KW) or DEFAULT_BATTERY_KW),
                       kw_selector)
-        battery_schema = vol.Schema(dict([
-            kwh_row,
-            _opt(CONF_NAMEPLATE_KWH, _number_selector(min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh")),
-            kw_row,
-            _opt(CONF_NAMEPLATE_KW, _number_selector(min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW")),
-            eff_row,
-            _opt(CONF_RESERVE_PCT, _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
-        ]))
+        nameplate_kwh_row = _opt(CONF_NAMEPLATE_KWH, _number_selector(
+            min_val=MIN_BATTERY_KWH, max_val=500.0, step=0.5, unit="kWh"))
+        nameplate_kw_row = _opt(CONF_NAMEPLATE_KW, _number_selector(
+            min_val=MIN_BATTERY_KW, max_val=100.0, step=0.1, unit="kW"))
+        bp_now = srv.get("battery_params")
+        active = _bp_active(bp_now)
+        if active:
+            battery_schema = vol.Schema(dict([nameplate_kwh_row, nameplate_kw_row]))
+        else:
+            battery_schema = vol.Schema(dict([
+                kwh_row,
+                nameplate_kwh_row,
+                kw_row,
+                nameplate_kw_row,
+                eff_row,
+                _opt(CONF_RESERVE_PCT, _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
+            ]))
+        own_schema = None
+        own_collapsed = True
+        if active:
+            def _own_row(field: str, selector: Any) -> tuple[Any, Any]:
+                """Som _opt: suggested_value, aldrig default, så ett tömt fält går att skilja
+                från ett orört. Verkningsgraden visas i procent."""
+                quantity = _OWN_FIELDS[field][0]
+                cur = _bp_own_value(bp_now, quantity)
+                if cur is not None and quantity == "eff":
+                    cur = round(cur * 100, 4)
+                return (vol.Optional(
+                    field, description={"suggested_value": cur} if cur is not None else None),
+                    selector)
+            own_rows = [
+                _own_row(CONF_OWN_CAPACITY_KWH, kwh_selector),
+                _own_row(CONF_OWN_POWER_KW, kw_selector),
+                _own_row(CONF_OWN_EFF_PCT,
+                         _number_selector(min_val=50.0, max_val=100.0, step=0.1, unit="%")),
+                _own_row(CONF_OWN_RESERVE_PCT,
+                         _number_selector(min_val=0.0, max_val=100.0, step=1.0, unit="%")),
+            ]
+            own_collapsed = not any(
+                _bp_own_value(bp_now, q) is not None for q, _ in _OWN_FIELDS.values())
+            own_schema = vol.Schema(dict(own_rows))
         # Se plant_scoped_cost-kommentaren i diff-grenen ovan: fältet döljs helt för
         # plant-scopade profiler (redigeras på wolta.se där etiketterna stämmer).
         # Datumförslaget ur statistiken skickades aldrig till servern (spec 2026-09-14
@@ -2882,6 +2974,8 @@ class WoltaOptionsFlow(OptionsFlow):
 
         schema = vol.Schema({
             vol.Required(_SEC_BATTERY): section(battery_schema, {"collapsed": False}),
+            **({vol.Required(SECTION_OWN_VALUES): section(
+                own_schema, {"collapsed": own_collapsed})} if own_schema is not None else {}),
             vol.Required(_SEC_ECONOMY): section(economy_schema, {"collapsed": False}),
             # Open when the fixed-part error is shown: base errors render at the top of the
             # form, and the field they ask for sits in this section. Also open for an error on any
