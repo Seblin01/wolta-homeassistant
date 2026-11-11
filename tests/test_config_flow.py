@@ -27,6 +27,7 @@ from custom_components.wolta.const import (
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_BATTERY_PARAMS_ACTIVE,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
@@ -812,8 +813,6 @@ async def _reauth_recreate_kwargs(hass: HomeAssistant, extra: dict[str, Any]) ->
 @pytest.mark.asyncio
 async def test_recreate_declared_when_active(hass: HomeAssistant) -> None:
     """Regel 3: en återskapad profil deklareras utan batterivärden, så servern mäter igen."""
-    from custom_components.wolta.const import CONF_BATTERY_PARAMS_ACTIVE
-
     kwargs = await _reauth_recreate_kwargs(hass, {CONF_BATTERY_PARAMS_ACTIVE: True})
     assert kwargs["battery_declared"] is True
     assert kwargs["battery_kwh"] is None

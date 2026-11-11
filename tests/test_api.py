@@ -652,6 +652,21 @@ async def test_create_profile_declared_utan_par():
 
 
 @pytest.mark.asyncio
+async def test_create_profile_declared_body_lacks_battery_values():
+    """The recreate path under rule 3: explicit Nones + declared -> body has battery_declared
+    and none of battery_kwh, battery_kw, eff, reserve_pct (not even as null)."""
+    client = WoltaApiClient(session=None)
+    client._request = AsyncMock(return_value={"profile_token": "t"})
+    await client.create_profile(zone="SE3", has_solar=False, share_profile=True,
+                                battery_declared=True, battery_kwh=None, battery_kw=None,
+                                eff=None, reserve_pct=None)
+    payload = client._request.await_args.kwargs["json"]
+    assert payload["battery_declared"] is True
+    for key in ("battery_kwh", "battery_kw", "eff", "reserve_pct"):
+        assert key not in payload
+
+
+@pytest.mark.asyncio
 async def test_create_profile_sends_soc_absent_only_when_given():
     """soc_absent (spec 2026-10-20-soc-krav): omission is meaningful - an OMITTED field
     leaves the server's value alone, so only an explicit True/False is sent."""
