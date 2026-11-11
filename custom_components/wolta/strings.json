@@ -50,6 +50,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -78,6 +79,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -100,6 +102,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -569,7 +572,7 @@
               "battery_kwh": "Usable capacity — the kWh the battery actually delivers on a full discharge, **as its own sensors measure it** – leave empty while Wolta is measuring. This is less than the nameplate rating. If the battery sensors measure on the AC side, it is also less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
               "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
               "battery_kw": "Maximum charge/discharge power in kW – leave empty while Wolta is measuring.",
-              "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable power above; the rated figure lets wolta.se explain the difference when the measured power is lower (e.g. inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
+              "nameplate_kw": "The manufacturer's rated power (e.g. 8 kW). Wolta uses it to explain a lower measured power, and as the battery's power when nothing has been measured.",
               "eff": "Round-trip efficiency (0.5–1.0) where your battery sensors measure: on a hybrid inverter often the battery's DC side, on an AC-coupled battery the AC side. Prefilled with the value stored at Wolta. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
             }

@@ -50,6 +50,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -78,6 +79,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -100,6 +102,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -569,7 +572,7 @@
               "battery_kwh": "Användbar kapacitet — hur många kWh batteriet faktiskt levererar vid en full urladdning, **mätt med batteriets egna sensorer** – lämna tomt medan Wolta mäter. Det är mindre än märkt kapacitet. Mäter batterisensorerna på växelströmssidan är det också mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
               "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
               "battery_kw": "Maximal ladd-/urladdningseffekt i kW – lämna tomt medan Wolta mäter.",
-              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt är lägre (t.ex. växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
+              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Wolta använder den för att förklara en lägre uppmätt effekt, och som batteriets effekt när inget har mätts.",
               "eff": "Verkningsgrad tur och retur (0,5–1,0) där batterisensorerna mäter: på en hybridväxelriktare ofta batteriets likströmssida (DC), på ett AC-kopplat batteri växelströmssidan. Förifyllt med värdet som är sparat hos Wolta. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
             }

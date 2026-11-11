@@ -74,6 +74,7 @@ from .const import (
     MIN_BATTERY_KW,
 )
 from . import intervals
+from .battery_params import is_active as battery_params_active
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
 from .control_system_prefill import (
     ControlSystemChoices,
@@ -148,6 +149,12 @@ class _AdoptRepairFlow(RepairsFlow):
         # mismatch can surface again.
         new_data.pop(self._ignore_key, None)
         coordinator = self._entry.runtime_data
+        if battery_params_active(getattr(coordinator, "_battery_params", None)):
+            # Regel 3: värdena hanteras som egna värden i Konfigurera; adopt-förslaget
+            # (som även nollar reserven) får inte skickas.
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"{self._issue_prefix}_{self._entry.entry_id}")
+            return self.async_abort(reason="own_values_active")
         await coordinator.client.patch_profile(coordinator.token, **patch)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         # PATCH cleared the server cooldown, so a recompute is expected; swallow rate limits
@@ -291,6 +298,7 @@ class NameplatePowerRepairFlow(RepairsFlow):
                     coordinator.token, nameplate_kw=float(user_input["nameplate_kw"]))
             except (WoltaApiError, aiohttp.ClientError, TimeoutError):
                 return self.async_abort(reason="failed")
+            coordinator.set_nameplate_kw(float(user_input["nameplate_kw"]))
             ir.async_delete_issue(
                 self.hass, DOMAIN, f"{_ISSUE_NAMEPLATE_POWER}_{self._entry.entry_id}")
             # Not awaited: the PATCH went through and the issue is gone, so the dialog
