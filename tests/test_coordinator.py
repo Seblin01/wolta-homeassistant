@@ -1266,7 +1266,7 @@ BASE_PROFILE = {
 _RECENT_BOOKMARK = (NOW - timedelta(hours=1)).isoformat()
 
 
-async def _sync_refresh(hass, mock_entry, client, rows=None):
+async def _sync_refresh(hass, mock_entry, client, rows=None, built=None):
     """Kör en refresh på incremental-vägen med kontrollerade rows."""
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                              "sensor.grid_out", "sensor.solar")}
@@ -1283,6 +1283,7 @@ async def _sync_refresh(hass, mock_entry, client, rows=None):
             store_state={"last_uploaded_ts": _RECENT_BOOKMARK,
                          "applied_invert": False,
                          "applied_entities": None})
+        coordinator.diagnostics_built = built
         if rows is not None:
             coordinator._incremental_rows = AsyncMock(return_value=rows)
         result = await coordinator._async_update_data()
@@ -7333,3 +7334,14 @@ async def test_reload_check_never_raises(hass: HomeAssistant, mock_entry):
     with _patch_entry_updates(hass, mock_entry), patch.object(
             hass.config_entries, "async_schedule_reload", side_effect=RuntimeError("boom")):
         await coordinator.async_check_profile_sync()   # kastar inte
+
+
+@pytest.mark.asyncio
+async def test_reload_when_active_flips_on_in_main_cycle(hass: HomeAssistant, mock_entry):
+    """Huvudcykelns profilläsning har egen anropsplats för omladdningskontrollen."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await _sync_refresh(hass, mock_entry, client, built=False)
+    reload.assert_called_once_with(mock_entry.entry_id)
