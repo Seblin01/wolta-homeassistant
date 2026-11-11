@@ -13,6 +13,7 @@ from custom_components.wolta.const import (
 )
 from custom_components.wolta.repairs import (
     MeasuredCapacityRepairFlow,
+    NameplatePowerRepairFlow,
     async_create_fix_flow,
 )
 
@@ -1346,3 +1347,28 @@ async def test_nameplate_power_repair_patches(hass: HomeAssistant):
     assert result["type"] == "create_entry"
     coordinator.client.patch_profile.assert_awaited_once_with("tok", nameplate_kw=5.0)
     assert ir.async_get(hass).async_get_issue(DOMAIN, "nameplate_power_e1") is None
+
+
+@pytest.mark.asyncio
+async def test_nameplate_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
+    """The dialog returns while the profile refresh is still running."""
+    import asyncio
+
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    flow = NameplatePowerRepairFlow(entry)
+    flow.hass = hass
+    release = asyncio.Event()
+    finished = []
+
+    async def _slow_refresh():
+        await release.wait()
+        finished.append(True)
+
+    coordinator.async_request_refresh = _slow_refresh
+    # wait_for: a flow that awaits the refresh fails here instead of hanging the run.
+    result = await asyncio.wait_for(flow.async_step_init({"nameplate_kw": 5.0}), 2)
+    assert result["type"] == "create_entry"
+    assert finished == []
+    release.set()
+    await hass.async_block_till_done()
+    assert finished == [True]

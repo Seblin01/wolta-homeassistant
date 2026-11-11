@@ -293,7 +293,9 @@ class NameplatePowerRepairFlow(RepairsFlow):
                 return self.async_abort(reason="failed")
             ir.async_delete_issue(
                 self.hass, DOMAIN, f"{_ISSUE_NAMEPLATE_POWER}_{self._entry.entry_id}")
-            await coordinator.async_request_refresh()
+            # Not awaited: the PATCH went through and the issue is gone, so the dialog
+            # need not wait for a whole update cycle.
+            self.hass.async_create_task(coordinator.async_request_refresh())
             return self.async_create_entry(title="", data={})
         return self.async_show_form(
             step_id="init",
