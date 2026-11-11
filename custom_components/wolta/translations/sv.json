@@ -767,6 +767,41 @@
       },
       "sale_price_with_forecast": {
         "name": "Försäljningspris med prognos"
+      },
+      "battery_capacity": {
+        "name": "Batterikapacitet",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          },
+          "measured_gross_kwh": {
+            "name": "Uppmätt kapacitet före reserv"
+          }
+        }
+      },
+      "battery_power": {
+        "name": "Batterieffekt",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
+      },
+      "battery_efficiency": {
+        "name": "Verkningsgrad",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
+      },
+      "battery_reserve": {
+        "name": "Reserv",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
       }
     },
     "button": {

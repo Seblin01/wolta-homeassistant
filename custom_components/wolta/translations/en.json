@@ -767,6 +767,41 @@
       },
       "sale_price_with_forecast": {
         "name": "Sale price with forecast"
+      },
+      "battery_capacity": {
+        "name": "Battery capacity",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          },
+          "measured_gross_kwh": {
+            "name": "Measured capacity before reserve"
+          }
+        }
+      },
+      "battery_power": {
+        "name": "Battery power",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
+      },
+      "battery_efficiency": {
+        "name": "Round-trip efficiency",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
+      },
+      "battery_reserve": {
+        "name": "Reserve",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
       }
     },
     "button": {

@@ -500,3 +500,16 @@ async def test_setup_survives_failed_identity_migration(hass, aioclient_mock):
         from custom_components.wolta import async_setup_entry
         assert await async_setup_entry(hass, mock_entry) is True
     assert not any(CONF_PLANT_ID in c.kwargs["data"] for c in upd.call_args_list)
+
+
+def test_not_both_reload_mechanisms():
+    """Omladdningen sker i koordinatorn (§4.7): varken OptionsFlowWithReload eller update listener."""
+    import inspect
+
+    from homeassistant.config_entries import OptionsFlowWithReload
+
+    import custom_components.wolta as pkg
+    from custom_components.wolta import config_flow
+
+    assert not issubclass(config_flow.WoltaOptionsFlow, OptionsFlowWithReload)
+    assert "add_update_listener" not in inspect.getsource(pkg)

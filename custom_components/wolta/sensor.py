@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -22,7 +22,7 @@ from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .battery_params import is_active
+from .battery_params import is_active, quantity
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
 from .price_coordinator import (
@@ -689,6 +689,109 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# Battery diagnostic sensors (egna batterivärden, spec 2026-11-11 §4.6)
+# ---------------------------------------------------------------------------
+# Only created when the server runs rule 3 (battery_params.active) - see async_setup_entry.
+# A missing value is an unknown state with the attributes kept, never "unavailable".
+
+
+def _bp_quantity(data: WoltaData, q: str) -> dict | None:
+    return quantity(data.battery_params, q)
+
+
+def _bp_pct(value: Any) -> float | None:
+    """A fraction (eff) as percent with one decimal."""
+    return round(value * 100, 1) if isinstance(value, (int, float)) else None
+
+
+def _battery_attrs(q: str, *, percent: bool = False) -> Callable[[WoltaData], dict[str, Any]]:
+    def attrs(data: WoltaData) -> dict[str, Any]:
+        block = _bp_quantity(data, q)
+        if block is None:
+            return {}
+        out: dict[str, Any] = {
+            "state": block.get("state"),
+            "source": block.get("source"),
+            "period_start": block.get("period_start"),
+            "period_end": block.get("period_end"),
+        }
+        measured = block.get("measured")
+        if block.get("state") == "owner" and isinstance(measured, dict):
+            value = measured.get("value")
+            if q == "capacity":
+                # The sensor's number is net, so Wolta's measured value is the net one too.
+                value = (data.battery_params or {}).get("measured_dispatchable_kwh")
+            elif percent:
+                value = _bp_pct(value)
+            out["measured_value"] = value
+            out["measured_state"] = measured.get("state")
+            out["measured_source"] = measured.get("source")
+        if q == "capacity":
+            measured = block.get("measured")
+            if (
+                isinstance(measured, dict)
+                and measured.get("basis") == "gross"
+                and measured.get("value") is not None
+            ):
+                out["measured_gross_kwh"] = measured["value"]
+        return out
+
+    return attrs
+
+
+def _bp_value(q: str) -> Callable[[WoltaData], Any]:
+    def value(data: WoltaData) -> Any:
+        block = _bp_quantity(data, q)
+        return block.get("value") if block is not None else None
+
+    return value
+
+
+BATTERY_PARAM_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
+    WoltaSensorEntityDescription(
+        key="battery_capacity",
+        translation_key="battery_capacity",
+        device_class=SensorDeviceClass.ENERGY_STORAGE,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.battery_params.get("dispatchable_kwh") if d.battery_params else None,
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("capacity"),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_power",
+        translation_key="battery_power",
+        device_class=SensorDeviceClass.POWER,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=_bp_value("power"),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("power"),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_efficiency",
+        translation_key="battery_efficiency",
+        native_unit_of_measurement=PERCENTAGE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: _bp_pct((_bp_quantity(d, "eff") or {}).get("value")),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("eff", percent=True),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_reserve",
+        translation_key="battery_reserve",
+        native_unit_of_measurement=PERCENTAGE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=_bp_value("reserve"),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("reserve"),
+    ),
+)
+
+
 # Keys whose unit depends on results.currency
 _CURRENCY_KEYS = frozenset({"batterivarde_ar", "facit_i_ar"})
 
@@ -1120,6 +1223,16 @@ async def async_setup_entry(
         WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
         for desc in SENSOR_DESCRIPTIONS
     )
+    # Diagnostic battery values: only when the server runs rule 3. What was built is noted
+    # on the coordinator, which asks for a reload when the server later switches (§4.7).
+    # Entities already in the registry stay there if the server switches back (§4.12).
+    active = is_active(coordinator.data.battery_params if coordinator.data else None)
+    coordinator.diagnostics_built = active
+    if active:
+        async_add_entities(
+            WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
+            for desc in BATTERY_PARAM_DESCRIPTIONS
+        )
     # Spot prices: only when the price coordinator exists. Separate from the entities
     # above on purpose - see WoltaSpotPriceSensor.
     if coordinator.prices is not None:

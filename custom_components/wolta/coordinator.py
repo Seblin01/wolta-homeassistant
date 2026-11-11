@@ -1051,6 +1051,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # Serverns battery_params-block och märkeffekt (nameplate_kw) ur profil-GET:en,
         # senast lästa - se _take_battery_params.
         self._battery_params: dict | None = None
+        # Om diagnostiksensorerna byggdes vid sensor-setup (is_active då); None tills
+        # sensor.async_setup_entry har körts. Omladdningskontrollen jämför mot det här,
+        # inte mot förra hämtningen - se _check_rule_switch.
+        self.diagnostics_built: bool | None = None
+        self._reload_scheduled: bool = False
         self._nameplate_kw: float | None = None
         # The server's data_since off the latest profile GET (either poll) or PUT response
         # that carried one, for the preview of a change (direction_effect,
@@ -2646,6 +2651,27 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._nameplate_kw = profile.get("nameplate_kw")
         return changed
 
+    def _check_rule_switch(self) -> None:
+        """Ask for ONE reload of the config entry when the server's rule (battery_params.active)
+        differs from what the entities were built for (spec 2026-11-11 §4.7).
+
+        Compared against what sensor setup built, not against the previous fetch: that also
+        covers a first profile read that failed (built without the sensors, active later).
+        Before sensor setup (diagnostics_built is None) nothing is compared, so the first
+        fetch is never a switch. Not an options update listener. Never raises (called from
+        the side-poll timer)."""
+        try:
+            if (
+                self.diagnostics_built is None
+                or self._reload_scheduled
+                or self.diagnostics_built == battery_params_active(self._battery_params)
+            ):
+                return
+            self._reload_scheduled = True
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Could not schedule reload after rule switch", exc_info=True)
+
     async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
         """Side-poll (every 5 min): pick up web-side profile edits within minutes.
 
@@ -2679,7 +2705,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             self._take_battery_state(profile)
             battery_changed = self._battery_status != previous_status
             params_changed = self._take_battery_params(profile)
-            # (Task 3: reload-kontrollen läggs här, direkt efter _take_battery_params.)
+            self._check_rule_switch()
             battery_changed = battery_changed or params_changed
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
@@ -2717,7 +2743,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
                     try:
                         self._take_battery_params(profile)
-                        # (Task 3: reload-kontrollen läggs här, direkt efter _take_battery_params.)
+                        self._check_rule_switch()
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug("Malformed battery_params in main cycle; ignoring", exc_info=True)
 

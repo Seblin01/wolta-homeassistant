@@ -7250,3 +7250,86 @@ async def test_grid_fee_period_implausible_without_a_limit_shows_a_dash(hass, mo
     c._evaluate_grid_fee_issue(_peak_check(True, limit=None))
     issue = ir.async_get(hass).async_get_issue(DOMAIN, _PEAK_ISSUE_ID)
     assert issue.translation_placeholders == {"limit": "-"}
+
+
+# --- Omladdning när servern byter regel (egna batterivärden, spec §4.7) --------------------
+
+
+def _bp(active: bool) -> dict:
+    return {**_BP, "active": active}
+
+
+async def _reload_poll(hass, mock_entry, client, built):
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    coordinator.diagnostics_built = built
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_reload_when_active_flips_on(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=False)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+        await coordinator.async_check_profile_sync()   # nästa poll: ingen andra begäran
+    reload.assert_called_once_with(mock_entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reload_when_active_flips_off(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(False)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=True)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+    reload.assert_called_once_with(mock_entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_no_reload_on_first_fetch(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=True)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+    reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_reload_before_sensors_are_built(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=None)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+    reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reload_when_first_fetch_failed(hass: HomeAssistant, mock_entry):
+    """Första profilhämtningen kastade → byggt utan sensorerna (False); nästa ger active."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(side_effect=[RuntimeError("down"),
+                                                {**BASE_PROFILE, "battery_params": _bp(True)}])
+    coordinator = await _reload_poll(hass, mock_entry, client, built=False)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+        reload.assert_not_called()
+        await coordinator.async_check_profile_sync()
+    reload.assert_called_once_with(mock_entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reload_check_never_raises(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=False)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload", side_effect=RuntimeError("boom")):
+        await coordinator.async_check_profile_sync()   # kastar inte

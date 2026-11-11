@@ -1657,3 +1657,201 @@ def test_measured_params_attr_gone_when_active():
     for key in ("measured_capacity_kwh", "measured_capacity_status", "measured_power_kw", "measured_efficiency"):
         assert key not in attrs, key
     assert attrs["basis"] == "comparison"
+
+
+# ---------------------------------------------------------------------------
+# Battery diagnostic sensors (egna batterivärden, spec §4.6)
+# ---------------------------------------------------------------------------
+
+from homeassistant.const import EntityCategory  # noqa: E402
+
+from custom_components.wolta.sensor import BATTERY_PARAM_DESCRIPTIONS  # noqa: E402
+
+_BATTERY_KEYS = ("battery_capacity", "battery_power", "battery_efficiency", "battery_reserve")
+
+
+def _bp_full(**over) -> dict:
+    bp = {
+        "active": True,
+        "dispatchable_kwh": 22.9,
+        "measured_dispatchable_kwh": 20.2,
+        "capacity": {
+            "value": 25.3, "state": "owner", "source": "own", "basis": "gross",
+            "period_start": "2025-01-01", "period_end": "2025-05-31", "own": 25.0,
+            "measured": {"value": 25.3, "state": "measured", "source": "soc", "basis": "gross"},
+        },
+        "power": {"value": 5.0, "state": "owner", "source": "own", "period_start": None,
+                  "period_end": None, "measured": {"value": 4.0, "state": "datasheet",
+                                                   "source": "datasheet"}},
+        "eff": {"value": 0.912, "state": "owner", "source": "own", "period_start": None,
+                "period_end": None, "measured": {"value": 0.88, "state": "measured",
+                                                 "source": "flows"}},
+        "reserve": {"value": 10.0, "state": "computed", "source": "soc", "period_start": None,
+                    "period_end": None, "measured": {"value": 10.0, "state": "measured",
+                                                     "source": "soc"}},
+    }
+    bp.update(over)
+    return bp
+
+
+def _battery_sensor(key: str, bp: dict | None) -> WoltaSensor:
+    coord = _make_coordinator(RESULTS_FULL, bp)
+    entry = _make_entry()
+    desc = next(d for d in BATTERY_PARAM_DESCRIPTIONS if d.key == key)
+    return WoltaSensor(coordinator=coord, entry=entry, description=desc)
+
+
+def test_diagnostic_sensors_category():
+    assert tuple(d.key for d in BATTERY_PARAM_DESCRIPTIONS) == _BATTERY_KEYS
+    assert all(d.entity_category is EntityCategory.DIAGNOSTIC for d in BATTERY_PARAM_DESCRIPTIONS)
+    assert all(d.key not in {s.key for s in SENSOR_DESCRIPTIONS} for d in BATTERY_PARAM_DESCRIPTIONS)
+
+
+def test_diagnostic_enabled_defaults():
+    by_key = {d.key: d for d in BATTERY_PARAM_DESCRIPTIONS}
+    assert by_key["battery_power"].entity_registry_enabled_default is False
+    assert by_key["battery_reserve"].entity_registry_enabled_default is False
+    assert by_key["battery_capacity"].entity_registry_enabled_default is True
+    assert by_key["battery_efficiency"].entity_registry_enabled_default is True
+
+
+def test_capacity_sensor_owner_attrs():
+    s = _battery_sensor("battery_capacity", _bp_full())
+    assert s.native_value == 22.9
+    attrs = s.extra_state_attributes
+    assert attrs["state"] == "owner"
+    assert attrs["source"] == "own"
+    assert attrs["period_start"] == "2025-01-01"
+    assert attrs["measured_value"] == 20.2
+    assert attrs["measured_gross_kwh"] == 25.3
+    assert attrs["measured_state"] == "measured"
+    assert attrs["measured_source"] == "soc"
+    assert "basis" not in attrs
+
+
+def test_capacity_sensor_without_own():
+    bp = _bp_full()
+    bp["capacity"]["state"] = "measured"
+    s = _battery_sensor("battery_capacity", bp)
+    attrs = s.extra_state_attributes
+    assert "measured_value" not in attrs
+    assert attrs["measured_gross_kwh"] == 25.3
+
+
+def test_capacity_sensor_missing_state():
+    bp = _bp_full(dispatchable_kwh=None)
+    bp["capacity"] = {"value": None, "state": "missing", "source": None,
+                      "period_start": None, "period_end": None, "measured": None}
+    s = _battery_sensor("battery_capacity", bp)
+    assert s.available is True
+    assert s.native_value is None
+    assert s.extra_state_attributes["state"] == "missing"
+
+
+def test_efficiency_in_percent():
+    s = _battery_sensor("battery_efficiency", _bp_full())
+    assert s.native_value == 91.2
+    assert s.native_unit_of_measurement == "%"
+    assert s.extra_state_attributes["measured_value"] == 88.0
+
+
+def test_power_and_reserve_values():
+    assert _battery_sensor("battery_power", _bp_full()).native_value == 5.0
+    assert _battery_sensor("battery_power", _bp_full()).native_unit_of_measurement == "kW"
+    assert _battery_sensor("battery_reserve", _bp_full()).native_value == 10.0
+    assert _battery_sensor("battery_reserve", _bp_full()).native_unit_of_measurement == "%"
+
+
+def test_battery_sensors_unavailable_without_params():
+    for key in _BATTERY_KEYS:
+        assert _battery_sensor(key, None).available is False
+
+
+# --- Setup against a real hass: creation, registry, flip back ------------------------
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
+from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker  # noqa: E402
+
+from homeassistant.config_entries import ConfigEntryState  # noqa: E402
+from homeassistant.core import HomeAssistant  # noqa: E402
+from homeassistant.helpers import entity_registry as er  # noqa: E402
+
+from custom_components.wolta.const import (  # noqa: E402
+    CONF_BATT_IN, CONF_BATT_OUT, CONF_GRID_IN, CONF_GRID_OUT, CONF_PLANT_ID, CONF_SOLAR,
+    CONF_TOKEN, CONF_ZONE, DOMAIN, WOLTA_API_BASE,
+)
+
+_UID = "uid-battery-diag"
+
+
+def _real_entry() -> MockConfigEntry:
+    return MockConfigEntry(domain=DOMAIN, unique_id=_UID, data={
+        CONF_TOKEN: "tok-diag", CONF_ZONE: "DE",
+        CONF_BATT_IN: "sensor.batt_in", CONF_BATT_OUT: "sensor.batt_out",
+        CONF_GRID_IN: "sensor.grid_in", CONF_GRID_OUT: "sensor.grid_out",
+        CONF_SOLAR: "sensor.solar", CONF_PLANT_ID: "a" * 32})
+
+
+async def _setup_real(hass, aioclient_mock, bp, entry=None):
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    first_time = entry is None
+    entry = entry or _real_entry()
+    if first_time:
+        entry.add_to_hass(hass)
+
+    async def _first(self) -> None:
+        self.async_set_updated_data(WoltaData(
+            results=RESULTS_FULL, last_uploaded=datetime(2025, 5, 31, tzinfo=timezone.utc),
+            n_days=150, pending=False, battery_params=bp))
+
+    with patch("custom_components.wolta.coordinator.WoltaCoordinator."
+               "async_config_entry_first_refresh", _first):
+        if first_time:
+            assert await hass.config_entries.async_setup(entry.entry_id)
+        else:
+            assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+def _diag_ids(hass) -> dict[str, str | None]:
+    reg = er.async_get(hass)
+    return {k: reg.async_get_entity_id("sensor", DOMAIN, f"{_UID}_{k}") for k in _BATTERY_KEYS}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_setup_creates_diagnostic_sensors_when_active(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    entry = await _setup_real(hass, aioclient_mock, _bp_full())
+    ids = _diag_ids(hass)
+    assert all(ids.values())
+    assert entry.runtime_data.diagnostics_built is True
+    reg = er.async_get(hass)
+    for key in ("battery_power", "battery_reserve"):
+        assert reg.async_get(ids[key]).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    for key in ("battery_capacity", "battery_efficiency"):
+        assert reg.async_get(ids[key]).disabled_by is None
+        assert reg.async_get(ids[key]).entity_category is EntityCategory.DIAGNOSTIC
+    assert hass.states.get(ids["battery_capacity"]).state == "22.9"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+@pytest.mark.parametrize("bp", [None, {"active": False}], ids=["missing", "inactive"])
+async def test_no_diagnostic_sensors_when_inactive(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, bp):
+    entry = await _setup_real(hass, aioclient_mock, bp)
+    assert not any(_diag_ids(hass).values())
+    assert entry.runtime_data.diagnostics_built is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_entities_kept_after_flip_back(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    entry = await _setup_real(hass, aioclient_mock, _bp_full())
+    assert all(_diag_ids(hass).values())
+    await _setup_real(hass, aioclient_mock, {"active": False}, entry)
+    assert entry.runtime_data.diagnostics_built is False
+    assert all(_diag_ids(hass).values())          # står kvar i registret (§4.12)
