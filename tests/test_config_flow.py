@@ -785,6 +785,54 @@ async def test_reauth_flow_updates_token(hass: HomeAssistant) -> None:
     assert updated_entry.data[CONF_ZONE] == ZONE
 
 
+async def _reauth_recreate_kwargs(hass: HomeAssistant, extra: dict[str, Any]) -> dict[str, Any]:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    data: dict[str, Any] = {
+        CONF_TOKEN: "dead-token", CONF_ZONE: ZONE,
+        CONF_BATTERY_KWH: 15.36, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
+        CONF_RESERVE_PCT: 10.0, **extra,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="reauth-recreate-active")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    assert result["reason"] == "reauth_successful"
+    return mock_client.create_profile.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_recreate_declared_when_active(hass: HomeAssistant) -> None:
+    """Regel 3: en återskapad profil deklareras utan batterivärden, så servern mäter igen."""
+    from custom_components.wolta.const import CONF_BATTERY_PARAMS_ACTIVE
+
+    kwargs = await _reauth_recreate_kwargs(hass, {CONF_BATTERY_PARAMS_ACTIVE: True})
+    assert kwargs["battery_declared"] is True
+    assert kwargs["battery_kwh"] is None
+    assert kwargs["battery_kw"] is None
+    assert kwargs["eff"] is None
+    assert kwargs["reserve_pct"] is None
+
+
+@pytest.mark.asyncio
+async def test_recreate_unchanged_without_flag(hass: HomeAssistant) -> None:
+    """Utan flaggan återskapas profilen som i v0.57.0."""
+    kwargs = await _reauth_recreate_kwargs(hass, {})
+    assert kwargs["battery_declared"] is False
+    assert kwargs["battery_kwh"] == 15.36
+    assert kwargs["battery_kw"] == 5.0
+    assert kwargs["eff"] == 0.9
+    assert kwargs["reserve_pct"] == 10.0
+
+
 @pytest.mark.asyncio
 async def test_reauth_flow_preserves_all_profile_fields(hass: HomeAssistant) -> None:
     """Reauth recreates the profile from entry.data (the old server profile is gone), so it

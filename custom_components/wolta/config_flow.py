@@ -88,6 +88,7 @@ from .const import (
     CONF_DIRECTION_ISSUE_IGNORED,
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
+    CONF_BATTERY_PARAMS_ACTIVE,
     CONF_BATTERY_KWH,
     CONF_CONTROL_SYSTEM,
     CONF_CONTROL_SYSTEM_NAME,
@@ -1815,12 +1816,18 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                 # 422:ar eller skapar en batterilös rad. Ett halvt par går aldrig ut.
                 has_pair = (entry_data.get(CONF_BATTERY_KWH) is not None
                             and entry_data.get(CONF_BATTERY_KW) is not None)
-                declared = not has_pair
+                # Regel 3 (servern mäter, `battery_params.active`): cachen är serverns egna
+                # mätvärden, och efter en purge sparas allt vi skickar som ÄGARENS värden.
+                # Därför deklareras profilen utan batterivärden så att servern mäter om.
+                # Speglingen i entry.data står kvar (adopt-reparationerna läser den).
+                active = bool(entry_data.get(CONF_BATTERY_PARAMS_ACTIVE))
+                declared = active or not has_pair
+                send_values = has_pair and not active
                 new_token = await client.create_profile(
                     zone=entry_data[CONF_ZONE],
-                    battery_kwh=entry_data.get(CONF_BATTERY_KWH) if has_pair else None,
-                    battery_kw=entry_data.get(CONF_BATTERY_KW) if has_pair else None,
-                    eff=entry_data.get(CONF_EFF),
+                    battery_kwh=entry_data.get(CONF_BATTERY_KWH) if send_values else None,
+                    battery_kw=entry_data.get(CONF_BATTERY_KW) if send_values else None,
+                    eff=None if active else entry_data.get(CONF_EFF),
                     battery_declared=declared,
                     has_solar=bool(entry_data.get(CONF_SOLAR)),
                     # Always True (2026-09-15), NOT read from entry_data: the flag's
@@ -1832,7 +1839,7 @@ class WoltaConfigFlow(ConfigFlow, domain=DOMAIN):
                     # linked row can't in practice carry False either - the web
                     # opt-out never saves a returning token to link with.
                     share_profile=True,
-                    reserve_pct=entry_data.get(CONF_RESERVE_PCT),
+                    reserve_pct=None if active else entry_data.get(CONF_RESERVE_PCT),
                     cost_sek=entry_data.get(CONF_COST_SEK) if created_by_ha else None,
                     purchase_date=entry_data.get(CONF_PURCHASE_DATE),
                     grid_var_ore=entry_data.get(CONF_GRID_VAR_ORE),
