@@ -8862,6 +8862,7 @@ async def test_confirm_clear_patch_error(hass: HomeAssistant) -> None:
     ):
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={})
+    # Back at the form with the error: a confirm step has no field to fix the cause with.
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "confirm_clear"
+    assert result["step_id"] == "settings"
     assert result["errors"]["base"]

@@ -2154,6 +2154,9 @@ class WoltaOptionsFlow(OptionsFlow):
         self._server: dict[str, Any] | None = None  # fresh GET /profile snapshot
         self._pending_save: dict[str, Any] | None = None  # väntar på confirm_clear
         self._pending_clear: list[str] = []
+        self._pending_input: dict[str, Any] | None = None  # formulärsvaret bakom _pending_save
+        # (errors, server_detail, input) när bekräftelsens PATCH nekats: settings visas om med dem
+        self._reshow: tuple[dict[str, str], str, dict[str, Any]] | None = None
         # VAT choice in the tariff section: the server's multiplier, read once with the
         # profile, and what the form first showed (mode, prefilled values, max). Computed at the
         # first display and kept, so a re-show after an error neither recomputes nor drifts.
@@ -2591,6 +2594,11 @@ class WoltaOptionsFlow(OptionsFlow):
             if result is not None:
                 self._pending_save = None
                 return result
+            # Bekräftelsen har inget fält att rätta orsaken med: tillbaka till formuläret med
+            # felet och det ägaren skrev.
+            self._pending_save = None
+            self._reshow = (errors, server_detail, self._pending_input or {})
+            return await self.async_step_settings()
         return self.async_show_form(
             step_id="confirm_clear",
             data_schema=vol.Schema({}),
@@ -2626,6 +2634,11 @@ class WoltaOptionsFlow(OptionsFlow):
                 # A PATCH would fail too – profile editing needs the server.
                 return self.async_abort(reason="cannot_connect")
             self._vat = vat_from(self._server)
+
+        reshow_input = user_input
+        if user_input is None and self._reshow is not None:
+            errors, server_detail, reshow_input = self._reshow
+            self._reshow = None
 
         if user_input is not None:
             # Servern kör regel 3: batteriavsnittet är märkdata, egna värden i eget avsnitt.
@@ -2875,6 +2888,7 @@ class WoltaOptionsFlow(OptionsFlow):
                         "client": client, "token": token,
                         "patch_fields": patch_fields, **kwargs}
                     self._pending_clear = quantities
+                    self._pending_input = user_input
                     return await self.async_step_confirm_clear()
                 result, errors, server_detail = await self._finish_save(
                     client, token, patch_fields, **kwargs)
@@ -3097,9 +3111,9 @@ class WoltaOptionsFlow(OptionsFlow):
         # Re-show after an error keeps what the user typed (suggested values, section by
         # section), so a refused save does not send them back to the stored values. A field
         # the user cleared is absent from user_input and re-shows empty, not as the stored value.
-        if errors and user_input is not None:
+        if errors and reshow_input is not None:
             schema = self.add_suggested_values_to_schema(
-                schema, _with_cleared_fields_empty(schema, user_input))
+                schema, _with_cleared_fields_empty(schema, reshow_input))
         # The time periods and the contract history are shown, never edited (spec
         # 2026-10-27-marknadsanpassning, Tillägg 2 and 4): a short summary in the description,
         # empty when the plant has none. Always passed, so the description never shows a raw
