@@ -4250,6 +4250,83 @@ async def test_battery_state_unchanged_side_poll_does_not_refresh(hass: HomeAssi
     coordinator.async_request_refresh.assert_not_awaited()
 
 
+def _patch_entry_updates(hass: HomeAssistant, mock_entry):
+    def _update(entry, *, data=None, **_kw):
+        if data is not None:
+            entry.data = data
+        return True
+
+    return patch.object(hass.config_entries, "async_update_entry", side_effect=_update)
+
+
+_BP = {
+    "active": True, "view": "wolta", "dispatchable_kwh": 20.0,
+    "measured_dispatchable_kwh": 19.0, "differs": False,
+    "capacity": {"value": 22.0, "state": "ok", "source": "own", "own": 22.0,
+                 "measured": {"value": 21.0, "state": "measured", "source": "soc"}},
+    "own_timeline": {},
+}
+
+
+@pytest.mark.asyncio
+async def test_battery_params_on_wolta_data(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_params": _BP, "nameplate_kw": 5.0})
+    with _patch_entry_updates(hass, mock_entry):
+        coordinator, data = await _sync_refresh(hass, mock_entry, client)
+    assert data.battery_params == _BP
+    assert coordinator._nameplate_kw == 5.0
+
+
+@pytest.mark.asyncio
+async def test_battery_params_absent_is_none(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+    _, data = await _sync_refresh(hass, mock_entry, client)
+    assert data.battery_params is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_battery_params_is_none(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": "x"})
+    _, data = await _sync_refresh(hass, mock_entry, client)
+    assert data.battery_params is None
+    assert data.results["status"] == RESULTS_PAYLOAD["status"]
+
+
+@pytest.mark.asyncio
+async def test_side_poll_refreshes_on_battery_params_change(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_params": {**_BP, "dispatchable_kwh": 20.0}})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with _patch_entry_updates(hass, mock_entry):
+        await coordinator.async_check_profile_sync()
+        coordinator.async_request_refresh.reset_mock()
+        await coordinator.async_check_profile_sync()   # oförändrad: ingen refresh
+        coordinator.async_request_refresh.assert_not_awaited()
+        client.get_profile = AsyncMock(return_value={
+            **BASE_PROFILE, "battery_params": {**_BP, "dispatchable_kwh": 22.0}})
+        await coordinator.async_check_profile_sync()
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_active_mirrored_to_entry_data(hass: HomeAssistant, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _BP})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with _patch_entry_updates(hass, mock_entry):
+        await coordinator.async_check_profile_sync()
+        assert coordinator.config_entry.data["battery_params_active"] is True
+        client.get_profile = AsyncMock(return_value={
+            **BASE_PROFILE, "battery_params": {**_BP, "active": False}})
+        await coordinator.async_check_profile_sync()
+    assert "battery_params_active" not in coordinator.config_entry.data
+
+
 @pytest.mark.asyncio
 async def test_battery_needs_input_never_fires_in_view_only(hass: HomeAssistant, mock_entry):
     """Visningsläge äger inte profilen (bunden anläggning) – att be den ägaren om märkdata

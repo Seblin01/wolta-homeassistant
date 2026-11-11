@@ -36,6 +36,7 @@ from .api import (
     WoltaReplacementGone,
 )
 from .const import (
+    CONF_BATTERY_PARAMS_ACTIVE,
     KEY_BATTERY_STATUS,
     BATTERY_STATUS_MEASURED,
     BATTERY_STATUS_NAMEPLATE,
@@ -85,6 +86,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from .battery_params import is_active as battery_params_active
 from .control_system_prefill import control_system_name_error
 from .price_coordinator import WoltaPriceCoordinator
 from . import intervals
@@ -979,6 +981,9 @@ class WoltaData:
     battery_status: str | None = None
     battery_detect: dict | None = None
     detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+    # Serverns battery_params-block ur profil-GET:en (egna batterivärden); None när servern
+    # inte skickar det eller blocket är missbildat.
+    battery_params: dict | None = None
 
 
 type WoltaConfigEntry = ConfigEntry[WoltaCoordinator]
@@ -1043,6 +1048,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._battery_status: str | None = None
         self._battery_detect: dict | None = None
         self._detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+        # Serverns battery_params-block och märkeffekt (nameplate_kw) ur profil-GET:en,
+        # senast lästa - se _take_battery_params.
+        self._battery_params: dict | None = None
+        self._nameplate_kw: float | None = None
         # The server's data_since off the latest profile GET (either poll) or PUT response
         # that carried one, for the preview of a change (direction_effect,
         # replacement_floor). MISSING until a profile was read, or when it carried none;
@@ -2577,6 +2586,15 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             elif new_data.get(key) != server_val:
                 new_data[key] = server_val
                 changed = True
+        # Spegla serverns "egna värden aktiva" (regel 3). Saknas blocket eller är det inte
+        # aktivt tas nyckeln bort, så v0.57.0-beteendet gäller exakt.
+        if battery_params_active(profile.get("battery_params")):
+            if new_data.get(CONF_BATTERY_PARAMS_ACTIVE) is not True:
+                new_data[CONF_BATTERY_PARAMS_ACTIVE] = True
+                changed = True
+        elif CONF_BATTERY_PARAMS_ACTIVE in new_data:
+            new_data.pop(CONF_BATTERY_PARAMS_ACTIVE)
+            changed = True
         if not changed:
             return False
         zone = new_data.get(CONF_ZONE, self._zone)
@@ -2616,6 +2634,18 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._detect_min_days = min_days
         self._evaluate_battery_pending()
 
+    def _take_battery_params(self, profile: dict) -> bool:
+        """Keep the server's battery_params block (and nameplate_kw) off a profile GET.
+
+        Called from BOTH polls, inside the same guard as _take_battery_state. A missing or
+        non-dict block is stored as None. Returns True when the block changed."""
+        block = profile.get("battery_params")
+        new = block if isinstance(block, dict) else None
+        changed = new != self._battery_params
+        self._battery_params = new
+        self._nameplate_kw = profile.get("nameplate_kw")
+        return changed
+
     async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
         """Side-poll (every 5 min): pick up web-side profile edits within minutes.
 
@@ -2648,6 +2678,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             previous_status = self._battery_status
             self._take_battery_state(profile)
             battery_changed = self._battery_status != previous_status
+            params_changed = self._take_battery_params(profile)
+            # (Task 3: reload-kontrollen läggs här, direkt efter _take_battery_params.)
+            battery_changed = battery_changed or params_changed
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
             battery_changed = False
@@ -2682,6 +2715,11 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         self._take_battery_state(profile)
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
+                    try:
+                        self._take_battery_params(profile)
+                        # (Task 3: reload-kontrollen läggs här, direkt efter _take_battery_params.)
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug("Malformed battery_params in main cycle; ignoring", exc_info=True)
 
             # Copies of this plant (server spec "copies of your plant" §8): the main cycle only,
             # not the fast poll - copies are rare and already counted once on the server.
@@ -2902,6 +2940,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             battery_status=self._battery_status,
             battery_detect=self._battery_detect,
             detect_min_days=self._detect_min_days,
+            battery_params=self._battery_params,
         )
         self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
         return data
