@@ -7417,3 +7417,84 @@ async def test_no_nameplate_issue_when_inactive(hass, mock_entry):
     _rule3(c, active=False, nameplate_kw=None)
     c._evaluate_measured_params({"betyg": {}})
     assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is None
+
+
+# --- Granskningsfynd: märkeffekt-reparation, sidopoll (final review) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_nameplate_repair_stays_gone_in_fast_poll(hass, mock_entry):
+    """Svaret på reparationen får inte återuppstå ur ett gammalt None: snabbpollen hämtar
+    ingen profil, så fix-flödet måste sätta värdet lokalt."""
+    from custom_components.wolta.coordinator import _FAST_POLL
+    from custom_components.wolta.repairs import NameplatePowerRepairFlow
+
+    c = await _cap_coordinator(hass, mock_entry)
+    _rule3(c, active=True, nameplate_kw=None)
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is not None
+    c.update_interval = _FAST_POLL
+    c.client.patch_profile = AsyncMock(return_value={})
+
+    async def _refresh():
+        c._evaluate_measured_params({"betyg": {}})   # det snabbpollen gör: ingen profilhämtning
+
+    c.async_request_refresh = _refresh
+    entry = MagicMock()
+    entry.entry_id = "test_entry_id"
+    entry.runtime_data = c
+    flow = NameplatePowerRepairFlow(entry)
+    flow.hass = hass
+    await flow.async_step_init({"nameplate_kw": 5.0})
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_take_battery_params_reports_nameplate_change_under_active(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry)
+    blk = {"active": True, "x": 1}
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) is True
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) is False
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": 5.0}) is True
+
+
+@pytest.mark.asyncio
+async def test_side_poll_inactive_block_change_does_not_refresh(hass, mock_entry):
+    """Före bytet (active falskt) ändrade v0.57.0 aldrig takten för battery_params."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={
+        **BASE_PROFILE, "battery_params": {"active": False, "n": 1}})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with _patch_entry_updates(hass, mock_entry):
+        await coordinator.async_check_profile_sync()
+        coordinator.async_request_refresh.reset_mock()
+        client.get_profile = AsyncMock(return_value={
+            **BASE_PROFILE, "battery_params": {"active": False, "n": 2}})
+        await coordinator.async_check_profile_sync()
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_no_refresh_when_reload_was_just_scheduled(hass, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=False)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+    reload.assert_called_once_with(mock_entry.entry_id)
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_nameplate_issue_while_battery_needs_input(hass, mock_entry):
+    """Två reparationer ska inte fråga efter samma värde."""
+    c = await _cap_coordinator(hass, mock_entry)
+    _rule3(c, active=True, nameplate_kw=None)
+    c._battery_status = "needs_input"
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is None
+    c._battery_status = "measured"
+    c._evaluate_measured_params({"betyg": {}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is not None
