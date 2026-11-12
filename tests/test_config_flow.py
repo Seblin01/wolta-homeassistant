@@ -9063,6 +9063,50 @@ async def test_reserve_equal_to_a_reported_reserve_is_withheld(hass: HomeAssista
     assert "reserve" in rows and "Wolta's measured value" in rows
 
 
+def _bp_carried():
+    """After the battery's latest change: capacity, power and efficiency are the previous
+    stage's measurement, carried until the battery is measured again."""
+    bp = _bp_measured()
+    bp["capacity"]["measured"] = {
+        "state": "preliminary", "source": "previous_stage", "value": 20.0}
+    bp["power"]["measured"] = {"state": "preliminary", "source": "previous_stage", "value": 5.0}
+    bp["eff"]["measured"] = {"state": "preliminary", "source": "previous_stage", "value": 0.9}
+    return bp
+
+
+def test_same_as_a_carried_measurement_is_not_called_measured() -> None:
+    from custom_components.wolta.config_flow import _not_saved_rows, _same_as_wolta
+    bp = _bp_carried()
+    assert _same_as_wolta(bp, "capacity", 18.0) == "previous_stage"
+    assert _same_as_wolta(bp, "power", 5.0) == "previous_stage"
+    en = _not_saved_rows("en", {"power": "previous_stage"})
+    assert en == ("Your value for power is the same as the measurement from before the "
+                  "battery's latest change, nothing saved. Wolta uses its own value, and the "
+                  "field is empty next time.")
+    sv = _not_saved_rows("sv-SE", {"power": "previous_stage"})
+    assert "samma som mätningen före batteriets senaste ändring, inget sparat" in sv
+    assert "uppmätt" not in sv and "measured" not in en
+
+
+def test_clear_rows_with_a_carried_measurement() -> None:
+    from custom_components.wolta.config_flow import _clear_rows
+    bp = _bp_carried()
+    en = _clear_rows("en", ["capacity"], bp)
+    assert en.endswith("Wolta then uses the measurement from before the battery's latest change.")
+    sv = _clear_rows("sv", ["capacity"], bp)
+    assert sv.endswith("Wolta räknar då med mätningen före batteriets senaste ändring.")
+
+
+def test_same_as_an_assumption_wolta_cannot_measure() -> None:
+    """The server sends the assumed 90 % with state "datasheet" when the plant cannot be
+    measured: still the assumed value, not the datasheet's."""
+    from custom_components.wolta.config_flow import _not_saved_rows, _same_as_wolta
+    bp = _bp_measured()
+    bp["eff"]["measured"] = {"state": "datasheet", "source": "assumed", "value": 0.9}
+    assert _same_as_wolta(bp, "eff", 0.9) == "assumed"
+    assert "the assumed value" in _not_saved_rows("en", {"eff": "assumed"})
+
+
 def test_not_saved_rows_sv() -> None:
     from custom_components.wolta.config_flow import _not_saved_rows
     text = _not_saved_rows("sv-SE", {"power": "datasheet"})

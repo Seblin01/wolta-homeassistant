@@ -1867,7 +1867,7 @@ def _cap_bp(state: str, source: str | None = "datasheet", *, active: bool = True
 @pytest.mark.parametrize("source", ["datasheet", "previous_stage"])
 def test_own_grade_preliminary_while_capacity_is_not_measured(source):
     """The owner's grade is mature by its days, but the capacity is the datasheet's (or the
-    previous stage's after an expansion): preliminary, as on wolta.se."""
+    measurement from before the battery's latest change): preliminary, as on wolta.se."""
     s = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE),
                 _cap_bp("preliminary", source))
     attrs = s.extra_state_attributes

@@ -56,5 +56,19 @@ def test_wolta_value_kind():
     assert bp.wolta_value_kind(
         with_measured({"value": 9.4, "state": "missing", "source": "soc"}), "capacity") is None
     assert bp.wolta_value_kind(with_measured(None), "capacity") is None
+    # The previous stage's measurement, carried past the battery's latest change, is not
+    # called measured (server: state "preliminary", source "previous_stage").
+    assert bp.wolta_value_kind(
+        with_measured({"value": 9.4, "state": "preliminary", "source": "previous_stage"}),
+        "capacity") == "previous_stage"
+    # An assumption on a plant Wolta cannot measure comes as state "datasheet" with source
+    # "assumed" (server _eff/_reserve with _unmeasured_state): it is an assumption.
+    assert bp.wolta_value_kind(
+        with_measured({"value": 0.9, "state": "datasheet", "source": "assumed"}), "capacity") == "assumed"
+    assert bp.wolta_value_kind(
+        with_measured({"value": 0.9, "state": "preliminary", "source": "assumed"}), "capacity") == "assumed"
+    assert bp.wolta_value_kind(
+        with_measured({"value": 9.4, "state": "preliminary", "source": "datasheet"}),
+        "capacity") == "datasheet"
     assert bp.wolta_value_kind({"capacity": {}}, "capacity") is None
     assert bp.wolta_value_kind(None, "capacity") is None
