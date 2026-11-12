@@ -2740,6 +2740,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.debug("Profile side-poll failed; retrying next tick", exc_info=True)
             return
         self._take_data_since(profile)
+        # Mirrored BEFORE the rule check below: a reload it schedules may start at once, and
+        # the coordinator it builds seeds its rule from the flag this stores in entry.data.
+        synced = self._apply_profile_sync(profile)
         # A CHANGED battery stamp also warrants the refresh: the stamp is not part of
         # entry.data, so _apply_profile_sync can't see it, and without a rebuilt WoltaData
         # the status sensor would keep saying "measuring" for up to 6h while the repair
@@ -2764,7 +2767,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
             battery_changed = False
             reload_scheduled = False
-        if (self._apply_profile_sync(profile) or battery_changed) and not reload_scheduled:
+        if (synced or battery_changed) and not reload_scheduled:
             _LOGGER.debug("Web-side profile change detected; refreshing results")
             await self.async_request_refresh()
 
