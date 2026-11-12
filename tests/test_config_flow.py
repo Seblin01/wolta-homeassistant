@@ -8905,7 +8905,7 @@ def _bp_measured(**own):
     ("eff", 0.9, "assumed"),
     ("eff", 0.9004, "assumed"),
     ("eff", 0.91, None),
-    ("reserve", 10.0, "measured"),
+    ("reserve", 10.0, None),             # equal to the computed floor (soc): not "the same"
 ])
 def test_same_as_wolta_uses_the_servers_tolerance(q, value, kind) -> None:
     from custom_components.wolta.config_flow import _same_as_wolta
@@ -8996,6 +8996,71 @@ async def test_stored_own_value_closes_the_dialog(hass: HomeAssistant) -> None:
         hass, entry, None, _opts_active({"own_capacity_kwh": 16.0}), client)
     assert client.patch_profile.call_args.kwargs == {"own": {"capacity_kwh": 16.0}}
     assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+def _bp_reported_reserve(**own):
+    """Wolta's reserve is the one the battery itself reports, not the computed floor."""
+    bp = _bp_measured(**own)
+    bp["reserve"]["measured"] = {
+        "state": "measured", "source": "source_reported", "value": 10.0}
+    return bp
+
+
+def test_reserve_equal_to_a_reported_reserve_is_the_same() -> None:
+    from custom_components.wolta.config_flow import _same_as_wolta
+    assert _same_as_wolta(_bp_reported_reserve(), "reserve", 10.0) == "measured"
+    assert _same_as_wolta(_bp_reported_reserve(), "reserve", 12.0) is None
+    # Only a measured soc floor is the exception: an assumed reserve still compares.
+    bp = _bp_measured()
+    bp["reserve"]["measured"] = {"state": "preliminary", "source": "assumed", "value": 0.0}
+    assert _same_as_wolta(bp, "reserve", 0.0) == "assumed"
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_the_computed_floor_is_sent(hass: HomeAssistant) -> None:
+    """The owner's reserve says the level is a setting in the battery, which the computed
+    floor does not: it is sent. A server that stores it closes the dialog as usual."""
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    client.patch_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_bp_measured(reserve=10.0)))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_reserve_pct": 10.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 10.0}}
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_the_computed_floor_on_a_server_that_drops_it(
+        hass: HomeAssistant) -> None:
+    """A server without the exception does not store it: sent all the same, and the
+    response says it was not saved."""
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    client.patch_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_reserve_pct": 10.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 10.0}}
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    assert "reserve" in result["description_placeholders"]["rows"]
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_a_reported_reserve_is_withheld(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _bp_reported_reserve(), _opts_active({"own_reserve_pct": 10.0}))
+    client.patch_profile.assert_not_awaited()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    rows = result["description_placeholders"]["rows"]
+    assert "reserve" in rows and "Wolta's measured value" in rows
 
 
 def test_not_saved_rows_sv() -> None:
