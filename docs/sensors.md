@@ -55,7 +55,7 @@ The codes are shown as the server sends them, in English, and are not translated
 | `datasheet` | The nameplate figure. |
 | `assumed` | An assumption: 90 % round-trip efficiency, 0 % reserve. |
 
-Your own values are set in **Configure → Settings** (see [Your own values](configuration.md#your-own-values-v0580)). A value you enter that equals Wolta's own value is not stored by the server, so the field is empty the next time you open the form; the form says so after saving (*Not saved as your own value*).
+Your own values are set in **Configure → Settings** (see [Your own values](configuration.md#your-own-values-v0580)). A value you enter that equals Wolta's own value is not stored by the server, so the field is empty the next time you open the form; the form says so after saving (*Not saved as your own value*). A reserve equal to the floor Wolta has worked out from the state of charge (`measured_source: soc`) is the exception and is stored.
 
 Reason codes in `comparison_reasons`, with the sentences wolta.se shows for them. The full explanation, with the numbers behind it, is on the *My battery* card on wolta.se; the integration shows the codes as they are, and an unknown code is passed through unchanged.
 

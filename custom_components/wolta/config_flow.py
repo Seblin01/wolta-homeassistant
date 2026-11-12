@@ -696,10 +696,19 @@ _SAME_VALUE_WORDS = {
 def _same_as_wolta(bp: dict | None, q: str, value: float) -> str | None:
     """Slaget av Woltas värde ("measured", "datasheet", "assumed") när ägarens värde är lika
     med det och servern därför inte lagrar det, annars None. Speglar webbens sameAsWoltaNote:
-    den uppmätta vyns värde vilken källa det än har, kapaciteten net mot net."""
+    den uppmätta vyns värde vilken källa det än har, kapaciteten net mot net.
+
+    Undantaget: en reserv lika med golvet Wolta räknat ut ur laddnivån (state "measured",
+    source "soc") är inte lika. Ägarens reserv säger att nivån är inställd i batteriet, och
+    det säger inte golvet, så värdet skickas. En reserv lika med den batteriet självt
+    rapporterar ("source_reported") hålls fortfarande tillbaka."""
     kind = wolta_value_kind(bp, q)
     if kind is None:
         return None
+    if q == "reserve":
+        floor = _bp_quantity(bp, q)["measured"]
+        if floor.get("state") == "measured" and floor.get("source") == "soc":
+            return None
     if q == "capacity":
         wolta = bp.get("measured_dispatchable_kwh")
     else:
