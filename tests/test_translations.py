@@ -1153,3 +1153,11 @@ def test_own_values_field_texts(lang: str) -> None:
 def test_confirm_clear_has_its_own_abort(path: Path) -> None:
     """A confirm step with nothing pending is not a connection problem."""
     assert _load(path)["options"]["abort"]["clear_expired"]
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_own_not_saved_step_has_texts(path: Path) -> None:
+    """The step that says an own value equal to Wolta's was not saved."""
+    step = _load(path)["options"]["step"]["own_not_saved"]
+    assert step["title"]
+    assert step["description"] == "{rows}"

@@ -1855,3 +1855,116 @@ async def test_entities_kept_after_flip_back(
     await _setup_real(hass, aioclient_mock, {"active": False}, entry)
     assert entry.runtime_data.diagnostics_built is False
     assert all(_diag_ids(hass).values())          # står kvar i registret (§4.12)
+
+
+# --- preliminary follows wolta.se after the switch (displayedGradePreliminary) -----------
+
+
+def _cap_bp(state: str, source: str | None = "datasheet", *, active: bool = True) -> dict:
+    return {"active": active, "capacity": {"value": 10.0, "state": state, "source": source}}
+
+
+@pytest.mark.parametrize("source", ["datasheet", "previous_stage"])
+def test_own_grade_preliminary_while_capacity_is_not_measured(source):
+    """The owner's grade is mature by its days, but the capacity is the datasheet's (or the
+    previous stage's after an expansion): preliminary, as on wolta.se."""
+    s = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE),
+                _cap_bp("preliminary", source))
+    attrs = s.extra_state_attributes
+    assert attrs["basis"] == "own"
+    assert attrs["preliminary"] is True
+
+
+def test_own_grade_preliminary_by_its_own_days():
+    own = {**_OWN_GRADE, "preliminary": True}
+    attrs = _sensor("optimeringsbetyg", _with_betyg(own_grade=own),
+                    _cap_bp("measured", "soc")).extra_state_attributes
+    assert attrs["preliminary"] is True
+    attrs = _sensor("optimeringsbetyg", _with_betyg(own_grade=_OWN_GRADE),
+                    _cap_bp("measured", "soc")).extra_state_attributes
+    assert attrs["preliminary"] is False
+
+
+@pytest.mark.parametrize("key", ["optimeringsbetyg", "jamforelsebetyg"])
+def test_comparison_grade_preliminary_while_capacity_is_not_measured(key):
+    results = _with_betyg(preliminary=False)
+    attrs = _sensor(key, results, _cap_bp("preliminary")).extra_state_attributes
+    assert attrs["preliminary"] is True
+    # A measured capacity leaves the grade's own flag.
+    attrs = _sensor(key, results, _cap_bp("measured", "soc")).extra_state_attributes
+    assert attrs["preliminary"] is False
+    attrs = _sensor(key, _with_betyg(preliminary=True),
+                    _cap_bp("measured", "soc")).extra_state_attributes
+    assert attrs["preliminary"] is True
+
+
+@pytest.mark.parametrize("key", ["optimeringsbetyg", "jamforelsebetyg"])
+@pytest.mark.parametrize("bp", [None, _cap_bp("preliminary", active=False)],
+                         ids=["no_block", "inactive"])
+def test_capacity_state_not_read_before_the_switch(key, bp):
+    attrs = _sensor(key, _with_betyg(preliminary=False), bp).extra_state_attributes
+    assert attrs["preliminary"] is False
+
+
+def test_window_grade_keeps_its_own_preliminary():
+    attrs = _sensor("optimeringsbetyg", _with_window(),
+                    _cap_bp("preliminary")).extra_state_attributes
+    assert attrs["basis"] == "window"
+    assert attrs["preliminary"] is False
+
+
+# --- The whole chain: the server switches rule, the entry reloads itself ----------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_rule_switch_reloads_and_builds_the_new_sensors(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    """A profile with active: true arrives on the side poll, the entry reloads itself (a
+    real reload), and afterwards the diagnostic sensors exist and the grade sensor shows
+    the owner's grade."""
+    from unittest.mock import AsyncMock
+
+    results = _with_betyg(own_grade=_OWN_GRADE)
+    aioclient_mock.post(f"{WOLTA_API_BASE}/api/v1/profile/link", json={"link_token": "wpl_x"})
+    entry = _real_entry()
+    entry.add_to_hass(hass)
+    built: list = []
+
+    async def _first(self) -> None:
+        # Stands in for the first refresh (no recorder here). The block is the coordinator's
+        # own: None before the switch, seeded from the config entry after the reload.
+        built.append(self._battery_params)
+        self.async_set_updated_data(WoltaData(
+            results=results, last_uploaded=datetime(2025, 5, 31, tzinfo=timezone.utc),
+            n_days=150, pending=False, battery_params=self._battery_params))
+
+    grade_uid = f"{_UID}_optimeringsbetyg"
+    reg = er.async_get(hass)
+    with patch("custom_components.wolta.coordinator.WoltaCoordinator."
+               "async_config_entry_first_refresh", _first):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        before = entry.runtime_data
+        assert before.diagnostics_built is False
+        assert not any(_diag_ids(hass).values())
+        grade_id = reg.async_get_entity_id("sensor", DOMAIN, grade_uid)
+        assert hass.states.get(grade_id).attributes["basis"] == "comparison"
+        assert hass.states.get(grade_id).state == "82.0"
+
+        before.client = MagicMock()
+        before.client.get_profile = AsyncMock(
+            return_value={CONF_ZONE: "DE", "battery_params": _bp_full()})
+        await before.async_check_profile_sync()
+        await hass.async_block_till_done()
+
+    after = entry.runtime_data
+    assert after is not before                      # reloaded: a new coordinator
+    assert entry.state is ConfigEntryState.LOADED
+    assert built == [None, {"active": True}]
+    assert after.diagnostics_built is True
+    assert all(_diag_ids(hass).values())
+    state = hass.states.get(grade_id)
+    assert state.attributes["basis"] == "own"
+    assert state.state == "81.0"
+    assert state.attributes["own_quantities"] == ["capacity", "eff"]

@@ -7567,3 +7567,140 @@ async def test_no_nameplate_issue_while_battery_needs_input(hass, mock_entry):
     c._battery_status = "measured"
     c._evaluate_measured_params({"betyg": {}})
     assert ir.async_get(hass).async_get_issue(DOMAIN, _NP_ISSUE_ID) is not None
+
+
+# ---------------------------------------------------------------------------
+# Rule 3 robustness: a missing block is no switch, a failed reload request is retried,
+# the rule survives a restart, and a full-to-full efficiency is never offered.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "block", [None, "x", {}, {"n": 2}, {"active": "yes"}, {"active": None}],
+    ids=["missing", "string", "empty", "no_active", "active_string", "active_null"])
+async def test_block_without_boolean_active_is_no_switch(hass, mock_entry, block):
+    """Only an explicit boolean `active` says something about the rule: a 200 response
+    without the block, or with a malformed one, neither reloads nor drops the stored flag."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=True)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+        profile = dict(BASE_PROFILE)
+        if block is not None:
+            profile["battery_params"] = block
+        client.get_profile = AsyncMock(return_value=profile)
+        coordinator.async_request_refresh.reset_mock()
+        await coordinator.async_check_profile_sync()
+    reload.assert_not_called()
+    coordinator.async_request_refresh.assert_not_awaited()
+    assert coordinator.config_entry.data["battery_params_active"] is True
+    assert coordinator._battery_params == _bp(True)
+
+
+@pytest.mark.asyncio
+async def test_explicit_false_after_missing_block_still_switches(hass, mock_entry):
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=True)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        await coordinator.async_check_profile_sync()
+        client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+        await coordinator.async_check_profile_sync()
+        reload.assert_not_called()
+        client.get_profile = AsyncMock(
+            return_value={**BASE_PROFILE, "battery_params": _bp(False)})
+        await coordinator.async_check_profile_sync()
+    reload.assert_called_once_with(mock_entry.entry_id)
+    assert "battery_params_active" not in coordinator.config_entry.data
+
+
+@pytest.mark.asyncio
+async def test_reload_request_retried_after_it_raised(hass, mock_entry):
+    """A reload request that raised is not remembered as made: the next poll asks again."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    coordinator = await _reload_poll(hass, mock_entry, client, built=False)
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload",
+            side_effect=[RuntimeError("boom"), None]) as reload:
+        await coordinator.async_check_profile_sync()
+        assert reload.call_count == 1
+        await coordinator.async_check_profile_sync()
+        assert reload.call_count == 2
+        await coordinator.async_check_profile_sync()   # asked and accepted: not again
+    assert reload.call_count == 2
+
+
+_OWN_GRADE_RESULTS = {
+    **RESULTS_PAYLOAD,
+    "betyg": {"holistic": {"score_on": 0.6},
+              "own_grade": {"score": 0.81, "own_quantities": ["capacity"]}},
+}
+
+
+@pytest.mark.asyncio
+async def test_rule_seeded_from_entry_when_first_profile_read_fails(hass, mock_entry):
+    """After a restart under rule 3 with a failing profile GET, the first data already says
+    rule 3 (the flag kept in the config entry): the grade sensor shows the owner's grade at
+    once, the diagnostic sensors are built, and the block arriving later is no switch."""
+    from custom_components.wolta.battery_params import is_active
+    from custom_components.wolta.sensor import _grade_choice
+    mock_entry.data = {**mock_entry.data, "battery_params_active": True}
+    client = _mock_client(results=_OWN_GRADE_RESULTS)
+    client.get_profile = AsyncMock(side_effect=RuntimeError("down"))
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        coordinator, data = await _sync_refresh(hass, mock_entry, client)
+        assert is_active(data.battery_params)
+        assert _grade_choice(data)[0] == "own"
+        # What sensor setup notes from that first data.
+        coordinator.diagnostics_built = is_active(data.battery_params)
+        coordinator.async_request_refresh = AsyncMock()
+        client.get_profile = AsyncMock(
+            return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+        await coordinator.async_check_profile_sync()
+    reload.assert_not_called()
+    assert coordinator._battery_params == _bp(True)
+
+
+@pytest.mark.asyncio
+async def test_rule_not_seeded_without_the_flag(hass, mock_entry):
+    """Before the switch there is no flag, and a failing profile GET leaves no block."""
+    client = _mock_client(results=_OWN_GRADE_RESULTS)
+    client.get_profile = AsyncMock(side_effect=RuntimeError("down"))
+    from custom_components.wolta.sensor import _grade_choice
+    _, data = await _sync_refresh(hass, mock_entry, client)
+    assert data.battery_params is None
+    assert _grade_choice(data)[0] == "comparison"
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_not_fired_for_full_to_full(hass, mock_entry):
+    """A full-to-full balance is another measurement frame than the round-trip the grade
+    uses, so it is not offered for adoption."""
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.9})
+    c._evaluate_measured_params(
+        {"betyg": {"observed_eff": {"eff": 0.72, "n_days": 90, "basis": "full_to_full"}}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_removed_when_basis_turns_full_to_full(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.9})
+    c._evaluate_measured_params(_oe_results(0.72))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is not None
+    c._evaluate_measured_params(
+        {"betyg": {"observed_eff": {"eff": 0.72, "n_days": 90, "basis": "full_to_full"}}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_efficiency_issue_fires_for_another_basis(hass, mock_entry):
+    c = await _cap_coordinator(hass, mock_entry, **{_CEFF: 0.9})
+    c._evaluate_measured_params(
+        {"betyg": {"observed_eff": {"eff": 0.72, "n_days": 90, "basis": "lifetime"}}})
+    assert ir.async_get(hass).async_get_issue(DOMAIN, _EFF_ISSUE_ID) is not None
