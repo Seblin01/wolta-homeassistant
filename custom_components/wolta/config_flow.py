@@ -48,6 +48,7 @@ from .battery_params import (
     has_dated_own_rows,
     is_active as _bp_active,
     own_value as _bp_own_value,
+    quantity as _bp_quantity,
     wolta_value_kind,
 )
 from .api import (
@@ -677,6 +678,52 @@ def _clear_rows(language: str | None, quantities: list[str], bp: dict | None) ->
         else:
             rows.append(f"Your values for {name} are removed, including those for earlier "
                         f"stages. Wolta then uses {word}.")
+    return "\n\n".join(rows)
+
+
+# Serverns likhetstolerans för ett eget värde (api simulate/battery_params.py OWN_EQUAL_TOL
+# och OWN_EQUAL_TOL_EFF): ett eget värde så nära den uppmätta vyns värde lagras inte.
+_OWN_EQUAL_TOL = 0.005
+_OWN_EQUAL_TOL_EFF = 0.0005
+_SAME_VALUE_WORDS = {
+    "sv": {"measured": "Woltas uppmätta värde", "datasheet": "databladets värde",
+           "assumed": "det antagna värdet", None: "Woltas värde"},
+    "en": {"measured": "Wolta's measured value", "datasheet": "the datasheet value",
+           "assumed": "the assumed value", None: "Wolta's value"},
+}
+
+
+def _same_as_wolta(bp: dict | None, q: str, value: float) -> str | None:
+    """Slaget av Woltas värde ("measured", "datasheet", "assumed") när ägarens värde är lika
+    med det och servern därför inte lagrar det, annars None. Speglar webbens sameAsWoltaNote:
+    den uppmätta vyns värde vilken källa det än har, kapaciteten net mot net."""
+    kind = wolta_value_kind(bp, q)
+    if kind is None:
+        return None
+    if q == "capacity":
+        wolta = bp.get("measured_dispatchable_kwh")
+    else:
+        wolta = _bp_quantity(bp, q)["measured"].get("value")
+    if not isinstance(wolta, (int, float)) or isinstance(wolta, bool):
+        return None
+    tol = _OWN_EQUAL_TOL_EFF if q == "eff" else _OWN_EQUAL_TOL
+    return kind if abs(value - wolta) <= tol + 1e-9 else None
+
+
+def _not_saved_rows(language: str | None, not_saved: dict[str, str | None]) -> str:
+    """En rad per storhet vars värde inte sparades, samma innebörd som wolta.se
+    ("Samma som Woltas uppmätta värde, inget sparat.")."""
+    lang = "sv" if (language or "").lower().startswith("sv") else "en"
+    rows = []
+    for q, kind in not_saved.items():
+        name = _CLEAR_QUANTITY[lang][q]
+        word = _SAME_VALUE_WORDS[lang][kind]
+        if lang == "sv":
+            rows.append(f"Ditt värde för {name} är samma som {word}, inget sparat. "
+                        f"Wolta räknar med sitt värde, och fältet är tomt nästa gång.")
+        else:
+            rows.append(f"Your value for {name} is the same as {word}, nothing saved. "
+                        f"Wolta uses its own value, and the field is empty next time.")
     return "\n\n".join(rows)
 
 
@@ -2155,6 +2202,8 @@ class WoltaOptionsFlow(OptionsFlow):
         self._pending_save: dict[str, Any] | None = None  # väntar på confirm_clear
         self._pending_clear: list[str] = []
         self._pending_input: dict[str, Any] | None = None  # formulärsvaret bakom _pending_save
+        # Egna värden som inte sparades för att de är lika med Woltas: storhet → slag.
+        self._not_saved: dict[str, str | None] = {}
         # (errors, server_detail, input) när bekräftelsens PATCH nekats: settings visas om med dem
         self._reshow: tuple[dict[str, str], str, dict[str, Any]] | None = None
         # VAT choice in the tariff section: the server's multiplier, read once with the
@@ -2489,7 +2538,7 @@ class WoltaOptionsFlow(OptionsFlow):
 
         if patch_fields and not errors:
             try:
-                await client.patch_profile(token, **patch_fields)
+                response = await client.patch_profile(token, **patch_fields)
             except WoltaApiError as err:
                 _LOGGER.error("Failed to patch Wolta profile: %s", err)
                 # The same refusal from the server (a cache that is out of step with it)
@@ -2508,6 +2557,8 @@ class WoltaOptionsFlow(OptionsFlow):
                     errors["base"] = "grid_fixed_required"
                 else:
                     server_detail = _refusal(err, errors)
+            else:
+                self._note_unsaved_own(patch_fields.get("own"), response)
 
         if not errors:
             # Datumförslaget ur statistiken är ett ENGÅNGSerbjudande: formuläret har
@@ -2579,6 +2630,35 @@ class WoltaOptionsFlow(OptionsFlow):
 
         return None, errors, server_detail
 
+    def _note_unsaved_own(self, own: dict | None, response: object) -> None:
+        """Egna värden som skickades men som servern inte lagrade. PATCH-svaret är hela
+        profilen (api calibration.patch_profile_core), och ett värde inom likhetstoleransen
+        från Woltas värde lagras inte (battery_params_store.set_own): storhetens `own` är då
+        null i svaret. Ett svar utan blocket säger ingenting."""
+        bp = response.get("battery_params") if isinstance(response, dict) else None
+        if not own or not isinstance(bp, dict):
+            return
+        for quantity, key in _OWN_FIELDS.values():
+            block = _bp_quantity(bp, quantity)
+            if own.get(key) is not None and block is not None and block.get("own") is None:
+                self._not_saved.setdefault(quantity, wolta_value_kind(bp, quantity))
+
+    async def async_step_own_not_saved(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Besked efter sparningen: ett eget värde lika med Woltas lagras inte. Resten av
+        sparningen har redan gått ut, så steget har inget att ångra."""
+        if user_input is not None or not self._not_saved:
+            self._not_saved = {}
+            return self.async_create_entry(title="", data={})
+        return self.async_show_form(
+            step_id="own_not_saved",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "rows": _not_saved_rows(self.hass.config.language, self._not_saved)},
+            last_step=True,
+        )
+
     async def async_step_confirm_clear(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -2591,6 +2671,8 @@ class WoltaOptionsFlow(OptionsFlow):
             result, errors, server_detail = await self._finish_save(**pending)
             if result is not None:
                 self._pending_save = None
+                if self._not_saved:
+                    return await self.async_step_own_not_saved()
                 return result
             # Bekräftelsen har inget fält att rätta orsaken med: tillbaka till formuläret med
             # felet och det ägaren skrev.
@@ -2755,9 +2837,20 @@ class WoltaOptionsFlow(OptionsFlow):
             # Egna värden (bara med regel 3): jämförs mot ögonblicksbilden formuläret fylldes ur.
             # `own` är ett eget PATCH-fält och skrivs aldrig till entry.data (se cachen nedan).
             # Saknas hela sektionen i input rörs inga egna värden (inte samma sak som tömda fält).
+            self._not_saved = {}
             if active and SECTION_OWN_VALUES in user_input:
-                own_changes = _own_diff(
-                    self._server["battery_params"], user_input[SECTION_OWN_VALUES] or {})
+                bp_shown = self._server["battery_params"]
+                own_changes = _own_diff(bp_shown, user_input[SECTION_OWN_VALUES] or {})
+                # Ett nytt eget värde lika med Woltas lagras inte av servern. Som på wolta.se
+                # skickas det inte, och ägaren får veta det efter sparningen (own_not_saved).
+                for quantity, key in _OWN_FIELDS.values():
+                    value = own_changes.get(key)
+                    if value is None or _bp_own_value(bp_shown, quantity) is not None:
+                        continue
+                    kind = _same_as_wolta(bp_shown, quantity, value)
+                    if kind is not None:
+                        del own_changes[key]
+                        self._not_saved[quantity] = kind
                 if own_changes:
                     patch_fields["own"] = own_changes
 
@@ -2890,6 +2983,8 @@ class WoltaOptionsFlow(OptionsFlow):
                 result, errors, server_detail = await self._finish_save(
                     client, token, patch_fields, **kwargs)
                 if result is not None:
+                    if self._not_saved:
+                        return await self.async_step_own_not_saved()
                     return result
 
         srv = self._server

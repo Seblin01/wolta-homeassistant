@@ -168,7 +168,24 @@ def _comparison_available(results: dict) -> bool:
     return _comparison_score(results) is not None
 
 
-def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
+def _capacity_preliminary(data: WoltaData) -> bool:
+    """The capacity the grade rests on is not measured yet (battery_params.capacity.state ==
+    "preliminary": the datasheet's figure, or the previous stage's after an expansion). Read
+    only while the server runs rule 3, as on wolta.se (ownGradePreliminary)."""
+    if not is_active(data.battery_params):
+        return False
+    capacity = quantity(data.battery_params, "capacity")
+    return capacity is not None and capacity.get("state") == "preliminary"
+
+
+def _grade_preliminary(data: WoltaData, own_flag: Any) -> Any:
+    """Maturity of an own-values or comparison grade, by the same rule as wolta.se
+    (displayedGradePreliminary): preliminary while the capacity is not measured, else the
+    grade's own flag (few days). Before rule 3 only the grade's own flag, as in v0.57.0."""
+    return True if _capacity_preliminary(data) else own_flag
+
+
+def _comparison_grade_attrs(data: WoltaData) -> dict[str, Any]:
     """Attributes that describe the COMPARISON grade (holistic.score_on): its percentile and
     sample size, its period (betyg.period_start/period_end at the top level of the betyg
     block), its maturity, and the details of how it was computed (annual basis, measured
@@ -176,6 +193,7 @@ def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
     an attribute that describes a specific grade follows that grade, so these live on the
     comparison grade sensor always, and on the grade sensor only while it shows the
     comparison grade."""
+    results = data.results
     betyg = results.get("betyg") or {}
     peer = betyg.get("peer") or {}
     holistic = betyg.get("holistic") or {}
@@ -184,7 +202,7 @@ def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
         "peer_n": peer.get("n"),
         "period_start": betyg.get("period_start"),
         "period_end": betyg.get("period_end"),
-        "preliminary": betyg.get("preliminary"),
+        "preliminary": _grade_preliminary(data, betyg.get("preliminary")),
         "n_days": betyg.get("n_days"),
         "annual_basis": (betyg.get("annual") or {}).get("basis"),
         "measured_period_sek": holistic.get("measured_period_sek"),
@@ -208,7 +226,7 @@ def _grade_basis_attr(data: WoltaData) -> dict[str, Any]:
         return {
             "basis": "comparison",
             "on_own_values": False,
-            **_comparison_grade_attrs(data.results),
+            **_comparison_grade_attrs(data),
         }
     quantities = block.get("own_quantities")
     attrs: dict[str, Any] = {
@@ -222,7 +240,11 @@ def _grade_basis_attr(data: WoltaData) -> dict[str, Any]:
     attrs.update(
         period_start=block.get("period_start"),
         period_end=block.get("period_end"),
-        preliminary=block.get("preliminary"),
+        # The window carries its own maturity; an own-values grade follows the site's rule.
+        preliminary=(
+            _grade_preliminary(data, block.get("preliminary"))
+            if basis == "own" else block.get("preliminary")
+        ),
         n_days=block.get("n_days"),
     )
     return attrs
@@ -567,7 +589,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=lambda d: _comparison_available(d.results),
         attr_fn=lambda data: (
             {
-                **_comparison_grade_attrs(data.results),
+                **_comparison_grade_attrs(data),
                 **_comparison_attr(data.results),
             }
             if _comparison_available(data.results)
@@ -716,11 +738,13 @@ def _battery_attrs(q: str, *, percent: bool = False) -> Callable[[WoltaData], di
             "period_start": block.get("period_start"),
             "period_end": block.get("period_end"),
         }
+        # "measured" is the server's name for Wolta's own value next to the owner's: a
+        # measurement, the datasheet figure or an assumption (measured_state/_source say which).
         measured = block.get("measured")
         if block.get("state") == "owner" and isinstance(measured, dict):
             value = measured.get("value")
             if q == "capacity":
-                # The sensor's number is net, so Wolta's measured value is the net one too.
+                # The sensor's number is net, so Wolta's own value is the net one too.
                 value = (data.battery_params or {}).get("measured_dispatchable_kwh")
             elif percent:
                 value = _bp_pct(value)

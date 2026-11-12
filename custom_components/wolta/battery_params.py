@@ -19,6 +19,14 @@ def is_active(bp: dict | None) -> bool:
     return isinstance(bp, dict) and bp.get("active") is True
 
 
+def rule(bp: object) -> bool | None:
+    """Vad blocket säger om regeln: True/False när `active` är ett uttryckligt booleskt värde,
+    annars None (blocket saknas eller är missbildat och säger ingenting)."""
+    if isinstance(bp, dict) and isinstance(bp.get("active"), bool):
+        return bp["active"]
+    return None
+
+
 def quantity(bp: dict | None, q: str) -> dict | None:
     """Storhetens block, eller None när det saknas eller inte är en dict."""
     if not isinstance(bp, dict):

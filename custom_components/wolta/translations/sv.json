@@ -684,6 +684,10 @@
       "confirm_clear": {
         "title": "Ta bort dina egna värden?",
         "description": "{rows}"
+      },
+      "own_not_saved": {
+        "title": "Inte sparat som eget värde",
+        "description": "{rows}"
       }
     },
     "error": {

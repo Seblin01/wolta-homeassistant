@@ -684,6 +684,10 @@
       "confirm_clear": {
         "title": "Remove your own values?",
         "description": "{rows}"
+      },
+      "own_not_saved": {
+        "title": "Not saved as your own value",
+        "description": "{rows}"
       }
     },
     "error": {
