@@ -8836,6 +8836,17 @@ async def test_change_dated_value_no_confirm(hass: HomeAssistant) -> None:
     assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 15.0}}
 
 
+@pytest.mark.asyncio
+async def test_confirm_clear_without_pending_save_says_so(hass: HomeAssistant) -> None:
+    """Inget som väntar på bekräftelse är inget anslutningsfel."""
+    from custom_components.wolta.config_flow import WoltaOptionsFlow
+    flow = WoltaOptionsFlow()
+    flow.hass = hass
+    result = await flow.async_step_confirm_clear({})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "clear_expired"
+
+
 def test_clear_rows_two_quantities_en() -> None:
     from custom_components.wolta.config_flow import _clear_rows
     bp = _bp_with_timeline(_DATED)

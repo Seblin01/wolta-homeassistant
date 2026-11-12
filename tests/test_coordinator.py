@@ -1266,7 +1266,7 @@ BASE_PROFILE = {
 _RECENT_BOOKMARK = (NOW - timedelta(hours=1)).isoformat()
 
 
-async def _sync_refresh(hass, mock_entry, client, rows=None, built=None):
+async def _sync_refresh(hass, mock_entry, client, rows=None, built=None, prior_data=None):
     """Kör en refresh på incremental-vägen med kontrollerade rows."""
     empty = {k: [] for k in ("sensor.batt_in", "sensor.batt_out", "sensor.grid_in",
                              "sensor.grid_out", "sensor.solar")}
@@ -1284,6 +1284,8 @@ async def _sync_refresh(hass, mock_entry, client, rows=None, built=None):
                          "applied_invert": False,
                          "applied_entities": None})
         coordinator.diagnostics_built = built
+        if prior_data is not None:
+            coordinator.data = prior_data
         if rows is not None:
             coordinator._incremental_rows = AsyncMock(return_value=rows)
         result = await coordinator._async_update_data()
@@ -4297,11 +4299,16 @@ async def test_malformed_battery_params_is_none(hass: HomeAssistant, mock_entry)
     assert data.results["status"] == RESULTS_PAYLOAD["status"]
 
 
+def _bp_own_capacity(own):
+    return {**_BP, "capacity": {**_BP["capacity"], "own": own}}
+
+
 @pytest.mark.asyncio
-async def test_side_poll_refreshes_on_battery_params_change(hass: HomeAssistant, mock_entry):
+async def test_side_poll_refreshes_on_own_value_change(hass: HomeAssistant, mock_entry):
+    """Ett eget värde ändrat på wolta.se flyttar betyget: full refresh."""
     client = _mock_client()
     client.get_profile = AsyncMock(return_value={
-        **BASE_PROFILE, "battery_params": {**_BP, "dispatchable_kwh": 20.0}})
+        **BASE_PROFILE, "battery_params": _bp_own_capacity(22.0)})
     coordinator = await _side_poll_coordinator(hass, mock_entry, client)
     with _patch_entry_updates(hass, mock_entry):
         await coordinator.async_check_profile_sync()
@@ -4309,9 +4316,36 @@ async def test_side_poll_refreshes_on_battery_params_change(hass: HomeAssistant,
         await coordinator.async_check_profile_sync()   # oförändrad: ingen refresh
         coordinator.async_request_refresh.assert_not_awaited()
         client.get_profile = AsyncMock(return_value={
-            **BASE_PROFILE, "battery_params": {**_BP, "dispatchable_kwh": 22.0}})
+            **BASE_PROFILE, "battery_params": _bp_own_capacity(24.0)})
         await coordinator.async_check_profile_sync()
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_side_poll_measured_change_updates_sensors_without_refresh(
+        hass: HomeAssistant, mock_entry):
+    """Uppmätta värden och perioder flyttar sig efter varje omräkning: sensorerna får det
+    nya blocket direkt, men ingen hel uppladdningscykel körs för det."""
+    from custom_components.wolta.coordinator import WoltaData
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _BP})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    coordinator.data = WoltaData(results={}, last_uploaded=None, n_days=0, pending=False,
+                                 battery_params=_BP)
+    listener = MagicMock()
+    coordinator.async_add_listener(listener)
+    with _patch_entry_updates(hass, mock_entry):
+        await coordinator.async_check_profile_sync()
+        coordinator.async_request_refresh.reset_mock()
+        listener.reset_mock()
+        moved = {**_BP, "dispatchable_kwh": 22.0,
+                 "capacity": {**_BP["capacity"],
+                              "measured": {"value": 21.5, "state": "measured", "source": "soc"}}}
+        client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": moved})
+        await coordinator.async_check_profile_sync()
+    coordinator.async_request_refresh.assert_not_awaited()
+    assert coordinator.data.battery_params == moved
+    listener.assert_called()
 
 
 @pytest.mark.asyncio
@@ -4326,6 +4360,22 @@ async def test_active_mirrored_to_entry_data(hass: HomeAssistant, mock_entry):
             **BASE_PROFILE, "battery_params": {**_BP, "active": False}})
         await coordinator.async_check_profile_sync()
     assert "battery_params_active" not in coordinator.config_entry.data
+
+
+@pytest.mark.asyncio
+async def test_missing_battery_params_keeps_active_flag(hass: HomeAssistant, mock_entry):
+    """Ett profilsvar utan blocket säger inget om regeln: flaggan står kvar. Annars kunde en
+    återskapad profil skicka de cachade mätvärdena som ägarens egna."""
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _BP})
+    coordinator = await _side_poll_coordinator(hass, mock_entry, client)
+    with _patch_entry_updates(hass, mock_entry):
+        await coordinator.async_check_profile_sync()
+        client.get_profile = AsyncMock(return_value=dict(BASE_PROFILE))
+        await coordinator.async_check_profile_sync()
+        client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": "x"})
+        await coordinator.async_check_profile_sync()
+    assert coordinator.config_entry.data["battery_params_active"] is True
 
 
 @pytest.mark.asyncio
@@ -7347,6 +7397,24 @@ async def test_reload_when_active_flips_on_in_main_cycle(hass: HomeAssistant, mo
     reload.assert_called_once_with(mock_entry.entry_id)
 
 
+@pytest.mark.asyncio
+async def test_main_cycle_stops_after_scheduling_reload(hass: HomeAssistant, mock_entry):
+    """Omladdningen bygger om koordinatorn och kör en egen cykel: den gamla laddar inte upp
+    och hämtar inga resultat, utan lämnar tillbaka det den redan har."""
+    from custom_components.wolta.coordinator import WoltaData
+    prior = WoltaData(results={"status": "done"}, last_uploaded=None, n_days=0, pending=False)
+    client = _mock_client()
+    client.get_profile = AsyncMock(return_value={**BASE_PROFILE, "battery_params": _bp(True)})
+    with _patch_entry_updates(hass, mock_entry), patch.object(
+            hass.config_entries, "async_schedule_reload") as reload:
+        _, result = await _sync_refresh(
+            hass, mock_entry, client, built=False, prior_data=prior)
+    reload.assert_called_once_with(mock_entry.entry_id)
+    assert result is prior
+    client.results.assert_not_awaited()
+    client.put_data.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Regel 3: inga adopt-reparationer, märkeffekt efterfrågas
 # ---------------------------------------------------------------------------
@@ -7454,9 +7522,11 @@ async def test_nameplate_repair_stays_gone_in_fast_poll(hass, mock_entry):
 async def test_take_battery_params_reports_nameplate_change_under_active(hass, mock_entry):
     c = await _cap_coordinator(hass, mock_entry)
     blk = {"active": True, "x": 1}
-    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) is True
-    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) is False
-    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": 5.0}) is True
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) == "refresh"
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": None}) is None
+    assert c._take_battery_params({"battery_params": blk, "nameplate_kw": 5.0}) == "refresh"
+    assert c._take_battery_params(
+        {"battery_params": {**blk, "x": 2}, "nameplate_kw": 5.0}) == "display"
 
 
 @pytest.mark.asyncio

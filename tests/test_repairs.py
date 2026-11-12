@@ -1397,7 +1397,7 @@ async def test_adopt_repair_aborts_under_own_values(hass: HomeAssistant, flow_cl
     from homeassistant.helpers import issue_registry as ir
     from custom_components.wolta.const import DOMAIN
     entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
-    coordinator._battery_params = {"active": True}
+    coordinator.data.battery_params = {"active": True}
     ir.async_create_issue(
         hass, DOMAIN, f"{prefix}_e1", is_fixable=True,
         severity=ir.IssueSeverity.WARNING, translation_key=prefix)
