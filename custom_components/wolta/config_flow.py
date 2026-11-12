@@ -659,9 +659,12 @@ _CLEAR_QUANTITY = {
 }
 _CLEAR_VALUE_WORDS = {
     "sv": {"measured": "det uppmätta värdet", "datasheet": "databladets värde",
-           "assumed": "ett antaget värde", None: "inget värde"},
+           "assumed": "ett antaget värde",
+           "previous_stage": "mätningen före batteriets senaste ändring", None: "inget värde"},
     "en": {"measured": "the measured value", "datasheet": "the datasheet value",
-           "assumed": "an assumed value", None: "no value"},
+           "assumed": "an assumed value",
+           "previous_stage": "the measurement from before the battery's latest change",
+           None: "no value"},
 }
 
 
@@ -687,14 +690,17 @@ _OWN_EQUAL_TOL = 0.005
 _OWN_EQUAL_TOL_EFF = 0.0005
 _SAME_VALUE_WORDS = {
     "sv": {"measured": "Woltas uppmätta värde", "datasheet": "databladets värde",
-           "assumed": "det antagna värdet", None: "Woltas värde"},
+           "assumed": "det antagna värdet",
+           "previous_stage": "mätningen före batteriets senaste ändring", None: "Woltas värde"},
     "en": {"measured": "Wolta's measured value", "datasheet": "the datasheet value",
-           "assumed": "the assumed value", None: "Wolta's value"},
+           "assumed": "the assumed value",
+           "previous_stage": "the measurement from before the battery's latest change",
+           None: "Wolta's value"},
 }
 
 
 def _same_as_wolta(bp: dict | None, q: str, value: float) -> str | None:
-    """Slaget av Woltas värde ("measured", "datasheet", "assumed") när ägarens värde är lika
+    """Slaget av Woltas värde (`wolta_value_kind`) när ägarens värde är lika
     med det och servern därför inte lagrar det, annars None. Speglar webbens sameAsWoltaNote:
     den uppmätta vyns värde vilken källa det än har, kapaciteten net mot net.
 

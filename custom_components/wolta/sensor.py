@@ -170,8 +170,9 @@ def _comparison_available(results: dict) -> bool:
 
 def _capacity_preliminary(data: WoltaData) -> bool:
     """The capacity the grade rests on is not measured yet (battery_params.capacity.state ==
-    "preliminary": the datasheet's figure, or the previous stage's after an expansion). Read
-    only while the server runs rule 3, as on wolta.se (ownGradePreliminary)."""
+    "preliminary": the datasheet's figure, or the measurement from before the battery's latest
+    change, until the battery is measured again). Read only while the server runs rule 3, as on
+    wolta.se (ownGradePreliminary)."""
     if not is_active(data.battery_params):
         return False
     capacity = quantity(data.battery_params, "capacity")

@@ -10,8 +10,13 @@ from __future__ import annotations
 
 QUANTITIES: tuple[str, ...] = ("capacity", "power", "eff", "reserve")
 
-# Samma mängd som webbens MEASURED_SOURCES: källor som är en mätning, inte ett antagande.
-MEASURED_SOURCES = frozenset({"soc", "flows", "source_reported", "previous_stage"})
+# Källor där Woltas värde är en mätning av batteriet som det är i dag.
+MEASURED_SOURCES = frozenset({"soc", "flows", "source_reported"})
+
+# Förra epokens mätning, buren över en etapp (api simulate/battery_params.py CARRIED_SOURCE,
+# tillståndet "preliminary"). Etappen kan vara en utbyggnad eller ett byte, inlagd av ägaren
+# eller upptäckt, så den beskrivs som "före batteriets senaste ändring" och kallas aldrig uppmätt.
+CARRIED_SOURCE = "previous_stage"
 
 
 def is_active(bp: dict | None) -> bool:
@@ -59,8 +64,12 @@ def has_dated_own_rows(bp: dict | None, q: str) -> bool:
 
 
 def wolta_value_kind(bp: dict | None, q: str) -> str | None:
-    """Vad Woltas eget (uppmätta) värde bygger på: "measured", "datasheet", "assumed" eller
-    None. Speglar webbens woltaValueKind/hasMeasurement."""
+    """Vad Woltas eget värde bygger på: "measured", "previous_stage" (mätningen före batteriets
+    senaste ändring), "datasheet", "assumed" eller None.
+
+    Ett antagande går före tillståndet: servern ger verkningsgraden 0,9 och reserven 0 % källan
+    "assumed" med tillståndet "datasheet" när Wolta inte kan mäta dem, och de är inget
+    databladsvärde."""
     block = quantity(bp, q)
     measured = block.get("measured") if block is not None else None
     if not isinstance(measured, dict):
@@ -69,10 +78,12 @@ def wolta_value_kind(bp: dict | None, q: str) -> str | None:
     source = measured.get("source")
     if state == "missing" or measured.get("value") is None:
         return None
+    if source == CARRIED_SOURCE:
+        return "previous_stage"
     if source in MEASURED_SOURCES:
         return "measured"
-    if state == "datasheet" or source == "datasheet":
-        return "datasheet"
     if source == "assumed":
         return "assumed"
+    if state == "datasheet" or source == "datasheet":
+        return "datasheet"
     return None

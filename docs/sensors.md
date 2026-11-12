@@ -33,7 +33,7 @@ When Wolta uses the own-values rule, the integration adds four diagnostic sensor
 | `sensor.wolta_round_trip_efficiency` | % | Round-trip efficiency, one decimal | yes |
 | `sensor.wolta_reserve` | % | The reserve in use, yours or Wolta's | no |
 
-Attributes on all four: `state` and `source` (where the value comes from, as the codes in the tables below), `period_start` and `period_end`. When `state` is `owner`, the attributes `measured_value`, `measured_state` and `measured_source` give Wolta's own value for the same quantity, the one Wolta would use without yours (efficiency in %). Despite the name it is not always a measurement: `measured_state` and `measured_source` say whether it is measured, a datasheet value or an assumption, with the same codes. On the capacity sensor `measured_value` is the usable capacity, and `measured_gross_kwh` is Wolta's capacity before the reserve, when Wolta reports it that way. If a value is missing, the sensor shows `unknown` and keeps its attributes; it is `unavailable` only when the server sent no battery values at all.
+Attributes on all four: `state` and `source` (where the value comes from, as the codes in the tables below), `period_start` and `period_end`. When `state` is `owner`, the attributes `measured_value`, `measured_state` and `measured_source` give Wolta's own value for the same quantity, the one Wolta would use without yours (efficiency in %). Despite the name it is not always a measurement of the battery as it is today: `measured_state` and `measured_source` say whether it is measured, the measurement from before the battery's latest change, a datasheet value or an assumption, with the same codes. On the capacity sensor `measured_value` is the usable capacity, and `measured_gross_kwh` is Wolta's capacity before the reserve, when Wolta reports it that way. If a value is missing, the sensor shows `unknown` and keeps its attributes; it is `unavailable` only when the server sent no battery values at all.
 
 The codes are shown as the server sends them, in English, and are not translated; an unknown code is passed through unchanged.
 
@@ -41,7 +41,7 @@ The codes are shown as the server sends them, in English, and are not translated
 |----------------------------|---------|
 | `owner` | Your own value. |
 | `measured` | Wolta has measured the quantity from your data. |
-| `preliminary` | Not measured yet: the value is a stand-in (see `source`) until the measurement is ready. A grade that rests on a preliminary capacity is marked `preliminary` too. |
+| `preliminary` | Not measured yet, or not since the battery's latest change: the value is a stand-in (see `source`) until the measurement is ready. A grade that rests on a preliminary capacity is marked `preliminary` too. |
 | `datasheet` | Wolta cannot measure the quantity on this plant: the value is the nameplate figure you gave, or an assumption (see `source`). |
 | `missing` | Wolta has no value. The sensor shows `unknown`. |
 
@@ -51,7 +51,7 @@ The codes are shown as the server sends them, in English, and are not translated
 | `soc` | Measured from the state-of-charge sensor. |
 | `flows` | Measured from the battery's charge and discharge energy. |
 | `source_reported` | Reported by the battery system itself (plants connected directly to Wolta). |
-| `previous_stage` | The measurement from before a detected expansion of the battery, used until the new size is measured. |
+| `previous_stage` | The measurement from before the battery's latest change (an expansion or a replacement, entered by you or detected by Wolta). It applies until the battery has been measured again, so `state` is `preliminary`. Used only when there is no datasheet figure for the capacity; power and efficiency use it either way. |
 | `datasheet` | The nameplate figure. |
 | `assumed` | An assumption: 90 % round-trip efficiency, 0 % reserve. |
 
