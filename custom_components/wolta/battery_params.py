@@ -33,6 +33,12 @@ def own_value(bp: dict | None, q: str) -> float | None:
     return block.get("own") if block is not None else None
 
 
+def own_values(bp: dict | None) -> tuple[float | None, ...]:
+    """Ägarens egna värden i QUANTITIES-ordning: det som flyttar betyget. Uppmätta värden och
+    perioder ingår inte, de rör sig efter varje omräkning."""
+    return tuple(own_value(bp, q) for q in QUANTITIES)
+
+
 def has_dated_own_rows(bp: dict | None, q: str) -> bool:
     """Har storhetens egna tidslinje någon rad med `valid_from` satt?"""
     if not isinstance(bp, dict):

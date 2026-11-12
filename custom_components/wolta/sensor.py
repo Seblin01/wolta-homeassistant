@@ -728,7 +728,6 @@ def _battery_attrs(q: str, *, percent: bool = False) -> Callable[[WoltaData], di
             out["measured_state"] = measured.get("state")
             out["measured_source"] = measured.get("source")
         if q == "capacity":
-            measured = block.get("measured")
             if (
                 isinstance(measured, dict)
                 and measured.get("basis") == "gross"

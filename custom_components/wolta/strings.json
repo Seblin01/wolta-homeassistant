@@ -711,7 +711,8 @@
       "direction_changed": "The battery direction changed while this dialog was open. Open Battery direction again.",
       "direction_period_changed": "The stored period changed while this dialog was open. Open Battery direction again.",
       "results_not_loaded": "Wolta has not loaded your grade since Home Assistant started. Try again in a few minutes.",
-      "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes."
+      "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes.",
+      "clear_expired": "Nothing is waiting to be confirmed any more. Open Settings again."
     }
   },
   "selector": {

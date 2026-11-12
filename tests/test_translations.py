@@ -1024,7 +1024,6 @@ def test_every_direction_confirmation_names_a_period_or_says_nothing_stored_chan
     assert _load(path)["options"]["abort"]["direction_changed"]
     assert _load(path)["options"]["abort"]["direction_period_unknown"]
     assert _load(path)["options"]["abort"]["direction_period_changed"]
-    assert _load(path)["options"]["abort"]["clear_expired"]
 
 
 def test_swedish_direction_confirmation_is_the_agreed_copy() -> None:
@@ -1148,3 +1147,9 @@ def test_own_values_field_texts(lang: str) -> None:
         assert "both your grade and the comparison" in dd["own_reserve_pct"]
     assert set(sec["data"]) == {"own_capacity_kwh", "own_power_kw", "own_eff_pct",
                                 "own_reserve_pct"}
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_confirm_clear_has_its_own_abort(path: Path) -> None:
+    """A confirm step with nothing pending is not a connection problem."""
+    assert _load(path)["options"]["abort"]["clear_expired"]

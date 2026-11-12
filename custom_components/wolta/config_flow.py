@@ -2586,9 +2586,7 @@ class WoltaOptionsFlow(OptionsFlow):
         den går hela sparningen ut som en PATCH; stängs dialogen skickas inget."""
         pending = self._pending_save
         if pending is None:
-            return self.async_abort(reason="cannot_connect")
-        errors: dict[str, str] = {}
-        server_detail = ""
+            return self.async_abort(reason="clear_expired")
         if user_input is not None:
             result, errors, server_detail = await self._finish_save(**pending)
             if result is not None:
@@ -2599,15 +2597,14 @@ class WoltaOptionsFlow(OptionsFlow):
             self._pending_save = None
             self._reshow = (errors, server_detail, self._pending_input or {})
             return await self.async_step_settings()
+        # Inga fel här: en nekad PATCH går alltid tillbaka till formuläret (ovan).
         return self.async_show_form(
             step_id="confirm_clear",
             data_schema=vol.Schema({}),
-            errors=errors,
             description_placeholders={
                 "rows": _clear_rows(
                     self.hass.config.language, self._pending_clear,
                     self._server.get("battery_params") if self._server else None),
-                "server_detail": server_detail,
             },
         )
 

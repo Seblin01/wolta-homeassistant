@@ -86,7 +86,7 @@ from .const import (
 )
 from . import stats
 from . import coverage
-from .battery_params import is_active as battery_params_active
+from .battery_params import is_active as battery_params_active, own_values
 from .control_system_prefill import control_system_name_error
 from .price_coordinator import WoltaPriceCoordinator
 from . import intervals
@@ -2592,15 +2592,20 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             elif new_data.get(key) != server_val:
                 new_data[key] = server_val
                 changed = True
-        # Spegla serverns "egna värden aktiva" (regel 3). Saknas blocket eller är det inte
-        # aktivt tas nyckeln bort, så v0.57.0-beteendet gäller exakt.
-        if battery_params_active(profile.get("battery_params")):
-            if new_data.get(CONF_BATTERY_PARAMS_ACTIVE) is not True:
-                new_data[CONF_BATTERY_PARAMS_ACTIVE] = True
+        # Spegla serverns "egna värden aktiva" (regel 3). Bara ett block som faktiskt kom
+        # ändrar flaggan: ett svar utan blocket (eller med ett missbildat) säger inget om
+        # regeln, och en tappad flagga skulle låta en återskapad profil skicka de cachade
+        # mätvärdena som ägarens egna. Servern före bytet skickar inget block, så flaggan
+        # sätts aldrig där och v0.57.0-beteendet gäller exakt.
+        block = profile.get("battery_params")
+        if isinstance(block, dict):
+            if battery_params_active(block):
+                if new_data.get(CONF_BATTERY_PARAMS_ACTIVE) is not True:
+                    new_data[CONF_BATTERY_PARAMS_ACTIVE] = True
+                    changed = True
+            elif CONF_BATTERY_PARAMS_ACTIVE in new_data:
+                new_data.pop(CONF_BATTERY_PARAMS_ACTIVE)
                 changed = True
-        elif CONF_BATTERY_PARAMS_ACTIVE in new_data:
-            new_data.pop(CONF_BATTERY_PARAMS_ACTIVE)
-            changed = True
         if not changed:
             return False
         zone = new_data.get(CONF_ZONE, self._zone)
@@ -2640,23 +2645,41 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._detect_min_days = min_days
         self._evaluate_battery_pending()
 
-    def _take_battery_params(self, profile: dict) -> bool:
+    def _take_battery_params(self, profile: dict) -> str | None:
         """Keep the server's battery_params block (and nameplate_kw) off a profile GET.
 
         Called from BOTH polls, inside the same guard as _take_battery_state. A missing or
-        non-dict block is stored as None. Returns True when the side poll should refresh:
-        `active` itself flipped, or - only while active - the block or nameplate_kw changed.
-        Before the switch v0.57.0 never refreshed for this block, and neither do we."""
+        non-dict block is stored as None. Returns what the side poll should do:
+        "refresh" when `active` itself flipped, or - only while active - an own value or
+        nameplate_kw changed (that moves the grade); "display" when only the rest of the
+        block moved under active (measured values and periods move after every recompute,
+        and a full upload cycle for that would be wasted - the diagnostic sensors just need
+        the new block); None otherwise. Before the switch v0.57.0 never refreshed for this
+        block, and neither do we."""
         block = profile.get("battery_params")
         new = block if isinstance(block, dict) else None
-        was_active = battery_params_active(self._battery_params)
+        old = self._battery_params
+        was_active = battery_params_active(old)
         now_active = battery_params_active(new)
         nameplate = profile.get("nameplate_kw")
-        changed = was_active != now_active or (
-            now_active and (new != self._battery_params or nameplate != self._nameplate_kw))
+        kind: str | None = None
+        if was_active != now_active or (now_active and (
+                own_values(new) != own_values(old) or nameplate != self._nameplate_kw)):
+            kind = "refresh"
+        elif now_active and new != old:
+            kind = "display"
         self._battery_params = new
         self._nameplate_kw = nameplate
-        return changed
+        return kind
+
+    def _push_battery_params(self) -> None:
+        """Hand the latest battery_params block to the entities without a refresh cycle.
+        async_update_listeners, not async_set_updated_data: the latter reschedules the
+        refresh timer, and a side poll doing it would keep pushing the 6 h main cycle back."""
+        if self.data is None:
+            return
+        self.data = replace(self.data, battery_params=self._battery_params)
+        self.async_update_listeners()
 
     def set_nameplate_kw(self, value: float | None) -> None:
         """Set the nameplate power locally after a successful PATCH (repair flow): the fast
@@ -2718,10 +2741,12 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             previous_status = self._battery_status
             self._take_battery_state(profile)
             battery_changed = self._battery_status != previous_status
-            params_changed = self._take_battery_params(profile)
+            params_kind = self._take_battery_params(profile)
             reload_scheduled = self._check_rule_switch()
             # En omladdning som just schemalagts bygger om allt: ingen refresh på den gamla.
-            battery_changed = battery_changed or params_changed
+            battery_changed = battery_changed or params_kind == "refresh"
+            if params_kind == "display" and not reload_scheduled:
+                self._push_battery_params()
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
             battery_changed = False
@@ -2739,6 +2764,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # Skipped during fast-poll (60 s while a server job runs) – nothing
             # profile-related changes on that timescale and it saves a GET per tick.
             profile_payload: dict | None = None
+            reload_scheduled = False
             if self.update_interval != _FAST_POLL:
                 try:
                     profile = await self.client.get_profile(self.token)
@@ -2759,9 +2785,14 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
                     try:
                         self._take_battery_params(profile)
-                        self._check_rule_switch()
+                        reload_scheduled = self._check_rule_switch()
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug("Malformed battery_params in main cycle; ignoring", exc_info=True)
+
+            if reload_scheduled and self.data is not None:
+                # Omladdningen bygger en ny koordinator som kör en egen cykel: ingen
+                # uppladdning eller resultathämtning på den här, som ändå rivs.
+                return self.data
 
             # Copies of this plant (server spec "copies of your plant" §8): the main cycle only,
             # not the fast poll - copies are rare and already counted once on the server.

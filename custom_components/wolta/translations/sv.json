@@ -711,7 +711,8 @@
       "direction_changed": "Batteriets riktning ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
       "direction_period_changed": "Den lagrade perioden ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
       "results_not_loaded": "Wolta har inte hämtat ditt betyg sedan Home Assistant startade. Försök igen om några minuter.",
-      "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter."
+      "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter.",
+      "clear_expired": "Det finns inget kvar att bekräfta. Öppna Inställningar igen."
     }
   },
   "selector": {

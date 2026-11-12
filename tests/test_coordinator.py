@@ -4332,12 +4332,11 @@ async def test_side_poll_measured_change_updates_sensors_without_refresh(
     coordinator = await _side_poll_coordinator(hass, mock_entry, client)
     coordinator.data = WoltaData(results={}, last_uploaded=None, n_days=0, pending=False,
                                  battery_params=_BP)
-    listener = MagicMock()
-    coordinator.async_add_listener(listener)
+    coordinator.async_update_listeners = MagicMock()
     with _patch_entry_updates(hass, mock_entry):
         await coordinator.async_check_profile_sync()
         coordinator.async_request_refresh.reset_mock()
-        listener.reset_mock()
+        coordinator.async_update_listeners.reset_mock()
         moved = {**_BP, "dispatchable_kwh": 22.0,
                  "capacity": {**_BP["capacity"],
                               "measured": {"value": 21.5, "state": "measured", "source": "soc"}}}
@@ -4345,7 +4344,7 @@ async def test_side_poll_measured_change_updates_sensors_without_refresh(
         await coordinator.async_check_profile_sync()
     coordinator.async_request_refresh.assert_not_awaited()
     assert coordinator.data.battery_params == moved
-    listener.assert_called()
+    coordinator.async_update_listeners.assert_called_once()
 
 
 @pytest.mark.asyncio

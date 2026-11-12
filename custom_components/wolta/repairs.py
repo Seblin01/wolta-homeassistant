@@ -149,7 +149,7 @@ class _AdoptRepairFlow(RepairsFlow):
         # mismatch can surface again.
         new_data.pop(self._ignore_key, None)
         coordinator = self._entry.runtime_data
-        if battery_params_active(getattr(coordinator, "_battery_params", None)):
+        if battery_params_active(getattr(coordinator.data, "battery_params", None)):
             # Regel 3: värdena hanteras som egna värden i Konfigurera; adopt-förslaget
             # (som även nollar reserven) får inte skickas.
             ir.async_delete_issue(
