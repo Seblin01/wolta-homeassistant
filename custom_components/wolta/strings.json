@@ -50,6 +50,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -78,6 +79,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -100,6 +102,7 @@
           }
         },
         "abort": {
+          "own_values_active": "These values are now handled as your own values under Configure, so this offer has been removed.",
           "entry_not_found": "The Wolta integration this repair belonged to has been removed."
         }
       }
@@ -343,6 +346,27 @@
     "battery_direction_refused": {
       "title": "Wolta: charging and discharging were not swapped",
       "description": "You changed the battery direction, but the battery's state of charge shows that the stored direction is right: it matched on {ok_days} days and was reversed on {reversed_days}, as of {as_of}. Wolta therefore stopped the change, and the setting now matches the stored history again. What had already been swapped stays swapped. If you know the state-of-charge sensor is wrong, you can make the change anyway under Configure → Battery direction."
+    },
+    "nameplate_power": {
+      "title": "Wolta needs your battery's nameplate power",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Your battery's nameplate power",
+            "description": "Wolta is missing your battery's nameplate power (märkeffekt), the maximum charge and discharge power on its rating plate. Enter it in kW.",
+            "data": {
+              "nameplate_kw": "Nameplate power (kW)"
+            },
+            "data_description": {
+              "nameplate_kw": "The power the manufacturer states for the battery or its inverter."
+            }
+          }
+        },
+        "abort": {
+          "failed": "The answer could not be saved at Wolta right now. Try again later.",
+          "entry_not_found": "The Wolta integration this repair belonged to has been removed."
+        }
+      }
     }
   },
   "config": {
@@ -548,9 +572,24 @@
               "battery_kwh": "Usable capacity — the kWh the battery actually delivers on a full discharge, **as its own sensors measure it** – leave empty while Wolta is measuring. This is less than the nameplate rating. If the battery sensors measure on the AC side, it is also less than the energy your battery app shows at 100 % SoC (that's the DC/cell figure), because the inverter loses energy converting to and from the battery. The grade compares you against a perfect controller on YOUR hardware, so use the usable value — not nameplate — to keep the comparison fair. Batteries with a reserve/SoC floor (e.g. Emaldo) deliver even less. With a few months of history, Wolta measures this for you and can suggest the value via a Repair.",
               "nameplate_kwh": "The manufacturer-rated capacity (e.g. sonnen 10p/22 = 22 kWh nameplate / 20 kWh usable). Used by the expansion calculator on wolta.se so per-kWh prices (quoted per nameplate kWh) are compared fairly against what the battery actually delivers. Leave empty if your battery is marketed by usable capacity (e.g. Tesla Powerwall).",
               "battery_kw": "Maximum charge/discharge power in kW – leave empty while Wolta is measuring.",
-              "nameplate_kw": "The manufacturer-rated power (e.g. 8 kW). The model uses the deliverable power above; the rated figure lets wolta.se explain the difference when the measured power is lower (e.g. inverter losses, derating). Leave empty if your battery is marketed by deliverable power.",
+              "nameplate_kw": "The manufacturer's rated power (e.g. 8 kW). Wolta uses it to explain a lower measured power, and as the battery's power when nothing has been measured.",
               "eff": "Round-trip efficiency (0.5–1.0) where your battery sensors measure: on a hybrid inverter often the battery's DC side, on an AC-coupled battery the AC side. Prefilled with the value stored at Wolta. Changing plant values triggers a server-side regrade.",
               "reserve_pct": "The share of usable capacity your control system never discharges below (e.g. backup reserve). The grade benchmark then plays with the same window you do. Enter usable capacity above — the reserve is subtracted here, don't subtract it twice. Clear the field to remove the reserve."
+            }
+          },
+          "own_values": {
+            "name": "Your own values (optional)",
+            "data": {
+              "own_capacity_kwh": "Your capacity (kWh)",
+              "own_power_kw": "Your power (kW)",
+              "own_eff_pct": "Your round-trip efficiency (%)",
+              "own_reserve_pct": "Your reserve (%)"
+            },
+            "data_description": {
+              "own_capacity_kwh": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison. Enter the capacity after the reserve, that is, what the battery can actually use.",
+              "own_power_kw": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison.",
+              "own_eff_pct": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, not the comparison.",
+              "own_reserve_pct": "Leave empty and Wolta uses the measured reserve. Your reserve applies to both your grade and the comparison."
             }
           },
           "economy": {
@@ -641,6 +680,14 @@
         "data": {
           "zone": "Electricity price zone"
         }
+      },
+      "confirm_clear": {
+        "title": "Remove your own values?",
+        "description": "{rows}"
+      },
+      "own_not_saved": {
+        "title": "Not saved as your own value",
+        "description": "{rows}"
       }
     },
     "error": {
@@ -668,7 +715,8 @@
       "direction_changed": "The battery direction changed while this dialog was open. Open Battery direction again.",
       "direction_period_changed": "The stored period changed while this dialog was open. Open Battery direction again.",
       "results_not_loaded": "Wolta has not loaded your grade since Home Assistant started. Try again in a few minutes.",
-      "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes."
+      "direction_period_unknown": "Wolta has not yet read which period it holds data for. Try again in a few minutes.",
+      "clear_expired": "Nothing is waiting to be confirmed any more. Open Settings again."
     }
   },
   "selector": {
@@ -702,10 +750,35 @@
         }
       },
       "optimeringsbetyg": {
-        "name": "Optimisation grade"
+        "name": "Optimisation grade",
+        "state_attributes": {
+          "basis": {
+            "name": "Grade basis"
+          },
+          "on_own_values": {
+            "name": "Uses your own values"
+          },
+          "in_comparison": {
+            "name": "In the comparison"
+          },
+          "comparison_reasons": {
+            "name": "Reasons"
+          },
+          "measured_score": {
+            "name": "Grade on Wolta's measured values"
+          }
+        }
       },
       "jamforelsebetyg": {
-        "name": "Comparison grade"
+        "name": "Comparison grade",
+        "state_attributes": {
+          "in_comparison": {
+            "name": "In the comparison"
+          },
+          "comparison_reasons": {
+            "name": "Reasons"
+          }
+        }
       },
       "batterivarde_ar": {
         "name": "Battery value per year"
@@ -742,6 +815,41 @@
       },
       "sale_price_with_forecast": {
         "name": "Sale price with forecast"
+      },
+      "battery_capacity": {
+        "name": "Battery capacity",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          },
+          "measured_gross_kwh": {
+            "name": "Measured capacity before reserve"
+          }
+        }
+      },
+      "battery_power": {
+        "name": "Battery power",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
+      },
+      "battery_efficiency": {
+        "name": "Round-trip efficiency",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
+      },
+      "battery_reserve": {
+        "name": "Reserve",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Wolta's measured value"
+          }
+        }
       }
     },
     "button": {

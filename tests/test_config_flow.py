@@ -27,6 +27,7 @@ from custom_components.wolta.const import (
     CONF_BATT_OUT,
     CONF_BATTERY_KW,
     CONF_BATTERY_KWH,
+    CONF_BATTERY_PARAMS_ACTIVE,
     CONF_COST_SEK,
     CONF_EFF,
     CONF_EXPORT_EXTRA_ORE,
@@ -783,6 +784,52 @@ async def test_reauth_flow_updates_token(hass: HomeAssistant) -> None:
     assert updated_entry.data[CONF_TOKEN] == new_token
     # Other data must be intact
     assert updated_entry.data[CONF_ZONE] == ZONE
+
+
+async def _reauth_recreate_kwargs(hass: HomeAssistant, extra: dict[str, Any]) -> dict[str, Any]:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    data: dict[str, Any] = {
+        CONF_TOKEN: "dead-token", CONF_ZONE: ZONE,
+        CONF_BATTERY_KWH: 15.36, CONF_BATTERY_KW: 5.0, CONF_EFF: 0.9,
+        CONF_RESERVE_PCT: 10.0, **extra,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=data, source=config_entries.SOURCE_USER,
+                            unique_id="reauth-recreate-active")
+    entry.add_to_hass(hass)
+    mock_client = _mock_client("new-token-xyz")
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=data)
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    assert result["reason"] == "reauth_successful"
+    return mock_client.create_profile.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_recreate_declared_when_active(hass: HomeAssistant) -> None:
+    """Regel 3: en återskapad profil deklareras utan batterivärden, så servern mäter igen."""
+    kwargs = await _reauth_recreate_kwargs(hass, {CONF_BATTERY_PARAMS_ACTIVE: True})
+    assert kwargs["battery_declared"] is True
+    assert kwargs["battery_kwh"] is None
+    assert kwargs["battery_kw"] is None
+    assert kwargs["eff"] is None
+    assert kwargs["reserve_pct"] is None
+
+
+@pytest.mark.asyncio
+async def test_recreate_unchanged_without_flag(hass: HomeAssistant) -> None:
+    """Utan flaggan återskapas profilen som i v0.57.0."""
+    kwargs = await _reauth_recreate_kwargs(hass, {})
+    assert kwargs["battery_declared"] is False
+    assert kwargs["battery_kwh"] == 15.36
+    assert kwargs["battery_kw"] == 5.0
+    assert kwargs["eff"] == 0.9
+    assert kwargs["reserve_pct"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -8480,3 +8527,587 @@ async def test_settings_vat_mode_flip_across_reshow(hass: HomeAssistant) -> None
     assert kwargs[CONF_GRID_VAR_ORE] == 40.0
     assert CONF_SURCHARGE_ORE not in kwargs
     assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_PRICES_INCL_VAT] is True
+
+
+# ---------------------------------------------------------------------------
+# Egna batterivärden (spec 2026-11-11 §4.1-4.3): märkdata + valfria egna värden när
+# servern kör regel 3 (battery_params.active).
+# ---------------------------------------------------------------------------
+
+_OWN_KEYS = ("own_capacity_kwh", "own_power_kw", "own_eff_pct", "own_reserve_pct")
+
+
+def _active_bp(**own):
+    """battery_params-block med active och ev. egna värden (capacity/power/eff/reserve)."""
+    bp = {"active": True}
+    for q in ("capacity", "power", "eff", "reserve"):
+        bp[q] = {"value": 1.0, "own": own.get(q)}
+    bp["own_timeline"] = {}
+    return bp
+
+
+def _opts_active(own=None, **battery):
+    return {"battery": dict(battery), "own_values": dict(own or {}),
+            "economy": {}, "tariffs": {}}
+
+
+async def _open_settings(hass, entry, client):
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+
+
+async def _save_active(hass, entry, bp, user_input, *, coordinator_bp=None):
+    mock_client, mock_coordinator = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=bp))
+    if coordinator_bp is not None:
+        mock_coordinator.data = {"battery_params": coordinator_bp}
+        mock_coordinator.battery_params = coordinator_bp
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input)
+    return result, mock_client
+
+
+def _sections(result):
+    return {k.schema: v for k, v in result["data_schema"].schema.items()}
+
+
+def _fields(sec):
+    return {k.schema: k for k in sec.schema.schema}
+
+
+@pytest.mark.asyncio
+async def test_inactive_keeps_old_form(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    result = await _open_settings(hass, entry, mock_client)
+    secs = _sections(result)
+    assert "own_values" not in secs
+    fields = _fields(secs["battery"])
+    assert set(fields) == {CONF_BATTERY_KWH, "nameplate_kwh", CONF_BATTERY_KW,
+                           "nameplate_kw", CONF_EFF, CONF_RESERVE_PCT}
+    assert isinstance(fields[CONF_BATTERY_KWH], vol.Required)
+    # active uttryckligen falskt: samma form
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params={"active": False}))
+    result = await _open_settings(hass, entry, mock_client)
+    assert "own_values" not in _sections(result)
+
+
+@pytest.mark.asyncio
+async def test_active_battery_section_nameplate_only(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_active_bp()))
+    result = await _open_settings(hass, entry, mock_client)
+    secs = _sections(result)
+    assert set(_fields(secs["battery"])) == {"nameplate_kwh", "nameplate_kw"}
+    assert list(secs).index("own_values") == list(secs).index("battery") + 1
+
+
+@pytest.mark.asyncio
+async def test_own_values_section_empty_collapsed(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_active_bp()))
+    result = await _open_settings(hass, entry, mock_client)
+    sec = _sections(result)["own_values"]
+    fields = _fields(sec)
+    assert set(fields) == set(_OWN_KEYS)
+    for key in _OWN_KEYS:
+        assert isinstance(fields[key], vol.Optional)
+        assert not (fields[key].description or {}).get("suggested_value")
+        assert fields[key].default is vol.UNDEFINED
+    assert sec.options["collapsed"] is True
+
+
+@pytest.mark.asyncio
+async def test_own_values_prefilled(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_active_bp(capacity=18.0, eff=0.9)))
+    result = await _open_settings(hass, entry, mock_client)
+    sec = _sections(result)["own_values"]
+    fields = _fields(sec)
+    assert fields["own_capacity_kwh"].description["suggested_value"] == 18.0
+    assert fields["own_eff_pct"].description["suggested_value"] == pytest.approx(90.0)
+    assert not (fields["own_power_kw"].description or {}).get("suggested_value")
+    assert sec.options["collapsed"] is False
+
+
+@pytest.mark.asyncio
+async def test_save_unchanged_sends_no_own(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _active_bp(capacity=20.0, eff=0.9, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active(
+        {"own_capacity_kwh": 20.0, "own_eff_pct": 90.0, "own_reserve_pct": 10.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_eff_percent_roundtrip(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _active_bp(eff=0.9)
+    result, client = await _save_active(
+        hass, entry, bp, _opts_active({"own_eff_pct": 92.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"eff": 0.92}}
+    entry2 = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry2, bp, _opts_active({"own_eff_pct": 90.0}))
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_own_capacity(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(), _opts_active({"own_capacity_kwh": 16.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"capacity_kwh": 16.0}}
+
+
+@pytest.mark.asyncio
+async def test_clear_own_value_sends_null(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(power=5.0), _opts_active({}))
+    assert client.patch_profile.call_args.kwargs == {"own": {"power_kw": None}}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_not_coordinator(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(capacity=20.0),
+        _opts_active({"own_capacity_kwh": 20.0}),
+        coordinator_bp=_active_bp(capacity=22.0))
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_legacy_battery_fields_with_own(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(),
+        _opts_active({"own_capacity_kwh": 16.0}, nameplate_kw=8.0))
+    body = client.patch_profile.call_args.kwargs
+    assert body == {"nameplate_kw": 8.0, "own": {"capacity_kwh": 16.0}}
+    for legacy in ("battery_kwh", "battery_kw", "eff", "reserve_pct"):
+        assert legacy not in body
+
+
+@pytest.mark.asyncio
+async def test_own_not_written_to_entry_data(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _active_bp(),
+        _opts_active({"own_capacity_kwh": 16.0}, nameplate_kw=8.0))
+    assert "own" not in entry.data
+    assert entry.data.get("nameplate_kw") == 8.0
+
+
+@pytest.mark.asyncio
+async def test_missing_own_values_section_sends_no_own(hass: HomeAssistant) -> None:
+    """Saknas hela own_values-sektionen i input är det inte "alla fält tömda"."""
+    entry = _make_mock_entry(hass)
+    mock_client, _ = _mock_options_env(entry)
+    mock_client.get_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_active_bp(capacity=20.0)))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=mock_client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        flow = hass.config_entries.options._progress[result["flow_id"]]
+        # Förbi schemavalideringen: anropa steget direkt utan own_values-nyckeln.
+        result = await flow.async_step_settings(
+            {"battery": {}, "economy": {}, "tariffs": {}})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    mock_client.patch_profile.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Bekräftelse när ett fält med daterade rader töms (spec 2026-11-11 §4.10).
+# ---------------------------------------------------------------------------
+
+def _bp_with_timeline(rows, **own):
+    bp = _active_bp(**own)
+    bp["reserve"]["measured"] = {"state": "ok", "source": "soc", "value": 5.0}
+    bp["own_timeline"] = {"reserve": rows}
+    return bp
+
+
+_DATED = [{"valid_from": "2026-06-01", "value": 10.0}]
+_UNDATED = [{"valid_from": None, "value": 10.0}]
+
+
+@pytest.mark.asyncio
+async def test_clear_undated_sends_null_directly(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_UNDATED, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active({}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": None}}
+
+
+@pytest.mark.asyncio
+async def test_clear_dated_shows_confirm(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    result, client = await _save_active(hass, entry, bp, _opts_active({}))
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm_clear"
+    rows = result["description_placeholders"]["rows"]
+    assert "reserve" in rows and "the measured value" in rows
+    client.patch_profile.assert_not_awaited()
+
+
+async def _to_confirm(hass, entry, bp, user_input, client):
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "settings"})
+        return await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input)
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_sends_whole_save(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}, nameplate_kw=8.0), client)
+    assert result["step_id"] == "confirm_clear"
+    client.patch_profile.assert_not_awaited()
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.await_count == 1
+    assert client.patch_profile.call_args.kwargs == {
+        "nameplate_kw": 8.0, "own": {"reserve_pct": None}}
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_closed_sends_nothing(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}, nameplate_kw=8.0), client)
+    assert result["step_id"] == "confirm_clear"
+    hass.config_entries.options.async_abort(result["flow_id"])
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_dated_value_no_confirm(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    result, client = await _save_active(
+        hass, entry, bp, _opts_active({"own_reserve_pct": 15.0}))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 15.0}}
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_without_pending_save_says_so(hass: HomeAssistant) -> None:
+    """Inget som väntar på bekräftelse är inget anslutningsfel."""
+    from custom_components.wolta.config_flow import WoltaOptionsFlow
+    flow = WoltaOptionsFlow()
+    flow.hass = hass
+    result = await flow.async_step_confirm_clear({})
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "clear_expired"
+
+
+def test_clear_rows_two_quantities_en() -> None:
+    from custom_components.wolta.config_flow import _clear_rows
+    bp = _bp_with_timeline(_DATED)
+    bp["capacity"]["measured"] = {"state": "datasheet", "source": "datasheet", "value": 10.0}
+    text = _clear_rows("en", ["capacity", "reserve"], bp)
+    rows = text.split("\n\n")
+    assert len(rows) == 2
+    assert "the datasheet value" in rows[0] and "capacity" in rows[0]
+    assert "the measured value" in rows[1] and "reserve" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_confirm_clear_patch_error(hass: HomeAssistant) -> None:
+    from custom_components.wolta.api import WoltaApiError
+    entry = _make_mock_entry(hass)
+    bp = _bp_with_timeline(_DATED, reserve=10.0)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=bp))
+    result = await _to_confirm(hass, entry, bp, _opts_active({}), client)
+    client.patch_profile = AsyncMock(side_effect=WoltaApiError("boom"))
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={})
+    # Back at the form with the error: a confirm step has no field to fix the cause with.
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "settings"
+    assert result["errors"]["base"]
+
+
+# ---------------------------------------------------------------------------
+# An own value equal to Wolta's is not stored by the server: the owner is told.
+# ---------------------------------------------------------------------------
+
+def _bp_measured(**own):
+    """An active block where Wolta has a value for each quantity: capacity measured (net
+    18.0), power from the datasheet, efficiency assumed, reserve measured."""
+    bp = _active_bp(**own)
+    bp["measured_dispatchable_kwh"] = 18.0
+    bp["capacity"]["measured"] = {"state": "measured", "source": "soc", "value": 20.0}
+    bp["power"]["measured"] = {"state": "datasheet", "source": "datasheet", "value": 5.0}
+    bp["eff"]["measured"] = {"state": "preliminary", "source": "assumed", "value": 0.9}
+    bp["reserve"]["measured"] = {"state": "measured", "source": "soc", "value": 10.0}
+    return bp
+
+
+@pytest.mark.parametrize(("q", "value", "kind"), [
+    ("capacity", 18.0, "measured"),      # net against net, not the gross 20.0
+    ("capacity", 18.004, "measured"),
+    ("capacity", 20.0, None),
+    ("capacity", 18.1, None),
+    ("power", 5.004, "datasheet"),
+    ("power", 5.1, None),
+    ("eff", 0.9, "assumed"),
+    ("eff", 0.9004, "assumed"),
+    ("eff", 0.91, None),
+    ("reserve", 10.0, None),             # equal to the computed floor (soc): not "the same"
+])
+def test_same_as_wolta_uses_the_servers_tolerance(q, value, kind) -> None:
+    from custom_components.wolta.config_flow import _same_as_wolta
+    assert _same_as_wolta(_bp_measured(), q, value) == kind
+
+
+def test_same_as_wolta_without_a_wolta_value() -> None:
+    from custom_components.wolta.config_flow import _same_as_wolta
+    assert _same_as_wolta(_active_bp(), "capacity", 1.0) is None
+    bp = _bp_measured()
+    bp["capacity"]["measured"] = {"state": "missing", "source": None, "value": None}
+    assert _same_as_wolta(bp, "capacity", 18.0) is None
+
+
+@pytest.mark.asyncio
+async def test_own_value_equal_to_woltas_is_not_sent_and_said(hass: HomeAssistant) -> None:
+    """As on wolta.se: nothing is sent for that value, and the owner is told it was not
+    saved instead of the dialog closing as if it had been."""
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_capacity_kwh": 18.0, "own_eff_pct": 90.0}),
+        client)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    rows = result["description_placeholders"]["rows"].split("\n\n")
+    assert len(rows) == 2
+    assert "capacity" in rows[0] and "Wolta's measured value" in rows[0]
+    assert "nothing saved" in rows[0]
+    assert "round-trip efficiency" in rows[1] and "the assumed value" in rows[1]
+    client.patch_profile.assert_not_awaited()
+    with (
+        patch("custom_components.wolta.config_flow.WoltaApiClient", return_value=client),
+        patch("custom_components.wolta.config_flow.async_get_clientsession"),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    client.patch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_own_value_equal_to_woltas_does_not_stop_the_rest(hass: HomeAssistant) -> None:
+    """The other changes of the same save go out; only the equal value is left out."""
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _bp_measured(),
+        _opts_active({"own_capacity_kwh": 18.0, "own_power_kw": 4.0}, nameplate_kw=8.0))
+    assert client.patch_profile.call_args.kwargs == {
+        "nameplate_kw": 8.0, "own": {"power_kw": 4.0}}
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    rows = result["description_placeholders"]["rows"]
+    assert "capacity" in rows and "power" not in rows
+    assert entry.data.get("nameplate_kw") == 8.0
+
+
+@pytest.mark.asyncio
+async def test_own_value_the_server_did_not_store_is_said(hass: HomeAssistant) -> None:
+    """The PATCH response is the whole profile. A sent value whose `own` is null there was
+    not stored (the server's equality rule), whatever this form worked out beforehand."""
+    entry = _make_mock_entry(hass)
+    shown = _bp_measured(reserve=15.0)
+    after = _bp_measured()           # the server dropped the own reserve: equal to Wolta's
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(return_value=_server_profile(entry, battery_params=shown))
+    client.patch_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=after))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_reserve_pct": 10.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 10.0}}
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    assert "reserve" in result["description_placeholders"]["rows"]
+
+
+@pytest.mark.asyncio
+async def test_stored_own_value_closes_the_dialog(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    client.patch_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_bp_measured(capacity=16.0)))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_capacity_kwh": 16.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"capacity_kwh": 16.0}}
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+def _bp_reported_reserve(**own):
+    """Wolta's reserve is the one the battery itself reports, not the computed floor."""
+    bp = _bp_measured(**own)
+    bp["reserve"]["measured"] = {
+        "state": "measured", "source": "source_reported", "value": 10.0}
+    return bp
+
+
+def test_reserve_equal_to_a_reported_reserve_is_the_same() -> None:
+    from custom_components.wolta.config_flow import _same_as_wolta
+    assert _same_as_wolta(_bp_reported_reserve(), "reserve", 10.0) == "measured"
+    assert _same_as_wolta(_bp_reported_reserve(), "reserve", 12.0) is None
+    # Only a measured soc floor is the exception: an assumed reserve still compares.
+    bp = _bp_measured()
+    bp["reserve"]["measured"] = {"state": "preliminary", "source": "assumed", "value": 0.0}
+    assert _same_as_wolta(bp, "reserve", 0.0) == "assumed"
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_the_computed_floor_is_sent(hass: HomeAssistant) -> None:
+    """The owner's reserve says the level is a setting in the battery, which the computed
+    floor does not: it is sent. A server that stores it closes the dialog as usual."""
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    client.patch_profile = AsyncMock(return_value=_server_profile(
+        entry, battery_params=_bp_measured(reserve=10.0)))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_reserve_pct": 10.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 10.0}}
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_the_computed_floor_on_a_server_that_drops_it(
+        hass: HomeAssistant) -> None:
+    """A server without the exception does not store it: sent all the same, and the
+    response says it was not saved."""
+    entry = _make_mock_entry(hass)
+    client, _ = _mock_options_env(entry)
+    client.get_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    client.patch_profile = AsyncMock(
+        return_value=_server_profile(entry, battery_params=_bp_measured()))
+    result = await _to_confirm(
+        hass, entry, None, _opts_active({"own_reserve_pct": 10.0}), client)
+    assert client.patch_profile.call_args.kwargs == {"own": {"reserve_pct": 10.0}}
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    assert "reserve" in result["description_placeholders"]["rows"]
+
+
+@pytest.mark.asyncio
+async def test_reserve_equal_to_a_reported_reserve_is_withheld(hass: HomeAssistant) -> None:
+    entry = _make_mock_entry(hass)
+    result, client = await _save_active(
+        hass, entry, _bp_reported_reserve(), _opts_active({"own_reserve_pct": 10.0}))
+    client.patch_profile.assert_not_awaited()
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "own_not_saved"
+    rows = result["description_placeholders"]["rows"]
+    assert "reserve" in rows and "Wolta's measured value" in rows
+
+
+def _bp_carried():
+    """After the battery's latest change: capacity, power and efficiency are the previous
+    stage's measurement, carried until the battery is measured again."""
+    bp = _bp_measured()
+    bp["capacity"]["measured"] = {
+        "state": "preliminary", "source": "previous_stage", "value": 20.0}
+    bp["power"]["measured"] = {"state": "preliminary", "source": "previous_stage", "value": 5.0}
+    bp["eff"]["measured"] = {"state": "preliminary", "source": "previous_stage", "value": 0.9}
+    return bp
+
+
+def test_same_as_a_carried_measurement_is_not_called_measured() -> None:
+    from custom_components.wolta.config_flow import _not_saved_rows, _same_as_wolta
+    bp = _bp_carried()
+    assert _same_as_wolta(bp, "capacity", 18.0) == "previous_stage"
+    assert _same_as_wolta(bp, "power", 5.0) == "previous_stage"
+    en = _not_saved_rows("en", {"power": "previous_stage"})
+    assert en == ("Your value for power is the same as the measurement from before the "
+                  "battery's latest change, nothing saved. Wolta uses its own value, and the "
+                  "field is empty next time.")
+    sv = _not_saved_rows("sv-SE", {"power": "previous_stage"})
+    assert "samma som mätningen före batteriets senaste ändring, inget sparat" in sv
+    assert "uppmätt" not in sv and "measured" not in en
+
+
+def test_clear_rows_with_a_carried_measurement() -> None:
+    from custom_components.wolta.config_flow import _clear_rows
+    bp = _bp_carried()
+    en = _clear_rows("en", ["capacity"], bp)
+    assert en.endswith("Wolta then uses the measurement from before the battery's latest change.")
+    sv = _clear_rows("sv", ["capacity"], bp)
+    assert sv.endswith("Wolta räknar då med mätningen före batteriets senaste ändring.")
+
+
+def test_same_as_an_assumption_wolta_cannot_measure() -> None:
+    """The server sends the assumed 90 % with state "datasheet" when the plant cannot be
+    measured: still the assumed value, not the datasheet's."""
+    from custom_components.wolta.config_flow import _not_saved_rows, _same_as_wolta
+    bp = _bp_measured()
+    bp["eff"]["measured"] = {"state": "datasheet", "source": "assumed", "value": 0.9}
+    assert _same_as_wolta(bp, "eff", 0.9) == "assumed"
+    assert "the assumed value" in _not_saved_rows("en", {"eff": "assumed"})
+
+
+def test_not_saved_rows_sv() -> None:
+    from custom_components.wolta.config_flow import _not_saved_rows
+    text = _not_saved_rows("sv-SE", {"power": "datasheet"})
+    assert "effekt" in text and "databladets värde" in text and "inget sparat" in text

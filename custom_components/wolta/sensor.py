@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -22,6 +22,7 @@ from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .battery_params import is_active, quantity
 from .const import CONF_LINK_TOKEN, DOMAIN, KEY_BATTERY_STATUS, WOLTA_API_BASE, link_url
 from .coordinator import WoltaCoordinator, WoltaData
 from .price_coordinator import (
@@ -51,9 +52,9 @@ from .price_coordinator import (
 class WoltaSensorEntityDescription(SensorEntityDescription):
     """Sensor description with value/availability/attribute callables."""
 
-    value_fn: Callable[[dict], Any] = lambda r: None
+    value_fn: Callable[[WoltaData], Any] = lambda d: None
     attr_fn: Callable[[WoltaData], dict[str, Any]] = lambda d: {}
-    available_fn: Callable[[dict], bool] = lambda r: True
+    available_fn: Callable[[WoltaData], bool] = lambda d: True
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +85,11 @@ def _comparison_score(results: dict) -> float | None:
     return round(score_on * 100, 2)
 
 
-def _betyg_score(results: dict) -> float | None:
-    """Optimisation grade in percent: the owner's window grade (window.score_on x 100) when
-    results.betyg.window exists, otherwise holistic.score_on x 100, published RAW.
+def _betyg_score(data: WoltaData) -> float | None:
+    """Optimisation grade in percent, in the same order as wolta.se (spec 2026-11-11 4.4):
+    the owner's window grade (window.score_on x 100), else the owner's own-values grade
+    (own_grade.score x 100, only while battery_params.active), else holistic.score_on x 100.
+    Always x 100 and published RAW.
 
     The window grade is the owner's own view (their start date or rolling window); the
     comparison grade over the last full months stays on its own sensor (jamforelsebetyg).
@@ -108,10 +111,38 @@ def _betyg_score(results: dict) -> float | None:
     Upper end is untouched too: the backend clamps score_on at 1.05, so values slightly
     above 100 percent are expected and are not an error.
     """
-    window = _window_block(results)
+    basis, block = _grade_choice(data)
+    if basis == "window":
+        return round(block["score_on"] * 100, 2)
+    if basis == "own":
+        return round(block["score"] * 100, 2)
+    return _comparison_score(data.results)
+
+
+def _own_grade_block(data: WoltaData) -> dict | None:
+    """results.betyg.own_grade, read only while the server runs rule 3 (battery_params.active).
+    A block without a score is not a grade and counts as absent. Before the flip the block
+    does not exist; the active condition also covers a server flipped back to rule 2 while a
+    stored rule 3 result lingers - the site then stops showing it and so does the sensor."""
+    if not is_active(data.battery_params):
+        return None
+    own = (data.results.get("betyg") or {}).get("own_grade")
+    if isinstance(own, dict) and own.get("score") is not None:
+        return own
+    return None
+
+
+def _grade_choice(data: WoltaData) -> tuple[str, dict | None]:
+    """Which grade the grade sensor shows and the block that produced the number:
+    ("window", window), ("own", own_grade) or ("comparison", None). Value and attributes
+    both derive from this so they cannot disagree."""
+    window = _window_block(data.results)
     if window is not None:
-        return round(window["score_on"] * 100, 2)
-    return _comparison_score(results)
+        return "window", window
+    own = _own_grade_block(data)
+    if own is not None:
+        return "own", own
+    return "comparison", None
 
 
 def _period_end_ts(results: dict) -> datetime | None:
@@ -129,15 +160,33 @@ def _period_end_ts(results: dict) -> datetime | None:
     return parsed
 
 
-def _betyg_available(results: dict) -> bool:
-    return _betyg_score(results) is not None
+def _betyg_available(data: WoltaData) -> bool:
+    return _betyg_score(data) is not None
 
 
 def _comparison_available(results: dict) -> bool:
     return _comparison_score(results) is not None
 
 
-def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
+def _capacity_preliminary(data: WoltaData) -> bool:
+    """The capacity the grade rests on is not measured yet (battery_params.capacity.state ==
+    "preliminary": the datasheet's figure, or the measurement from before the battery's latest
+    change, until the battery is measured again). Read only while the server runs rule 3, as on
+    wolta.se (ownGradePreliminary)."""
+    if not is_active(data.battery_params):
+        return False
+    capacity = quantity(data.battery_params, "capacity")
+    return capacity is not None and capacity.get("state") == "preliminary"
+
+
+def _grade_preliminary(data: WoltaData, own_flag: Any) -> Any:
+    """Maturity of an own-values or comparison grade, by the same rule as wolta.se
+    (displayedGradePreliminary): preliminary while the capacity is not measured, else the
+    grade's own flag (few days). Before rule 3 only the grade's own flag, as in v0.57.0."""
+    return True if _capacity_preliminary(data) else own_flag
+
+
+def _comparison_grade_attrs(data: WoltaData) -> dict[str, Any]:
     """Attributes that describe the COMPARISON grade (holistic.score_on): its percentile and
     sample size, its period (betyg.period_start/period_end at the top level of the betyg
     block), its maturity, and the details of how it was computed (annual basis, measured
@@ -145,6 +194,7 @@ def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
     an attribute that describes a specific grade follows that grade, so these live on the
     comparison grade sensor always, and on the grade sensor only while it shows the
     comparison grade."""
+    results = data.results
     betyg = results.get("betyg") or {}
     peer = betyg.get("peer") or {}
     holistic = betyg.get("holistic") or {}
@@ -153,7 +203,7 @@ def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
         "peer_n": peer.get("n"),
         "period_start": betyg.get("period_start"),
         "period_end": betyg.get("period_end"),
-        "preliminary": betyg.get("preliminary"),
+        "preliminary": _grade_preliminary(data, betyg.get("preliminary")),
         "n_days": betyg.get("n_days"),
         "annual_basis": (betyg.get("annual") or {}).get("basis"),
         "measured_period_sek": holistic.get("measured_period_sek"),
@@ -165,22 +215,40 @@ def _comparison_grade_attrs(results: dict) -> dict[str, Any]:
     }
 
 
-def _grade_basis_attr(results: dict) -> dict[str, Any]:
-    """Which grade the grade sensor shows (basis: window | comparison) and the attributes of
-    that grade. A window grade carries only its own dates and maturity; everything else that
-    describes a grade (percentile, annual basis, measured figures, components, benchmark
-    class ...) belongs to the comparison grade and is added only for basis == comparison
-    (it is always on the comparison grade sensor)."""
-    window = _window_block(results)
-    if window is not None:
+def _grade_basis_attr(data: WoltaData) -> dict[str, Any]:
+    """Which grade the grade sensor shows (basis: window | own | comparison) and the
+    attributes of that grade. A window or own grade carries only its own dates and maturity
+    plus which quantities are the owner's; everything else that describes a grade
+    (percentile, annual basis, measured figures, components, benchmark class ...) belongs to
+    the comparison grade and is added only for basis == comparison (it is always on the
+    comparison grade sensor)."""
+    basis, block = _grade_choice(data)
+    if block is None:
         return {
-            "basis": "window",
-            "period_start": window.get("period_start"),
-            "period_end": window.get("period_end"),
-            "preliminary": window.get("preliminary"),
-            "n_days": window.get("n_days"),
+            "basis": "comparison",
+            "on_own_values": False,
+            **_comparison_grade_attrs(data),
         }
-    return {"basis": "comparison", **_comparison_grade_attrs(results)}
+    quantities = block.get("own_quantities")
+    attrs: dict[str, Any] = {
+        "basis": basis,
+        "on_own_values": bool(quantities),
+    }
+    if quantities:
+        attrs["own_quantities"] = quantities
+    if basis == "own" and block.get("measured_score") is not None:
+        attrs["measured_score"] = round(block["measured_score"] * 100, 2)
+    attrs.update(
+        period_start=block.get("period_start"),
+        period_end=block.get("period_end"),
+        # The window carries its own maturity; an own-values grade follows the site's rule.
+        preliminary=(
+            _grade_preliminary(data, block.get("preliminary"))
+            if basis == "own" else block.get("preliminary")
+        ),
+        n_days=block.get("n_days"),
+    )
+    return attrs
 
 
 def _decision_available(results: dict) -> bool:
@@ -373,6 +441,23 @@ def _benchmark_attr(results: dict) -> dict[str, Any]:
     return {"benchmark": block}
 
 
+def _comparison_attr(results: dict) -> dict[str, Any]:
+    """in_comparison / comparison_reasons (spec 2026-11-11 4.5): read from the same
+    results.betyg.benchmark block as the grade, {comparable, reasons}. Describes the plant,
+    not the number on the sensor, so it sits on both grade sensors. {} when the block is
+    absent. The reason codes pass through untouched (unknown codes included) and only come
+    along when the plant is outside the comparison and the list is not empty."""
+    block = (results.get("betyg") or {}).get("benchmark")
+    if not isinstance(block, dict) or block.get("comparable") is None:
+        return {}
+    in_comparison = bool(block["comparable"])
+    attrs: dict[str, Any] = {"in_comparison": in_comparison}
+    reasons = block.get("reasons")
+    if not in_comparison and reasons:
+        attrs["comparison_reasons"] = reasons
+    return attrs
+
+
 def _flex_compensation_attr(results: dict) -> dict[str, Any]:
     """flex_compensation (spec 2026-08-28): the backend's ADDITIVE block on results.betyg
     holding what the flex-market participation paid - measured from the amounts the owner
@@ -454,7 +539,7 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="status",
         device_class=SensorDeviceClass.ENUM,
         options=_STATUS_OPTIONS,
-        value_fn=_status_value,
+        value_fn=lambda d: _status_value(d.results),
         attr_fn=lambda data: {
             "server_status": data.results.get("status"),
             "job": (data.results.get("job") or {}).get("status"),
@@ -475,16 +560,22 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         available_fn=_betyg_available,
         attr_fn=lambda data: (
             {
-                **_grade_basis_attr(data.results),
+                **_grade_basis_attr(data),
+                **_comparison_attr(data.results),
                 # Owner-field attributes (the owner's inputs vs the data, not a grade) stay
                 # whichever grade is shown.
                 **_applied_tariff_attr(data.results),
                 **_applied_reserve_attr(data.results),
                 **_capacity_hint_attr(data.results),
-                **_measured_params_attr(data.results),
+                # Rule 3 (active): the measured figures live in the battery sensors instead.
+                **(
+                    {}
+                    if is_active(data.battery_params)
+                    else _measured_params_attr(data.results)
+                ),
                 **_flex_compensation_attr(data.results),
             }
-            if _betyg_available(data.results)
+            if _betyg_available(data)
             else {"reason": "not enough data for a grade yet"}
         ),
     ),
@@ -495,11 +586,12 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         # Always the comparison grade (holistic.score_on), whether or not the owner has a
         # grade window: this is the grade that is compared with other installations.
-        value_fn=_comparison_score,
-        available_fn=_comparison_available,
+        value_fn=lambda d: _comparison_score(d.results),
+        available_fn=lambda d: _comparison_available(d.results),
         attr_fn=lambda data: (
             {
-                **_comparison_grade_attrs(data.results),
+                **_comparison_grade_attrs(data),
+                **_comparison_attr(data.results),
             }
             if _comparison_available(data.results)
             else {"reason": "not enough data for a grade yet"}
@@ -510,8 +602,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="batterivarde_ar",
         # unit set dynamically in sensor class
         suggested_display_precision=0,
-        value_fn=_battery_value,
-        available_fn=_battery_value_available,
+        value_fn=lambda d: _battery_value(d.results),
+        available_fn=lambda d: _battery_value_available(d.results),
         attr_fn=lambda data: (
             {
                 # Samma mognadsgrind som value_fn: ett omoget betyg får inte stämpla
@@ -534,8 +626,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="anlaggningsbesparing_ar",
         # unit set dynamically in sensor class
         suggested_display_precision=0,
-        value_fn=lambda r: (r.get("decision") or {}).get("avg_annual_sek"),
-        available_fn=_decision_available,
+        value_fn=lambda d: (d.results.get("decision") or {}).get("avg_annual_sek"),
+        available_fn=lambda d: _decision_available(d.results),
         attr_fn=lambda data: (
             {
                 "battery_sek": (data.results.get("decision") or {}).get(
@@ -554,12 +646,12 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="irr",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda r: (
-            round((r.get("decision") or {}).get("irr") * 100, 2)
-            if (r.get("decision") or {}).get("irr") is not None
+        value_fn=lambda d: (
+            round((d.results.get("decision") or {}).get("irr") * 100, 2)
+            if (d.results.get("decision") or {}).get("irr") is not None
             else None
         ),
-        available_fn=_decision_available,
+        available_fn=lambda d: _decision_available(d.results),
         attr_fn=lambda data: (
             _capex_scope_attr(data.results)
             if _decision_available(data.results)
@@ -570,8 +662,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         key="payback",
         translation_key="payback",
         native_unit_of_measurement="yr",
-        value_fn=lambda r: (r.get("decision") or {}).get("payback_years"),
-        available_fn=_decision_available,
+        value_fn=lambda d: (d.results.get("decision") or {}).get("payback_years"),
+        available_fn=lambda d: _decision_available(d.results),
         attr_fn=lambda data: (
             _capex_scope_attr(data.results)
             if _decision_available(data.results)
@@ -583,12 +675,12 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="facit_i_ar",
         # unit set dynamically in sensor class
         suggested_display_precision=0,
-        value_fn=lambda r: (
-            (r.get("history") or {}).get("yearly", [{}])[-1].get("total_sek")
-            if (r.get("history") or {}).get("yearly")
+        value_fn=lambda d: (
+            (d.results.get("history") or {}).get("yearly", [{}])[-1].get("total_sek")
+            if (d.results.get("history") or {}).get("yearly")
             else None
         ),
-        available_fn=_history_available,
+        available_fn=lambda d: _history_available(d.results),
         attr_fn=lambda data: (
             {
                 "yearly": (data.results.get("history") or {}).get("yearly"),
@@ -608,8 +700,8 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         translation_key="datastatus",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=_period_end_ts,
-        available_fn=lambda r: _period_end_ts(r) is not None,
+        value_fn=lambda d: _period_end_ts(d.results),
+        available_fn=lambda d: _period_end_ts(d.results) is not None,
         attr_fn=lambda data: {
             "n_days": data.n_days,
             "pending": data.pending,
@@ -619,6 +711,110 @@ SENSOR_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
         },
     ),
 )
+
+# ---------------------------------------------------------------------------
+# Battery diagnostic sensors (egna batterivärden, spec 2026-11-11 §4.6)
+# ---------------------------------------------------------------------------
+# Only created when the server runs rule 3 (battery_params.active) - see async_setup_entry.
+# A missing value is an unknown state with the attributes kept, never "unavailable".
+
+
+def _bp_quantity(data: WoltaData, q: str) -> dict | None:
+    return quantity(data.battery_params, q)
+
+
+def _bp_pct(value: Any) -> float | None:
+    """A fraction (eff) as percent with one decimal."""
+    return round(value * 100, 1) if isinstance(value, (int, float)) else None
+
+
+def _battery_attrs(q: str, *, percent: bool = False) -> Callable[[WoltaData], dict[str, Any]]:
+    def attrs(data: WoltaData) -> dict[str, Any]:
+        block = _bp_quantity(data, q)
+        if block is None:
+            return {}
+        out: dict[str, Any] = {
+            "state": block.get("state"),
+            "source": block.get("source"),
+            "period_start": block.get("period_start"),
+            "period_end": block.get("period_end"),
+        }
+        # "measured" is the server's name for Wolta's own value next to the owner's: a
+        # measurement, the datasheet figure or an assumption (measured_state/_source say which).
+        measured = block.get("measured")
+        if block.get("state") == "owner" and isinstance(measured, dict):
+            value = measured.get("value")
+            if q == "capacity":
+                # The sensor's number is net, so Wolta's own value is the net one too.
+                value = (data.battery_params or {}).get("measured_dispatchable_kwh")
+            elif percent:
+                value = _bp_pct(value)
+            out["measured_value"] = value
+            out["measured_state"] = measured.get("state")
+            out["measured_source"] = measured.get("source")
+        if q == "capacity":
+            if (
+                isinstance(measured, dict)
+                and measured.get("basis") == "gross"
+                and measured.get("value") is not None
+            ):
+                out["measured_gross_kwh"] = measured["value"]
+        return out
+
+    return attrs
+
+
+def _bp_value(q: str) -> Callable[[WoltaData], Any]:
+    def value(data: WoltaData) -> Any:
+        block = _bp_quantity(data, q)
+        return block.get("value") if block is not None else None
+
+    return value
+
+
+BATTERY_PARAM_DESCRIPTIONS: tuple[WoltaSensorEntityDescription, ...] = (
+    WoltaSensorEntityDescription(
+        key="battery_capacity",
+        translation_key="battery_capacity",
+        device_class=SensorDeviceClass.ENERGY_STORAGE,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.battery_params.get("dispatchable_kwh") if d.battery_params else None,
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("capacity"),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_power",
+        translation_key="battery_power",
+        device_class=SensorDeviceClass.POWER,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=_bp_value("power"),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("power"),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_efficiency",
+        translation_key="battery_efficiency",
+        native_unit_of_measurement=PERCENTAGE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: _bp_pct((_bp_quantity(d, "eff") or {}).get("value")),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("eff", percent=True),
+    ),
+    WoltaSensorEntityDescription(
+        key="battery_reserve",
+        translation_key="battery_reserve",
+        native_unit_of_measurement=PERCENTAGE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=_bp_value("reserve"),
+        available_fn=lambda d: d.battery_params is not None,
+        attr_fn=_battery_attrs("reserve"),
+    ),
+)
+
 
 # Keys whose unit depends on results.currency
 _CURRENCY_KEYS = frozenset({"batterivarde_ar", "facit_i_ar"})
@@ -678,7 +874,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
         if a previously known value is there to keep."""
         if not self.coordinator.last_update_success or self.coordinator.data is None:
             return False
-        if self.entity_description.available_fn(self.coordinator.data.results):
+        if self.entity_description.available_fn(self.coordinator.data):
             return True
         return self.coordinator.data.pending and self._last_value is not None
 
@@ -686,7 +882,7 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
     def native_value(self) -> Any:
         if self.coordinator.data is None:
             return None
-        val = self.entity_description.value_fn(self.coordinator.data.results)
+        val = self.entity_description.value_fn(self.coordinator.data)
         if val is None and self.coordinator.data.pending:
             return self._last_value
         if val is not None:
@@ -708,14 +904,14 @@ class WoltaSensor(CoordinatorEntity[WoltaCoordinator], SensorEntity):
             return {}
         data = self.coordinator.data
         if (
-            not self.entity_description.available_fn(data.results)
+            not self.entity_description.available_fn(data)
             and data.pending
             and self._last_attrs is not None
         ):
             # Retained attributes during recompute, flagged so it's visible in the UI (v0.4.4: eng. keys)
             return {**self._last_attrs, "computing": True}
         attrs = self.entity_description.attr_fn(data)
-        if self.entity_description.available_fn(data.results):
+        if self.entity_description.available_fn(data):
             self._last_attrs = attrs
         return attrs
 
@@ -1051,6 +1247,16 @@ async def async_setup_entry(
         WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
         for desc in SENSOR_DESCRIPTIONS
     )
+    # Diagnostic battery values: only when the server runs rule 3. What was built is noted
+    # on the coordinator, which asks for a reload when the server later switches (§4.7).
+    # Entities already in the registry stay there if the server switches back (§4.12).
+    active = is_active(coordinator.data.battery_params if coordinator.data else None)
+    coordinator.diagnostics_built = active
+    if active:
+        async_add_entities(
+            WoltaSensor(coordinator=coordinator, entry=entry, description=desc)
+            for desc in BATTERY_PARAM_DESCRIPTIONS
+        )
     # Spot prices: only when the price coordinator exists. Separate from the entities
     # above on purpose - see WoltaSpotPriceSensor.
     if coordinator.prices is not None:

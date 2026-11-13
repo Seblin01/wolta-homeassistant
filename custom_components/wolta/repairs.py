@@ -44,7 +44,13 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .const import (
     CONF_BATT_IN,
@@ -65,8 +71,10 @@ from .const import (
     CONF_SOC_ABSENT,
     CONF_SOC_ISSUE_IGNORED,
     DOMAIN,
+    MIN_BATTERY_KW,
 )
 from . import intervals
+from .battery_params import is_active as battery_params_active
 from .api import WoltaApiError, WoltaCopyBusy, WoltaCopyGone
 from .control_system_prefill import (
     ControlSystemChoices,
@@ -79,6 +87,7 @@ from .control_system_prefill import (
 )
 from .coordinator import (
     _ISSUE_CONTROL_SYSTEM_REQUIRED,
+    _ISSUE_NAMEPLATE_POWER,
     _ISSUE_SOC_REQUIRED,
     desired_invert_intervals,
 )
@@ -140,6 +149,12 @@ class _AdoptRepairFlow(RepairsFlow):
         # mismatch can surface again.
         new_data.pop(self._ignore_key, None)
         coordinator = self._entry.runtime_data
+        if battery_params_active(getattr(coordinator.data, "battery_params", None)):
+            # Regel 3: värdena hanteras som egna värden i Konfigurera; adopt-förslaget
+            # (som även nollar reserven) får inte skickas.
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"{self._issue_prefix}_{self._entry.entry_id}")
+            return self.async_abort(reason="own_values_active")
         await coordinator.client.patch_profile(coordinator.token, **patch)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         # PATCH cleared the server cooldown, so a recompute is expected; swallow rate limits
@@ -261,6 +276,42 @@ class MeasuredPowerRepairFlow(_AdoptRepairFlow):
                     vol.Coerce(float), vol.Range(min=0.1, max=100.0)),
             }),
             description_placeholders=self._placeholders(),
+        )
+
+
+class NameplatePowerRepairFlow(RepairsFlow):
+    """Under rule 3 (own values) the server needs the battery's nameplate power.
+
+    One field, no ignore: PATCH nameplate_kw and clear the issue. The value is not stored in
+    entry.data - the coordinator reads it back from the next profile GET."""
+
+    def __init__(self, entry: ConfigEntry | None) -> None:
+        self._entry = entry
+
+    async def async_step_init(self, user_input=None) -> data_entry_flow.FlowResult:
+        if self._entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if user_input is not None:
+            coordinator = self._entry.runtime_data
+            try:
+                await coordinator.client.patch_profile(
+                    coordinator.token, nameplate_kw=float(user_input["nameplate_kw"]))
+            except (WoltaApiError, aiohttp.ClientError, TimeoutError):
+                return self.async_abort(reason="failed")
+            coordinator.set_nameplate_kw(float(user_input["nameplate_kw"]))
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"{_ISSUE_NAMEPLATE_POWER}_{self._entry.entry_id}")
+            # Not awaited: the PATCH went through and the issue is gone, so the dialog
+            # need not wait for a whole update cycle.
+            self.hass.async_create_task(coordinator.async_request_refresh())
+            return self.async_create_entry(title="", data={})
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required("nameplate_kw"): NumberSelector(NumberSelectorConfig(
+                    min=MIN_BATTERY_KW, max=100.0, step=0.1,
+                    unit_of_measurement="kW", mode=NumberSelectorMode.BOX)),
+            }),
         )
 
 
@@ -620,6 +671,8 @@ async def async_create_fix_flow(
             {k: v for k, v in data.items()
              if k not in ("entry_id", "form", "swap_intervals")},
             data.get("swap_intervals"))
+    if issue_id.startswith(_ISSUE_NAMEPLATE_POWER):
+        return NameplatePowerRepairFlow(entry)
     if issue_id.startswith(_ISSUE_SOC_REQUIRED):
         return SocRequiredRepairFlow(entry)
     if issue_id.startswith(_ISSUE_CONTROL_SYSTEM_REQUIRED):

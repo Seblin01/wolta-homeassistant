@@ -36,6 +36,7 @@ from .api import (
     WoltaReplacementGone,
 )
 from .const import (
+    CONF_BATTERY_PARAMS_ACTIVE,
     KEY_BATTERY_STATUS,
     BATTERY_STATUS_MEASURED,
     BATTERY_STATUS_NAMEPLATE,
@@ -85,6 +86,11 @@ from .const import (
 )
 from . import stats
 from . import coverage
+from .battery_params import (
+    is_active as battery_params_active,
+    own_values,
+    rule as battery_params_rule,
+)
 from .control_system_prefill import control_system_name_error
 from .price_coordinator import WoltaPriceCoordinator
 from . import intervals
@@ -739,6 +745,7 @@ _ISSUE_PROFILE_FULL = "profile_full"
 _ISSUE_CAPACITY = "measured_capacity"
 _ISSUE_POWER = "measured_power"
 _ISSUE_EFFICIENCY = "measured_efficiency"
+_ISSUE_NAMEPLATE_POWER = "nameplate_power"
 # Backend gave up measuring the declared battery (spec 2026-09-14 §7.2): ask for the
 # nameplate pair instead. Unlike the three adopt repairs above this is not a nudge to
 # improve a value - without a capacity there is no grade at all.
@@ -979,6 +986,10 @@ class WoltaData:
     battery_status: str | None = None
     battery_detect: dict | None = None
     detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+    # Serverns battery_params-block ur profil-GET:en (egna batterivärden), det senaste
+    # giltiga (se _take_battery_params). None tills ett giltigt block har lästs; efter en
+    # omstart med regel 3 sparad i entry.data står {"active": True} här tills dess.
+    battery_params: dict | None = None
 
 
 type WoltaConfigEntry = ConfigEntry[WoltaCoordinator]
@@ -1043,6 +1054,21 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._battery_status: str | None = None
         self._battery_detect: dict | None = None
         self._detect_min_days: int = _DETECT_MIN_DAYS_DEFAULT
+        # Serverns battery_params-block och märkeffekt (nameplate_kw) ur profil-GET:en,
+        # senast lästa - se _take_battery_params. Regeln (active) sås ur flaggan som
+        # _apply_profile_sync sparat i entry.data: misslyckas första profil-GET:en efter en
+        # omstart byggs sensorerna ändå för rätt regel, och betyget visar inte
+        # jämförelsebetyget en poll för att sedan laddas om (ett falskt steg i historiken).
+        # Före bytet finns ingen flagga, och inget sås.
+        self._battery_params: dict | None = (
+            {"active": True} if entry.data.get(CONF_BATTERY_PARAMS_ACTIVE) is True else None
+        )
+        # Om diagnostiksensorerna byggdes vid sensor-setup (is_active då); None tills
+        # sensor.async_setup_entry har körts. Omladdningskontrollen jämför mot det här,
+        # inte mot förra hämtningen - se _check_rule_switch.
+        self.diagnostics_built: bool | None = None
+        self._reload_scheduled: bool = False
+        self._nameplate_kw: float | None = None
         # The server's data_since off the latest profile GET (either poll) or PUT response
         # that carried one, for the preview of a change (direction_effect,
         # replacement_floor). MISSING until a profile was read, or when it carried none;
@@ -2577,6 +2603,19 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             elif new_data.get(key) != server_val:
                 new_data[key] = server_val
                 changed = True
+        # Spegla serverns "egna värden aktiva" (regel 3). Bara ett block med ett uttryckligt
+        # booleskt `active` ändrar flaggan: ett svar utan blocket (eller med ett missbildat)
+        # säger inget om regeln, och en tappad flagga skulle låta en återskapad profil skicka
+        # de cachade mätvärdena som ägarens egna. Servern före bytet skickar alltid blocket
+        # med `active: false`, så flaggan sätts aldrig där och v0.57.0-beteendet gäller exakt.
+        rule = battery_params_rule(profile.get("battery_params"))
+        if rule is True:
+            if new_data.get(CONF_BATTERY_PARAMS_ACTIVE) is not True:
+                new_data[CONF_BATTERY_PARAMS_ACTIVE] = True
+                changed = True
+        elif rule is False and CONF_BATTERY_PARAMS_ACTIVE in new_data:
+            new_data.pop(CONF_BATTERY_PARAMS_ACTIVE)
+            changed = True
         if not changed:
             return False
         zone = new_data.get(CONF_ZONE, self._zone)
@@ -2616,6 +2655,73 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._detect_min_days = min_days
         self._evaluate_battery_pending()
 
+    def _take_battery_params(self, profile: dict) -> str | None:
+        """Keep the server's battery_params block (and nameplate_kw) off a profile GET.
+
+        Called from BOTH polls, inside the same guard as _take_battery_state. Only a block
+        with an explicit boolean `active` is taken: a response without the block, or with a
+        malformed one, says nothing about the rule, so the last valid block stays (and with
+        it the rule the entities were built for). Returns what the side poll should do:
+        "refresh" when `active` itself flipped, or - only while active - an own value or
+        nameplate_kw changed (that moves the grade); "display" when only the rest of the
+        block moved under active (measured values and periods move after every recompute,
+        and a full upload cycle for that would be wasted - the diagnostic sensors just need
+        the new block); None otherwise. Before the switch v0.57.0 never refreshed for this
+        block, and neither do we."""
+        block = profile.get("battery_params")
+        old = self._battery_params
+        new = block if battery_params_rule(block) is not None else old
+        was_active = battery_params_active(old)
+        now_active = battery_params_active(new)
+        nameplate = profile.get("nameplate_kw")
+        kind: str | None = None
+        if was_active != now_active or (now_active and (
+                own_values(new) != own_values(old) or nameplate != self._nameplate_kw)):
+            kind = "refresh"
+        elif now_active and new != old:
+            kind = "display"
+        self._battery_params = new
+        self._nameplate_kw = nameplate
+        return kind
+
+    def _push_battery_params(self) -> None:
+        """Hand the latest battery_params block to the entities without a refresh cycle.
+        async_update_listeners, not async_set_updated_data: the latter reschedules the
+        refresh timer, and a side poll doing it would keep pushing the 6 h main cycle back."""
+        if self.data is None:
+            return
+        self.data = replace(self.data, battery_params=self._battery_params)
+        self.async_update_listeners()
+
+    def set_nameplate_kw(self, value: float | None) -> None:
+        """Set the nameplate power locally after a successful PATCH (repair flow): the fast
+        poll fetches no profile, so a stale None would re-raise the answered repair."""
+        self._nameplate_kw = value
+
+    def _check_rule_switch(self) -> bool:
+        """Ask for ONE reload of the config entry when the server's rule (battery_params.active)
+        differs from what the entities were built for (spec 2026-11-11 §4.7).
+
+        Compared against what sensor setup built, not against the previous fetch: that also
+        covers a first profile read that failed (built without the sensors, active later).
+        Before sensor setup (diagnostics_built is None) nothing is compared, so the first
+        fetch is never a switch. Not an options update listener. Never raises (called from
+        the side-poll timer). Returns True when it scheduled the reload in this call."""
+        try:
+            if (
+                self.diagnostics_built is None
+                or self._reload_scheduled
+                or self.diagnostics_built == battery_params_active(self._battery_params)
+            ):
+                return False
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            # Efter anropet: kastar det står flaggan kvar falsk och nästa poll försöker igen.
+            self._reload_scheduled = True
+            return True
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Could not schedule reload after rule switch", exc_info=True)
+            return False
+
     async def async_check_profile_sync(self, _now: datetime | None = None) -> None:
         """Side-poll (every 5 min): pick up web-side profile edits within minutes.
 
@@ -2634,6 +2740,9 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             _LOGGER.debug("Profile side-poll failed; retrying next tick", exc_info=True)
             return
         self._take_data_since(profile)
+        # Mirrored BEFORE the rule check below: a reload it schedules may start at once, and
+        # the coordinator it builds seeds its rule from the flag this stores in entry.data.
+        synced = self._apply_profile_sync(profile)
         # A CHANGED battery stamp also warrants the refresh: the stamp is not part of
         # entry.data, so _apply_profile_sync can't see it, and without a rebuilt WoltaData
         # the status sensor would keep saying "measuring" for up to 6h while the repair
@@ -2648,10 +2757,17 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             previous_status = self._battery_status
             self._take_battery_state(profile)
             battery_changed = self._battery_status != previous_status
+            params_kind = self._take_battery_params(profile)
+            reload_scheduled = self._check_rule_switch()
+            # En omladdning som just schemalagts bygger om allt: ingen refresh på den gamla.
+            battery_changed = battery_changed or params_kind == "refresh"
+            if params_kind == "display" and not reload_scheduled:
+                self._push_battery_params()
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Malformed battery stamp in side-poll; ignoring", exc_info=True)
             battery_changed = False
-        if self._apply_profile_sync(profile) or battery_changed:
+            reload_scheduled = False
+        if (synced or battery_changed) and not reload_scheduled:
             _LOGGER.debug("Web-side profile change detected; refreshing results")
             await self.async_request_refresh()
 
@@ -2664,6 +2780,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             # Skipped during fast-poll (60 s while a server job runs) – nothing
             # profile-related changes on that timescale and it saves a GET per tick.
             profile_payload: dict | None = None
+            reload_scheduled = False
             if self.update_interval != _FAST_POLL:
                 try:
                     profile = await self.client.get_profile(self.token)
@@ -2682,6 +2799,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
                         self._take_battery_state(profile)
                     except Exception:  # pylint: disable=broad-except
                         _LOGGER.debug("Malformed battery stamp in main cycle; ignoring", exc_info=True)
+                    try:
+                        self._take_battery_params(profile)
+                        reload_scheduled = self._check_rule_switch()
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.debug("Malformed battery_params in main cycle; ignoring", exc_info=True)
+
+            if reload_scheduled and self.data is not None:
+                # Omladdningen bygger en ny koordinator som kör en egen cykel: ingen
+                # uppladdning eller resultathämtning på den här, som ändå rivs.
+                return self.data
 
             # Copies of this plant (server spec "copies of your plant" §8): the main cycle only,
             # not the fast poll - copies are rare and already counted once on the server.
@@ -2889,7 +3016,8 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         up within ~one minute; back to the slow rate once it's done."""
         job = results.get("job") or {}
         # Batteristämpeln hoistas in i results av samma skäl som applied_tariff ligger där:
-        # sensorernas value_fn ser BARA results, aldrig dataobjektet (attr_fn ser båda).
+        # sensorernas value_fn får WoltaData (results ligger i .results), men stämpeln
+        # läses ur results.
         results = {**results, KEY_BATTERY_STATUS: self._battery_status}
         data = WoltaData(
             results=results,
@@ -2902,6 +3030,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
             battery_status=self._battery_status,
             battery_detect=self._battery_detect,
             detect_min_days=self._detect_min_days,
+            battery_params=self._battery_params,
         )
         self.update_interval = _FAST_POLL if data.pending else _SLOW_POLL
         return data
@@ -4069,6 +4198,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         # under tre kontrollerade dygn), på samma sätt som energibalansen vilar på sitt golv.
         self._evaluate_battery_direction_issue(betyg)
         self._evaluate_energy_balance_issue(betyg)
+        if battery_params_active(self._battery_params):
+            # Regel 3 (egna värden): Woltas uppmätta värden är underlag, inte ett förslag att
+            # anta. Adopt-förslaget skickar dessutom reserve_pct=None, vilket vore fel här.
+            for key in (_ISSUE_CAPACITY, _ISSUE_POWER, _ISSUE_EFFICIENCY):
+                ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.config_entry.entry_id}")
+            self._evaluate_nameplate_power_issue()
+            return
+        self._set_measured_issue(
+            _ISSUE_NAMEPLATE_POWER, fire=False, translation_key=_ISSUE_NAMEPLATE_POWER,
+            placeholders={}, data={})
         if self._direction_reversed(betyg):
             # Adopt-förslagen är rekonstruerade ur samma felvända flöden. Före den
             # preliminära returen nedan: ett preliminärt men omkastat betyg kan ha kvar
@@ -4084,6 +4223,16 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         self._evaluate_capacity_issue(betyg)
         self._evaluate_power_issue(betyg)
         self._evaluate_efficiency_issue(betyg)
+
+    def _evaluate_nameplate_power_issue(self) -> None:
+        """Under regel 3 saknas märkeffekten (nameplate_kw) hos servern: be om den."""
+        self._set_measured_issue(
+            _ISSUE_NAMEPLATE_POWER,
+            # Inte medan battery_needs_input fyrar: två reparationer ska inte be om samma värde.
+            fire=self._nameplate_kw is None
+            and not (self._battery_status == BATTERY_STATUS_NEEDS_INPUT and not self._view_only),
+            translation_key=_ISSUE_NAMEPLATE_POWER,
+            placeholders={}, data={})
 
     def _evaluate_soc_required_issue(self, results: dict) -> None:
         """Require a state-of-charge sensor, or the "no SoC sensor" answer (spec 4.2).
@@ -4545,6 +4694,10 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         oe = betyg.get("observed_eff") if isinstance(betyg, dict) else None
         configured = self.config_entry.data.get(CONF_EFF)
         measured = float(oe["eff"]) if oe and oe.get("eff") else None
+        # basis "full_to_full" is a balance between two full states on the battery side,
+        # capped at 1.00: a different measurement frame than the round-trip the grade uses,
+        # so it is never offered for adoption (wolta.se refuses it too). An open repair goes.
+        adoptable = bool(oe) and oe.get("basis") != "full_to_full"
         # observed_eff = Σdischarged/Σcharged over all history. Spurious sensor jumps inflate the
         # charged sum → the ratio is biased LOW (a plausible-but-wrong figure like 0.76 for a real
         # ~0.90 round-trip). There is no clean physical floor that separates a genuine low AC
@@ -4553,6 +4706,7 @@ class WoltaCoordinator(DataUpdateCoordinator[WoltaData]):
         ignored = bool(self.config_entry.data.get(CONF_EFFICIENCY_ISSUE_IGNORED))
         fire = (
             measured is not None
+            and adoptable
             and configured
             and oe.get("n_days", 0) >= _CAP_MATURE_DAYS
             # A home-battery round-trip can't realistically reach ~1.0; a measured value that

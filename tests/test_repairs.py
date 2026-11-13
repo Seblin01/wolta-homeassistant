@@ -13,6 +13,9 @@ from custom_components.wolta.const import (
 )
 from custom_components.wolta.repairs import (
     MeasuredCapacityRepairFlow,
+    MeasuredEfficiencyRepairFlow,
+    MeasuredPowerRepairFlow,
+    NameplatePowerRepairFlow,
     async_create_fix_flow,
 )
 
@@ -1325,3 +1328,87 @@ async def test_cs_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
     release.set()
     await hass.async_block_till_done()
     assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_nameplate_power_repair_patches(hass: HomeAssistant):
+    """Fix-flödet PATCHar märkeffekten och raderar ärendet."""
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import DOMAIN
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    ir.async_create_issue(
+        hass, DOMAIN, "nameplate_power_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key="nameplate_power")
+    hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+    flow = await async_create_fix_flow(
+        hass, "nameplate_power_e1", {"entry_id": "e1"})
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] == "form"
+    result = await flow.async_step_init({"nameplate_kw": 5.0})
+    assert result["type"] == "create_entry"
+    coordinator.client.patch_profile.assert_awaited_once_with("tok", nameplate_kw=5.0)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "nameplate_power_e1") is None
+
+
+@pytest.mark.asyncio
+async def test_nameplate_flow_does_not_wait_for_the_refresh(hass: HomeAssistant):
+    """The dialog returns while the profile refresh is still running."""
+    import asyncio
+
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    flow = NameplatePowerRepairFlow(entry)
+    flow.hass = hass
+    release = asyncio.Event()
+    finished = []
+
+    async def _slow_refresh():
+        await release.wait()
+        finished.append(True)
+
+    coordinator.async_request_refresh = _slow_refresh
+    # wait_for: a flow that awaits the refresh fails here instead of hanging the run.
+    result = await asyncio.wait_for(flow.async_step_init({"nameplate_kw": 5.0}), 2)
+    assert result["type"] == "create_entry"
+    assert finished == []
+    release.set()
+    await hass.async_block_till_done()
+    assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_nameplate_flow_sets_the_value_on_the_coordinator(hass: HomeAssistant):
+    """After the PATCH the coordinator learns the value at once (no profile fetch needed)."""
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    flow = NameplatePowerRepairFlow(entry)
+    flow.hass = hass
+    await flow.async_step_init({"nameplate_kw": 5.0})
+    coordinator.set_nameplate_kw.assert_called_once_with(5.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_cls,args,prefix", [
+    (MeasuredCapacityRepairFlow, (11.0,), "measured_capacity"),
+    (MeasuredPowerRepairFlow, (3.0,), "measured_power"),
+    (MeasuredEfficiencyRepairFlow, (0.8,), "measured_efficiency"),
+])
+async def test_adopt_repair_aborts_under_own_values(hass: HomeAssistant, flow_cls, args, prefix):
+    """Rule 3: an open adopt repair must not PATCH; it is removed and the flow aborts."""
+    from homeassistant.helpers import issue_registry as ir
+    from custom_components.wolta.const import DOMAIN
+    entry, coordinator = _entry_with_coordinator(hass, battery_kwh=10.0, reserve=None)
+    coordinator.data.battery_params = {"active": True}
+    ir.async_create_issue(
+        hass, DOMAIN, f"{prefix}_e1", is_fixable=True,
+        severity=ir.IssueSeverity.WARNING, translation_key=prefix)
+    flow = flow_cls(entry, *args)
+    flow.hass = hass
+    hass.config_entries.async_update_entry = MagicMock()
+    step = getattr(flow, "async_step_set_power" if prefix == "measured_power"
+                   else "async_step_confirm")
+    user_input = {"battery_kw": 3.0} if prefix == "measured_power" else {}
+    result = await step(user_input)
+    assert result["type"] == "abort"
+    assert result["reason"] == "own_values_active"
+    coordinator.client.patch_profile.assert_not_awaited()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"{prefix}_e1") is None

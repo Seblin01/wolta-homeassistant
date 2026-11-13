@@ -1115,3 +1115,49 @@ def test_translations_have_prices_incl_vat(path: Path) -> None:
     assert "\u2014" not in err and "\u2013" not in err
     for text in (tariffs["data"]["prices_incl_vat"], tariffs["data_description"]["prices_incl_vat"]):
         assert "\u2014" not in text and "\u2013" not in text
+
+
+_OWN_NOTE = {
+    "sv": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, "
+          "inte jämförelsen.",
+    "en": "Leave empty and Wolta uses the measured value. Your values only affect your own grade, "
+          "not the comparison.",
+}
+_OWN_CAPACITY_NOTE = {
+    "sv": "Ange kapaciteten efter reserven, alltså det batteriet faktiskt kan använda.",
+    "en": "Enter the capacity after the reserve, that is, what the battery can actually use.",
+}
+
+
+@pytest.mark.parametrize("lang", ["sv", "en"])
+def test_own_values_field_texts(lang: str) -> None:
+    sec = _load(_TRANSLATIONS / f"{lang}.json")["options"]["step"]["settings"]["sections"][
+        "own_values"]
+    assert "description" not in sec
+    assert sec["name"] == {"sv": "Egna värden (valfritt)",
+                           "en": "Your own values (optional)"}[lang]
+    dd = sec["data_description"]
+    assert dd["own_power_kw"] == _OWN_NOTE[lang]
+    assert dd["own_eff_pct"] == _OWN_NOTE[lang]
+    assert dd["own_capacity_kwh"] == f"{_OWN_NOTE[lang]} {_OWN_CAPACITY_NOTE[lang]}"
+    if lang == "sv":
+        assert "jämförelsen" in dd["own_reserve_pct"]
+        assert "inte" not in dd["own_reserve_pct"]
+    else:
+        assert "both your grade and the comparison" in dd["own_reserve_pct"]
+    assert set(sec["data"]) == {"own_capacity_kwh", "own_power_kw", "own_eff_pct",
+                                "own_reserve_pct"}
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_confirm_clear_has_its_own_abort(path: Path) -> None:
+    """A confirm step with nothing pending is not a connection problem."""
+    assert _load(path)["options"]["abort"]["clear_expired"]
+
+
+@pytest.mark.parametrize("path", [_STRINGS, *_translation_files()], ids=lambda p: p.name)
+def test_own_not_saved_step_has_texts(path: Path) -> None:
+    """The step that says an own value equal to Wolta's was not saved."""
+    step = _load(path)["options"]["step"]["own_not_saved"]
+    assert step["title"]
+    assert step["description"] == "{rows}"

@@ -50,6 +50,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -78,6 +79,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -100,6 +102,7 @@
           }
         },
         "abort": {
+          "own_values_active": "Värdena hanteras nu som egna värden under Konfigurera, så det här förslaget har tagits bort.",
           "entry_not_found": "Wolta-integrationen som ärendet gällde har tagits bort."
         }
       }
@@ -343,6 +346,27 @@
     "battery_direction_refused": {
       "title": "Wolta: laddning och urladdning vändes inte",
       "description": "Du ändrade batteriets riktning, men batteriets laddningsnivå visar att den lagrade riktningen stämmer: den stämde {ok_days} dygn och var omkastad {reversed_days}, per {as_of}. Wolta stoppade därför ändringen, och inställningen stämmer nu med den lagrade historiken igen. Det som redan hunnit bytas ligger kvar. Vet du att sensorn för laddningsnivå är fel kan du göra ändringen ändå under Konfigurera → Batteriets riktning."
+    },
+    "nameplate_power": {
+      "title": "Wolta behöver ditt batteris märkeffekt",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Batteriets märkeffekt",
+            "description": "Wolta saknar batteriets märkeffekt, den högsta laddnings- och urladdningseffekt som står på typskylten. Ange den i kW.",
+            "data": {
+              "nameplate_kw": "Märkeffekt (kW)"
+            },
+            "data_description": {
+              "nameplate_kw": "Effekten som tillverkaren anger för batteriet eller dess växelriktare."
+            }
+          }
+        },
+        "abort": {
+          "failed": "Svaret kunde inte sparas hos Wolta just nu. Försök igen senare.",
+          "entry_not_found": "Wolta-integrationen som den här reparationen hörde till har tagits bort."
+        }
+      }
     }
   },
   "config": {
@@ -548,9 +572,24 @@
               "battery_kwh": "Användbar kapacitet — hur många kWh batteriet faktiskt levererar vid en full urladdning, **mätt med batteriets egna sensorer** – lämna tomt medan Wolta mäter. Det är mindre än märkt kapacitet. Mäter batterisensorerna på växelströmssidan är det också mindre än energin din batteri-app visar vid 100 % (det är DC-/cellvärdet), eftersom växelriktaren tappar energi när den gör om till och från batteriet. Betyget jämför dig med en perfekt styrning på DIN hårdvara, så använd det användbara värdet — inte märkt — så jämförelsen blir rättvis. Batterier med reserv/SoC-golv (t.ex. Emaldo) levererar ännu mindre. Med några månaders historik mäter Wolta detta åt dig och kan föreslå värdet via en reparation.",
               "nameplate_kwh": "Tillverkarens märkta kapacitet (t.ex. sonnen 10p/22 = 22 kWh märkt / 20 kWh användbar). Används av utöka-kalkylen på wolta.se så att priser per kWh (som anges per märkt kWh) jämförs rättvist mot vad batteriet faktiskt levererar. Lämna tomt om ditt batteri marknadsförs med användbar kapacitet (t.ex. Tesla Powerwall).",
               "battery_kw": "Maximal ladd-/urladdningseffekt i kW – lämna tomt medan Wolta mäter.",
-              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Modellen räknar på den levererbara effekten ovan; märkvärdet låter wolta.se förklara skillnaden när uppmätt effekt är lägre (t.ex. växelriktarförluster, derating). Lämna tomt om ditt batteri marknadsförs med levererbar effekt.",
+              "nameplate_kw": "Tillverkarens märkta effekt (t.ex. 8 kW). Wolta använder den för att förklara en lägre uppmätt effekt, och som batteriets effekt när inget har mätts.",
               "eff": "Verkningsgrad tur och retur (0,5–1,0) där batterisensorerna mäter: på en hybridväxelriktare ofta batteriets likströmssida (DC), på ett AC-kopplat batteri växelströmssidan. Förifyllt med värdet som är sparat hos Wolta. Ändrade anläggningsvärden räknar om betyget server-side.",
               "reserve_pct": "Andelen av användbar kapacitet som din styrning aldrig laddar ur under (t.ex. backup-reserv). Betygsbänken spelar då med samma fönster som du. Ange användbar kapacitet ovan – reserven dras av här, dra inte av den två gånger. Rensa fältet för att ta bort reserven."
+            }
+          },
+          "own_values": {
+            "name": "Egna värden (valfritt)",
+            "data": {
+              "own_capacity_kwh": "Egen kapacitet (kWh)",
+              "own_power_kw": "Egen effekt (kW)",
+              "own_eff_pct": "Egen verkningsgrad (%)",
+              "own_reserve_pct": "Egen reserv (%)"
+            },
+            "data_description": {
+              "own_capacity_kwh": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen. Ange kapaciteten efter reserven, alltså det batteriet faktiskt kan använda.",
+              "own_power_kw": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen.",
+              "own_eff_pct": "Lämna tomt så använder Wolta det uppmätta. Dina värden påverkar bara ditt eget betyg, inte jämförelsen.",
+              "own_reserve_pct": "Lämna tomt så använder Wolta den uppmätta reserven. Din reserv gäller både ditt betyg och jämförelsen."
             }
           },
           "economy": {
@@ -641,6 +680,14 @@
         "data": {
           "zone": "Elområde"
         }
+      },
+      "confirm_clear": {
+        "title": "Ta bort dina egna värden?",
+        "description": "{rows}"
+      },
+      "own_not_saved": {
+        "title": "Inte sparat som eget värde",
+        "description": "{rows}"
       }
     },
     "error": {
@@ -668,7 +715,8 @@
       "direction_changed": "Batteriets riktning ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
       "direction_period_changed": "Den lagrade perioden ändrades medan dialogen var öppen. Öppna Batteriets riktning igen.",
       "results_not_loaded": "Wolta har inte hämtat ditt betyg sedan Home Assistant startade. Försök igen om några minuter.",
-      "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter."
+      "direction_period_unknown": "Wolta har ännu inte läst vilken period den har data för. Försök igen om några minuter.",
+      "clear_expired": "Det finns inget kvar att bekräfta. Öppna Inställningar igen."
     }
   },
   "selector": {
@@ -702,10 +750,35 @@
         }
       },
       "optimeringsbetyg": {
-        "name": "Optimeringsbetyg"
+        "name": "Optimeringsbetyg",
+        "state_attributes": {
+          "basis": {
+            "name": "Betygets grund"
+          },
+          "on_own_values": {
+            "name": "Räknat på egna värden"
+          },
+          "in_comparison": {
+            "name": "Ingår i jämförelsen"
+          },
+          "comparison_reasons": {
+            "name": "Skäl"
+          },
+          "measured_score": {
+            "name": "Betyg med Woltas uppmätta värden"
+          }
+        }
       },
       "jamforelsebetyg": {
-        "name": "Jämförelsebetyg"
+        "name": "Jämförelsebetyg",
+        "state_attributes": {
+          "in_comparison": {
+            "name": "Ingår i jämförelsen"
+          },
+          "comparison_reasons": {
+            "name": "Skäl"
+          }
+        }
       },
       "batterivarde_ar": {
         "name": "Batterivärde per år"
@@ -742,6 +815,41 @@
       },
       "sale_price_with_forecast": {
         "name": "Försäljningspris med prognos"
+      },
+      "battery_capacity": {
+        "name": "Batterikapacitet",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          },
+          "measured_gross_kwh": {
+            "name": "Uppmätt kapacitet före reserv"
+          }
+        }
+      },
+      "battery_power": {
+        "name": "Batterieffekt",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
+      },
+      "battery_efficiency": {
+        "name": "Verkningsgrad",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
+      },
+      "battery_reserve": {
+        "name": "Reserv",
+        "state_attributes": {
+          "measured_value": {
+            "name": "Woltas uppmätta värde"
+          }
+        }
       }
     },
     "button": {

@@ -19,6 +19,14 @@ CONF_BATTERY_KW = "battery_kw"
 # Backend spec 2026-07-15: shown as a note on the grade ("we measured X kW usable").
 CONF_NAMEPLATE_KW = "nameplate_kw"
 CONF_EFF = "eff"
+# Egna batterivärden (spec 2026-11-11): formulärfälten och sektionen i alternativen.
+# CONF_BATTERY_PARAMS_ACTIVE speglar serverns battery_params.active (regel 3) i entry.data.
+CONF_OWN_CAPACITY_KWH = "own_capacity_kwh"
+CONF_OWN_POWER_KW = "own_power_kw"
+CONF_OWN_EFF_PCT = "own_eff_pct"
+CONF_OWN_RESERVE_PCT = "own_reserve_pct"
+SECTION_OWN_VALUES = "own_values"
+CONF_BATTERY_PARAMS_ACTIVE = "battery_params_active"
 # Control system driving the battery (audit finding 2026-08-24: every plant onboarded
 # through this integration became 'unknown' in the corpus statistics because the field
 # could never be set). Mandatory in the plant step since v0.29.0, mirroring the web
